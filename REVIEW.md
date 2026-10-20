@@ -20,11 +20,11 @@ The history below describes the original tree. At HEAD the layout is flat and th
 | Before | After |
 |---|---|
 | `evals/{container,scripts,src,tsconfig.json,.env.example,AGENTS.md}` | same names at the repository root |
-| `evals/cases/<case-id>/` (including `runs/`) | `eval-cases/<skill>/<case-id>/` |
+| `evals/cases/<case-id>/` (including `runs/`) | `eval-cases/<case-id>/` |
 | `skills/arbitrum-docs`, `skills/arbitrum-network` | an external repository, <https://github.com/xdaniortega/arbitrum-skills-evals> (`skills/...`), passed to `--skill` by path |
 | `skills/arbitrum-onchain` (test path fixture) | `src/test-fixtures/skills/plain-skill/` (synthetic) |
 
-Commits: pure `git mv` (renames show as `R100`; the tree is broken at that commit), path fixes, guest runtime relock, skills removal, docs. Sealed run evidence moved byte-for-byte. The relock changes the image digest, so new receipts carry a different image digest from the September runs.
+Commits: pure `git mv` (renames show as `R100`; the tree is broken at that commit), path fixes, guest runtime relock, skills removal, docs. Sealed run evidence moved byte-for-byte. A follow-up commit dropped the `<skill>` level (`eval-cases/arbitrum-docs/network-config-01/` to `eval-cases/network-config-01/`), again with `git mv` only; the sealed runs are byte-identical and verify unchanged. The relock changes the image digest, so new receipts carry a different image digest from the September runs.
 
 ## 1. Foundation (`089b45f`)
 Paired-arm design (baseline vs treatment), core types and experiment definition, runner, artifact store and sealing, sandboxes (fake and Apple container), the Pi harness, and the secret scan.
@@ -54,7 +54,7 @@ Mean-of-pairs publication into `skills/*/EVALS.md` and committed evidence for tw
 What to check:
 - `evals/src/artifacts/publish.ts`: fail-closed destination checks, bounded marker block.
 - `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md`.
-- Evidence runs `20260924T151721Z-bfb34c20` and `20260924T170734Z-b115674e`: `pnpm eval:report --receipt eval-cases/arbitrum-docs/network-config-01/runs/<run>/receipt.json`.
+- Evidence runs `20260924T151721Z-bfb34c20` and `20260924T170734Z-b115674e`: `pnpm eval:report --receipt eval-cases/network-config-01/runs/<run>/receipt.json`.
 
 ## Final sync and scaffolding
 - `package.json`, `vitest.config.ts`, CI, `.gitignore`.

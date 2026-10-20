@@ -5,7 +5,7 @@
 | Case ID | `network-config-01` |
 | Case version | `10` |
 | Scoring standard | Rubric v0.2 (`rubric.json`) |
-| Skill folder | `arbitrum-docs` (this case has also been published against `arbitrum-network`) |
+| Written for | `arbitrum-docs` (also run against `arbitrum-network`; the skill is chosen with `--skill` at run time) |
 
 ## 1. Why this case exists
 
@@ -78,11 +78,11 @@ Swap the `--skill` path to `../arbitrum-skills-evals/skills/arbitrum-network` to
 
 ## 10. Results
 
-- Published reports sit next to each skill in arbitrum-skills-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (https://github.com/xdaniortega/arbitrum-skills-evals).
+- Published reports sit next to each skill in arbitrum-skills-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (https://github.com/xdaniortega/arbitrum-skills-evals). They are reduced exports (pillar table and outcome checks); `pnpm eval:report -- --receipt <receipt> --checks` prints the full tables.
 - Sealed evidence kept in this folder:
   - `runs/20260924T151721Z-bfb34c20`: `arbitrum-docs`, 3 pairs.
   - `runs/20260924T170734Z-b115674e`: `arbitrum-network`, 3 pairs.
-- Verify a run with `pnpm eval:report -- --receipt eval-cases/arbitrum-docs/network-config-01/runs/<run-id>/receipt.json`.
+- Verify a run with `pnpm eval:report -- --receipt eval-cases/network-config-01/runs/<run-id>/receipt.json`.
 
 Both runs were recorded before the repository layout changed, so their frozen skill path reads `skills/<name>`. Publish them with `--skill-dir ../arbitrum-skills-evals/skills/<name>`. Never edit files under `runs/`: that breaks verification.
 

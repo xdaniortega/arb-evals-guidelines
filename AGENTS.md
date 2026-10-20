@@ -27,8 +27,8 @@ It is **not** part of the published CLI, MCP server or package, and it is not a 
 | `scripts/` | Thin argument parsing and composition only, with no policy. |
 | `container/` | Guest build context, image lock, egress policy and guest supervisor. |
 | `src/test-fixtures/` | Synthetic skills used only by tests. They are not real skills. |
-| `eval-cases/<skill>/<case-id>/` | Case data: `case.json`, `rubric.json`, `README.md`, `fixture/`, `oracle.json`, `validator.ts`, and tests. Case ids are unique across skills. |
-| `eval-cases/<skill>/<case-id>/runs/` | Sealed evidence. Its `views/` folder is git-ignored; whether the runs themselves are committed is open item A7. |
+| `eval-cases/<case-id>/` | Case data: `case.json`, `rubric.json`, `README.md`, `fixture/`, `oracle.json`, `validator.ts`, and tests. The folder name equals the case id. A case is not tied to a skill: `--skill` chooses the treatment skill at run time and the run records it in `inputs/skill-snapshot.json` (`sourcePath`). |
+| `eval-cases/<case-id>/runs/` | Sealed evidence. Its `views/` folder is git-ignored; whether the runs themselves are committed is open item A7. |
 | external skills checkout | Not in this repo (<https://github.com/xdaniortega/arbitrum-skills-evals>, branch `feat/evals-guidelines`; clone it anywhere and pass the skill directory to `--skill`). Read-only input; only `EVALS.md` is written there, by `eval:publish --skill-dir`. |
 | `.state/` | Ignored exact-ID journals. |
 
@@ -46,7 +46,7 @@ pnpm eval:publish --receipt <receipt.json> [--pair <pair-id|rNNN>] [--checks] [-
 pnpm eval:recover --run <exact-run-id>
 ```
 
-Never edit files under `eval-cases/*/*/runs/`: they are sealed. Tests must not depend on an external skills checkout; use `src/test-fixtures/skills/`.
+Never edit files under `eval-cases/*/runs/`: they are sealed. Tests must not depend on an external skills checkout; use `src/test-fixtures/skills/`.
 
 Development checks: `pnpm typecheck:evals`, `pnpm test:evals`, `pnpm test:eval-cases`, `pnpm test:container`, `pnpm eval:validate`. After changing guest runtime sources, run `pnpm build:eval-guest`.
 
@@ -63,6 +63,7 @@ Development checks: `pnpm typecheck:evals`, `pnpm test:evals`, `pnpm test:eval-c
   - `--pair` publishes one pair.
   - Publication is refused if any rendered pair has an ungraded arm.
   - Means are rounded only when rendered: one decimal for accuracy and points, integers for tokens and durations.
+  - arbitrum-skills-evals keeps a reduced export. After publishing, the `### Accuracy` and `### Cost and latency` sections are removed by hand (README, "Exporting results to a skills repository"). Publishing into that file again restores them.
 - **Sessions:** Sessions are sanitized native Pi sessions. Reasoning is stripped by default and kept only with `--capture-reasoning`, in which case the session is private evidence. Views under `views/` are regenerable and sit outside the hash chain.
 
 ## Rules you must not break
@@ -85,7 +86,7 @@ Development checks: `pnpm typecheck:evals`, `pnpm test:evals`, `pnpm test:eval-c
 - **`docs/ARCHITECTURE.md` is owner-controlled.** Edit it only when the owner explicitly asks for a reconciliation. Repair implementation defects without weakening a guarantee. If a guarantee cannot be met, stop the dependent work and ask.
 - **`docs/open-items.md` §A (open questions) is not a backlog.** Do not decide rubric, scoring, badge, task-limit, variability or MCP questions on the owner's behalf. Items in §B (known unsolved issues) may be fixed when requested. §C is deferred, and §D is discarded, so never reintroduce `--from` reproduction, ablation or determinism guarantees.
 - Colocate `*.test.ts` with the code under test. Do not modify owner-authored case files to wire tests in.
-- A new case goes under `eval-cases/<skill>/<case-id>/` and needs no change to `core/`, harness, sandbox or provider code. A new provider, harness type, N-way variant, remote sandbox or LLM judge needs separate owner approval.
+- A new case goes under `eval-cases/<case-id>/` and needs no change to `core/`, harness, sandbox or provider code. A new provider, harness type, N-way variant, remote sandbox or LLM judge needs separate owner approval.
 - `docs/` and local planning files (`*plan.md`, `.crew/`) are git-ignored and local-only. Never force-add them.
 
 ## Current open items (summary)

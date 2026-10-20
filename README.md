@@ -62,7 +62,7 @@ The skill directory path (`../arbitrum-skills-evals/skills/arbitrum-docs` below)
 
 ### Step 3: Create the case folder
 
-Create `eval-cases/<skill>/<case-id>/`, for example `eval-cases/arbitrum-docs/network-config-01/`. The folder name must equal the case id, and case ids are unique across all skills. The `<skill>` folder names the skill the case was written for. It does not bind `--skill`.
+Create `eval-cases/<case-id>/`, for example `eval-cases/network-config-01/`. The folder name must equal the case id, and case ids are unique. A case is not tied to a skill: you choose the treatment skill with `--skill <path>` when you run it, and the run records that choice in its evidence. Note in the case README which skill the case was written for.
 
 ### Step 4: Write the case data
 
@@ -122,7 +122,7 @@ pnpm eval:publish -- --receipt "<receipt-path>" --checks \
   --skill-dir ../arbitrum-skills-evals/skills/arbitrum-docs
 ```
 
-This writes `EVALS.md` into that skill directory for the digest that was evaluated. Commit the change in your skills checkout on a new branch and push it:
+This writes the full `EVALS.md` block into that skill directory for the digest that was evaluated. Before committing, reduce it as described in [Exporting results to a skills repository](#exporting-results-to-a-skills-repository). Then commit the change in your skills checkout on a new branch and push it:
 
 ```bash
 git -C ../arbitrum-skills-evals switch -c evals/arbitrum-docs-network-config-01
@@ -152,7 +152,7 @@ Options for `pnpm eval`:
 | `--limit <key>=<value>` | Overrides one budget. Repeat the flag for several keys. Task budgets (`wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests`) take a positive integer, or `0` / `none` for unlimited. Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, `maxExportedFiles`, `maxExportedFileBytes`, `maxWorkspaceBytes`) stay finite. |
 
 
-The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](eval-cases/arbitrum-docs/network-config-01/case.json) and [starting configuration](eval-cases/arbitrum-docs/network-config-01/fixture/config.json) to understand the task before interpreting its score.
+The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](eval-cases/network-config-01/case.json) and [starting configuration](eval-cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
 
 ## 3. How scoring works
 
@@ -175,7 +175,7 @@ Accuracy is split into two parts:
 
 ## 4. Read the output
 
-A single-pair run prints the same sections, labels and values as the published `EVALS.md`, followed by an operational footer. Example (illustrative values):
+A single-pair run prints the same sections, labels and values as the `EVALS.md` block that `eval:publish` writes, followed by an operational footer. Example (illustrative values):
 
 ```text
 network configuration migration
@@ -215,7 +215,7 @@ Cost and latency:
 
 limits    per arm: time=300s, output tokens=unlimited, tool steps=unlimited, provider requests=unlimited
 elapsed   5m13s wall time
-receipt   eval-cases/arbitrum-docs/network-config-01/runs/20261002T101500Z-3f9a1c2d/receipt.json
+receipt   eval-cases/network-config-01/runs/20261002T101500Z-3f9a1c2d/receipt.json
 inspect   pnpm eval:inspect --receipt <receipt> --pair r001 --condition treatment --view session --export both
 publish   pnpm eval:publish --receipt <receipt> --checks
 ```
@@ -249,7 +249,7 @@ This prints two paths: a `.jsonl` file (Pi's native session, one JSON record per
 
 Repeat with `--condition baseline` to see the same task without the skill, and compare the two transcripts side by side.
 
-> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `eval-cases/<skill>/<case-id>/runs/<run-id>/` directory and is never uploaded anywhere by the runner. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
+> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `eval-cases/<case-id>/runs/<run-id>/` directory and is never uploaded anywhere by the runner. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
 >
 > The `--capture-reasoning` CLI flag exists so that model reasoning can be retained when we specifically want to analyze the model's reasoning; it is off by default because reasoning substantially increases session artifact size.
 
@@ -308,9 +308,39 @@ The publish command:
 - Keeps the receipt path and operational footer outside `EVALS.md`.
 - Ordinary `eval` and `eval:report` commands never modify `EVALS.md`.
 
-Evidence is stored in `eval-cases/<skill>/<case-id>/runs/<run-id>/`. The generated `views/` folder is git-ignored; whether the sealed run evidence itself is committed is still an open owner decision. A receipt and manifest record hashes of the retained files; `eval:report` and `eval:inspect` verify that chain before trusting the result, so editing a sealed file invalidates verification. Session exports (`views/*.jsonl`, `views/*.html`) are generated read-only views outside that chain and never change the sealed evidence.
+Evidence is stored in `eval-cases/<case-id>/runs/<run-id>/`. The generated `views/` folder is git-ignored; whether the sealed run evidence itself is committed is still an open owner decision. A receipt and manifest record hashes of the retained files; `eval:report` and `eval:inspect` verify that chain before trusting the result, so editing a sealed file invalidates verification. Session exports (`views/*.jsonl`, `views/*.html`) are generated read-only views outside that chain and never change the sealed evidence.
 
 If an interrupted run leaves containers or networks behind, clean up its recorded resources with `pnpm eval:recover -- --run <run-id>`.
+
+### Exporting results to a skills repository
+
+`eval:publish` always writes the full block: header, status, badge, pillar table, scenario, **Accuracy**, **Outcome checks** (with `--checks`) and **Cost and latency**. The copy committed to arbitrum-skills-evals is a reduced export: the `### Accuracy` and `### Cost and latency` sections are removed by hand and everything else stays. The full tables stay available here with `pnpm eval:report -- --receipt "<receipt-path>" --checks`.
+
+1. Publish with `--checks` into the skill directory of your skills checkout:
+
+   ```bash
+   SKILL_DIR=../arbitrum-skills-evals/skills/arbitrum-docs
+   pnpm eval:publish -- --receipt "<receipt-path>" --checks --skill-dir "$SKILL_DIR"
+   ```
+
+   To leave the checkout untouched until the export is ready, copy its `EVALS.md` into a scratch folder, publish there with `--skill-dir <scratch-folder>`, reduce it, and copy it back.
+
+2. Remove the two sections. The command edits only the text between the markers, and changes nothing if the sections are already gone:
+
+   ```bash
+   perl -0777 -pi -e 's{(<!-- AF-EVAL:BEGIN generated -->\n.*?\n<!-- AF-EVAL:END generated -->)}{my $s = $1; $s =~ s/^### Accuracy\n\n(?:\|[^\n]*\n)+\n//m; $s =~ s/^\n### Cost and latency\n\n(?:\|[^\n]*\n)+//m; $s}se' "$SKILL_DIR/EVALS.md"
+   ```
+
+   By hand: delete from the `### Accuracy` line through the blank line after its table, and from the blank line before `### Cost and latency` through the last row of its table. The block then ends with the `**Outcome total**` row, followed directly by `<!-- AF-EVAL:END generated -->`.
+
+3. Check before committing:
+
+   ```bash
+   grep -nE '^### (Accuracy|Cost and latency)$' "$SKILL_DIR/EVALS.md"   # prints nothing
+   git -C "$SKILL_DIR" diff -- EVALS.md                                  # only those lines removed
+   ```
+
+Keep both `AF-EVAL` markers, and keep every line outside them unchanged. Publishing into the same file again rewrites the whole block and brings the two tables back, so repeat step 2 after every publish.
 
 ## 6. Project layout
 
@@ -331,16 +361,15 @@ src/
 ├── artifacts/                       # Saved evidence, verification and report readers
 └── test-fixtures/skills/            # Synthetic skills used only by tests
 eval-cases/
-└── arbitrum-docs/                   # One folder per skill the cases were written for
-    └── network-config-01/           # Application configuration migration case
-        ├── README.md                # Full explanation of the case
-        ├── case.json                # Task prompt, output path and allowed tools
-        ├── fixture/                 # Starting workspace shared by both arms
-        ├── oracle.json              # Hidden expected answers and their sources
-        ├── rubric.json              # Scoring rubric v0.2
-        ├── validator.ts             # Deterministic checks, run in a separate container
-        ├── validator.test.ts        # Wrong-answer and accepted-variant tests
-        └── runs/                    # Sealed evidence created by runs (views/ is git-ignored)
+└── network-config-01/               # Application configuration migration case
+    ├── README.md                    # Full explanation of the case
+    ├── case.json                    # Task prompt, output path and allowed tools
+    ├── fixture/                     # Starting workspace shared by both arms
+    ├── oracle.json                  # Hidden expected answers and their sources
+    ├── rubric.json                  # Scoring rubric v0.2
+    ├── validator.ts                 # Deterministic checks, run in a separate container
+    ├── validator.test.ts            # Wrong-answer and accepted-variant tests
+    └── runs/                        # Sealed evidence created by runs (views/ is git-ignored)
 ```
 
 Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skills-evals](https://github.com/xdaniortega/arbitrum-skills-evals), for example [`skills/arbitrum-docs/EVALS.md`](https://github.com/xdaniortega/arbitrum-skills-evals/blob/feat/evals-guidelines/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
@@ -358,7 +387,7 @@ Each case README should answer these questions; the validator defines the actual
 - **Preservation** — what must remain unchanged and which constraint checks enforce it.
 - **Score endpoints** — the expected score and pass result for correct, unchanged, malformed and missing answers.
 
-See the [network-config-01 README](eval-cases/arbitrum-docs/network-config-01/README.md) for an example.
+See the [network-config-01 README](eval-cases/network-config-01/README.md) for an example.
 
 ## 8. How eval results reach the registry
 
@@ -366,7 +395,7 @@ See the [network-config-01 README](eval-cases/arbitrum-docs/network-config-01/RE
 
 ### Eval results linked to EVALS.md
 
-- Each skill's `EVALS.md` is the full report.
+- Each skill's `EVALS.md` in arbitrum-skills-evals is a reduced export of the published report: status, badge, pillar table and outcome checks. The full report comes from `pnpm eval:report` on the sealed evidence here.
 - The registry entry carries an `evals` summary that is generated from that report, not typed by hand. It holds:
   - the digest that was evaluated
   - the eval case and its version
