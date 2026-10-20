@@ -78,7 +78,7 @@ function tableRows(table: string): string[][] {
 
 /** Timing/outcome tests exercise Pi without depending on a live documentation service. */
 async function writeOfflineSkill(repoRoot: string): Promise<void> {
-  const skillDir = join(repoRoot, "skills", "arbitrum-docs");
+  const skillDir = join(repoRoot, "src", "test-fixtures", "skills", "mcp-skill");
   await mkdir(skillDir, { recursive: true });
   await writeFile(join(skillDir, "SKILL.md"), "---\nname: arbitrum-docs\ndescription: Synthetic skill for runner tests.\n---\nFollow the test task.\n");
 }
@@ -160,7 +160,7 @@ function extractReceiptPath(output: string): string {
 describe("Process-level automatic table and report contract", () => {
   it("prints one pair-results table without averages for one repetition, and report renders it byte-identically", () => {
     const { status, stdout, stderr } = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
     ]);
@@ -226,12 +226,12 @@ describe("Process-level automatic table and report contract", () => {
 
   it("keeps operational per-arm metadata opt-in with --details", () => {
     const normal = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
     ]);
     const detailed = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--details",
@@ -303,7 +303,7 @@ describe("Process-level automatic table and report contract", () => {
   it("emits lifecycle progress facts on stderr in order with arm identity, and quiet mode suppresses progress", () => {
     // 1. Normal run: captures progress on stderr
     const normal = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
     ]);
@@ -359,7 +359,7 @@ describe("Process-level automatic table and report contract", () => {
 
     // 2. Quiet mode: suppresses progress on stderr while keeping table on stdout
     const quiet = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--quiet",
@@ -396,7 +396,7 @@ describe("Process-level automatic table and report contract", () => {
 
   it("supports --format json with parseable stdout and --format markdown with identical values", () => {
     const jsonRes = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--format", "json",
@@ -430,7 +430,7 @@ describe("Process-level automatic table and report contract", () => {
       expect(mdRes.status).toBe(0);
       expect(mdRes.stdout).toContain("# EVALS.MD: network configuration migration");
       expect(mdRes.stdout).toContain(`Agent: fake · google/fake-model-0`);
-      expect(mdRes.stdout).toContain(`Skill: arbitrum-docs`);
+      expect(mdRes.stdout).toContain(`Skill: mcp-skill`);
       expect(mdRes.stdout).toContain(`Run: ${parsed.runId} · Pair r001`);
       expect(mdRes.stdout).toContain("Status: Completed; graded");
       expect(mdRes.stdout).toContain("| Pillar | Without this skill | With this skill | Change |");
@@ -497,7 +497,7 @@ describe("Process-level automatic table and report contract", () => {
         evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
-        skillPath: "skills/arbitrum-docs",
+        skillPath: "src/test-fixtures/skills/mcp-skill",
         mode: "fake",
         repetitions: 1,
         cliLimits: SAFE_DEFAULT_LIMITS,
@@ -716,7 +716,7 @@ describe("Process-level automatic table and report contract", () => {
 
     beforeAll(async () => {
       const runRes = runCommand(RUN_SCRIPT, [
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
         "--repetitions", "2",
@@ -771,7 +771,7 @@ describe("Process-level automatic table and report contract", () => {
       [
         "--experimental-strip-types",
         RUN_SCRIPT,
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
         "--format", "json",
@@ -801,7 +801,7 @@ describe("Process-level automatic table and report contract", () => {
 
   it("refuses numeric scores and exits nonzero when evidence is tampered with", () => {
     const runRes = runCommand(RUN_SCRIPT, [
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
     ]);
@@ -1153,7 +1153,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
         evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
-        skillPath: "skills/arbitrum-docs",
+        skillPath: "src/test-fixtures/skills/mcp-skill",
         mode: "fake",
         repetitions: 1,
         cliLimits: tightLimits,
@@ -1496,7 +1496,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
         evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
-        skillPath: "skills/arbitrum-docs",
+        skillPath: "src/test-fixtures/skills/mcp-skill",
         mode: "fake",
         repetitions: 1,
         cliLimits: SAFE_DEFAULT_LIMITS,
@@ -1525,7 +1525,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
         evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
-        skillPath: "skills/arbitrum-docs",
+        skillPath: "src/test-fixtures/skills/mcp-skill",
         mode: "fake",
         repetitions: 1,
         cliLimits: SAFE_DEFAULT_LIMITS,
@@ -1551,7 +1551,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
         evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
-        skillPath: "skills/arbitrum-docs",
+        skillPath: "src/test-fixtures/skills/mcp-skill",
         mode: "fake",
         repetitions: 1,
         cliLimits: SAFE_DEFAULT_LIMITS,

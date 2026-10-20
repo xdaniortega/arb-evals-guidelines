@@ -48,9 +48,14 @@ async function sealRun(script?: FakeHarnessScript, repetitions: number = 1): Pro
   const workDir = await mkdtemp(join(tmpdir(), "eval-publish-work-"));
   workDirs.push(workDir);
   const nonce = randomBytes(4).toString("hex");
+  // Recorded sourcePath stays `skills/arbitrum-docs`, copied from the synthetic fixture so
+  // the test never depends on the real skills repository.
+  const skillRepo = await mkdtemp(join(tmpdir(), "eval-publish-skill-"));
+  tempRoots.push(skillRepo);
+  await cp(join(repoRoot, "src", "test-fixtures", "skills", "mcp-skill"), join(skillRepo, "skills", "arbitrum-docs"), { recursive: true });
   return runPairedEvaluation({
     evalsRoot,
-    repoRoot,
+    repoRoot: skillRepo,
     caseSelector: "network-config-01",
     skillPath: "skills/arbitrum-docs",
     mode: "fake",
@@ -324,7 +329,6 @@ describe("default repo root and pure target resolver (Blocker 1)", () => {
     expect(root).toBe(repoRoot);
     expect(existsSync(join(root, "package.json"))).toBe(true);
     expect(existsSync(join(root, "eval-cases"))).toBe(true);
-    expect(existsSync(join(root, "skills"))).toBe(true);
   });
 
   it("pure resolver resolvePublicationTarget targets <repo>/skills/<recorded-skill>/EVALS.md without --repo-root and without mutating", () => {

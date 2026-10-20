@@ -54,7 +54,7 @@ async function sealRun(): Promise<{ result: RunResult; stateDir: string }> {
     evalsRoot,
     repoRoot,
     caseSelector: "network-config-01",
-    skillPath: "skills/arbitrum-docs",
+    skillPath: "src/test-fixtures/skills/mcp-skill",
     mode: "fake",
     repetitions: 1,
     cliLimits: {},

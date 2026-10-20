@@ -130,7 +130,7 @@ async function runFake(
     evalsRoot,
     repoRoot,
     caseSelector: CASE,
-    skillPath: "skills/arbitrum-docs",
+    skillPath: "src/test-fixtures/skills/mcp-skill",
     mode: "fake",
     repetitions: 1,
     cliLimits: {},
@@ -208,14 +208,14 @@ async function sealedFiles(runDir: string): Promise<Array<{ path: string; conten
 describe("skill presence is the only difference", () => {
   it("runs alternate skills against the same task and records the complete selected setup", async () => {
     const docs = await runFake();
-    const network = await runFake({ skillPath: "skills/arbitrum-onchain" });
+    const network = await runFake({ skillPath: "src/test-fixtures/skills/plain-skill" });
     const docsCase = await readRecord(docs.runDir, "inputs/case.json");
     const networkCase = await readRecord(network.runDir, "inputs/case.json");
     expect(networkCase).toEqual(docsCase);
     const docsSkill = await readRecord(docs.runDir, "inputs/skill-snapshot.json");
     const networkSkill = await readRecord(network.runDir, "inputs/skill-snapshot.json");
-    expect(docsSkill.sourcePath).toBe("skills/arbitrum-docs");
-    expect(networkSkill.sourcePath).toBe("skills/arbitrum-onchain");
+    expect(docsSkill.sourcePath).toBe("src/test-fixtures/skills/mcp-skill");
+    expect(networkSkill.sourcePath).toBe("src/test-fixtures/skills/plain-skill");
     expect(networkSkill.treeSha256).not.toBe(docsSkill.treeSha256);
     expect((networkSkill.files as { path: string }[]).some((file) => file.path === "SKILL.md")).toBe(true);
     for (const { result, runDir } of [docs, network]) {

@@ -52,8 +52,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
   it("requires one explicit treatment skill and rejects duplicate or conflicting setup selectors", () => {
     for (const args of [
       ["--case", "network-config-01", "--mode", "fake"],
-      ["--case", "network-config-01", "--mode", "fake", "--skill", "skills/arbitrum-docs", "--skill", "skills/arbitrum-docs"],
-      ["--case", "network-config-01", "--mode", "fake", "--suite", "old", "--skill", "skills/arbitrum-docs"],
+      ["--case", "network-config-01", "--mode", "fake", "--skill", "src/test-fixtures/skills/mcp-skill", "--skill", "src/test-fixtures/skills/mcp-skill"],
+      ["--case", "network-config-01", "--mode", "fake", "--suite", "old", "--skill", "src/test-fixtures/skills/mcp-skill"],
     ]) {
       const result = runCli(args);
       expect(result.status).toBe(1);
@@ -75,7 +75,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("rejects an invalid --harness value", () => {
     const { status, stderr } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--harness", "unknown-harness",
@@ -85,7 +85,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
   });
 
   it("resolves the simplified measured command identically to compatible explicit flags", () => {
-    const command = ["--case", "network-config-01", "--skill", "skills/arbitrum-docs", "--model", "gemini-3.8-flash"];
+    const command = ["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", "--model", "gemini-3.8-flash"];
     const simplified = parseArgs(command);
     const explicit = parseArgs([...command, "--mode", "measured", "--harness", "pi", "--sandbox", "apple-container", "--validator-runner", "isolated-container", "--provider", "google", "--thinking", "low"]);
     expect(simplified).toMatchObject({ mode: "measured", harnessId: "pi", sandboxId: "apple-container", validatorRunnerId: "isolated-container", captureReasoning: false });
@@ -100,7 +100,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("refuses --mode measured with explicit --harness fake", () => {
     const { status, stderr } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "measured",
       "--harness", "fake",
@@ -113,7 +113,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("refuses --mode measured with --harness pi and --sandbox fake", () => {
     const { status, stderr } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "measured",
       "--harness", "pi",
@@ -125,7 +125,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("refuses --mode measured with --harness pi, --sandbox apple-container, and explicit in-process validator", () => {
     const { status, stderr } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "measured",
       "--harness", "pi",
@@ -142,7 +142,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
     const { status, stderr } = runCli(
       [
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "measured",
         "--harness", "pi",
@@ -160,7 +160,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
     const { status, stderr } = runCli(
       [
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
         "--repetitions", "-5",
@@ -176,7 +176,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
     const { status, stderr } = runCli(
       [
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "measured",
         "--harness", "pi",
@@ -194,7 +194,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
     const { status, stderr } = runCli(
       [
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "measured",
         "--harness", "pi",
@@ -215,7 +215,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
       [["--model", "gemini-3.8-flash", "--provider", "anthropic"], "Anthropic catalog"],
       [["--model", "gemini-3.8-flash", "--thinking", "minimal"], "target.thinking"],
     ] as const) {
-      const result = runCli(["--case", "network-config-01", "--skill", "skills/arbitrum-docs", ...flags]);
+      const result = runCli(["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", ...flags]);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(expected);
       expect(result.stderr).not.toContain("credential");
@@ -224,8 +224,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("resolves actual case and skill inputs before loading credentials", () => {
     for (const [caseId, skillPath, expected] of [
-      ["absent-case", "skills/arbitrum-docs", "--case"],
-      ["network-config-01", "skills/absent-skill", "--skill"],
+      ["absent-case", "src/test-fixtures/skills/mcp-skill", "--case"],
+      ["network-config-01", "src/test-fixtures/skills/absent-skill", "--skill"],
     ]) {
       const result = runCli(["--case", caseId!, "--skill", skillPath!, "--model", "gemini-3.8-flash"]);
       expect(result.status).toBe(1);
@@ -235,7 +235,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
   });
 
   it("refuses unguarded Pi in fake mode before credentials or provider transport", () => {
-    const result = runCli(["--case", "network-config-01", "--skill", "skills/arbitrum-docs", "--mode", "fake", "--harness", "pi", "--model", "gemini-3.8-flash"]);
+    const result = runCli(["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", "--mode", "fake", "--harness", "pi", "--model", "gemini-3.8-flash"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("guarded scripted test composition");
     expect(result.stderr).not.toContain("credential-missing");
@@ -243,7 +243,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("treats an unlimited (none) per-arm wall clock as null in the frozen policy, arming no finite arm cap", () => {
     const { status, stdout } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--limit", "wallClockMs=none",
@@ -258,7 +258,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("honors an explicit longer finite per-arm wall clock above the former fixed maximum", () => {
     const { status, stdout } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--limit", "wallClockMs=600001",
@@ -272,7 +272,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("accepts long finite wallClockMs and explicit unlimited time via CLI", () => {
     const overflow = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--limit", "wallClockMs=2147483648",
@@ -280,7 +280,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(overflow.status, overflow.stderr).toBe(0);
 
     const unlimited = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--limit", "wallClockMs=0",
@@ -294,7 +294,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("preserves explicit test-double defaults for --mode fake without requiring provider/model", () => {
     const { status, stdout } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--format", "json",
@@ -318,7 +318,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("normalizes none/0 to null for every task budget and honors finite opt-ins via CLI", () => {
     const { status, stdout } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--limit", "maxOutputTokens=none",
@@ -340,7 +340,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     "rejects a fractional/negative --limit %s",
     (key) => {
       const { status, stderr } = runCli([
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
         "--limit", `${key}=1.5`,
@@ -354,7 +354,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     "refuses to disable resource bound %s via none",
     (key) => {
       const { status, stderr } = runCli([
-        "--skill", "skills/arbitrum-docs",
+        "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
         "--limit", `${key}=none`,
@@ -366,7 +366,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it("preserves fake mode compatibility when --thinking is passed without provider/model", () => {
     const { status, stdout } = runCli([
-      "--skill", "skills/arbitrum-docs",
+      "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
       "--thinking", "high",

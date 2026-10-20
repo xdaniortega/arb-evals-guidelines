@@ -1,7 +1,8 @@
+# Test fixture only: same MCP shape as a documentation skill.
 interface:
-  display_name: "Arbitrum Docs"
-  short_description: "Verify answers against official Arbitrum docs"
-  default_prompt: "Use $arbitrum-docs to answer this question from official Arbitrum documentation."
+  display_name: "MCP Skill"
+  short_description: "Synthetic test fixture"
+  default_prompt: "Use $mcp-skill to answer this question."
 
 dependencies:
   tools:

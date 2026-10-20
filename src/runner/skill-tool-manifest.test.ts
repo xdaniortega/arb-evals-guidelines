@@ -12,9 +12,9 @@ import { parseSkillToolBundle, resolveSkillToolBundle, validateSkillToolBundle }
 
 describe("skill-tool-manifest", () => {
   const repoRoot = process.cwd();
-  const realManifestRelPath = join("skills", "arbitrum-docs", SKILL_TOOL_MANIFEST_PATH);
+  const realManifestRelPath = join("src", "test-fixtures", "skills", "mcp-skill", SKILL_TOOL_MANIFEST_PATH);
 
-  it("parses the real skills/arbitrum-docs/agents/openai.yaml to the exact expected bundle", async () => {
+  it("parses the real src/test-fixtures/skills/mcp-skill/agents/openai.yaml to the exact expected bundle", async () => {
     const rawBytes = await readFile(join(repoRoot, realManifestRelPath));
     const rawText = rawBytes.toString("utf8");
     const sourceSha256 = sha256Hex(rawBytes);
@@ -36,7 +36,7 @@ describe("skill-tool-manifest", () => {
   });
 
   it("resolveSkillToolBundle reads from frozen snapshot directory", async () => {
-    const snapshotDir = join(repoRoot, "skills", "arbitrum-docs");
+    const snapshotDir = join(repoRoot, "src", "test-fixtures", "skills", "mcp-skill");
     const bundle = await resolveSkillToolBundle({ snapshotDir, at: "test-snapshot" });
     expect(bundle.schemaVersion).toBe(1);
     expect(bundle.source).toBe(SKILL_TOOL_MANIFEST_PATH);

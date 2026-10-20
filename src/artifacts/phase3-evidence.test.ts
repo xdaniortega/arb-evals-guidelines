@@ -115,7 +115,7 @@ async function runSyntheticEvaluation(options?: {
     evalsRoot: options?.evalsRootOverride ?? evalsRoot,
     repoRoot: options?.repoRootOverride ?? repoRoot,
     caseSelector: "network-config-01",
-    skillPath: "skills/arbitrum-docs",
+    skillPath: "src/test-fixtures/skills/mcp-skill",
     mode: "fake",
     repetitions: 1,
     cliLimits: {},
@@ -169,8 +169,8 @@ describe("Source independence", () => {
     for (const name of ["case.json", "fixture", "oracle.json", "validator.ts", "validator.test.ts"]) {
       await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", name), join(isolatedDocs, name), { recursive: true });
     }
-    const isolatedSkills = join(isolatedRoot, "skills", "arbitrum-docs");
-    await cp(join(repoRoot, "skills", "arbitrum-docs"), isolatedSkills, { recursive: true });
+    const isolatedSkills = join(isolatedRoot, "src", "test-fixtures", "skills", "mcp-skill");
+    await cp(join(repoRoot, "src", "test-fixtures", "skills", "mcp-skill"), isolatedSkills, { recursive: true });
 
     // 2. Run paired evaluation against this isolated source
     const result = await runSyntheticEvaluation({
@@ -610,7 +610,7 @@ describe("Schema-v1 backward compatibility and explicit unrecorded behavior", ()
       runId: "legacy-run-001",
       mode: "fake",
       caseSelector: "network-config-01",
-      skillPath: "skills/arbitrum-docs",
+      skillPath: "src/test-fixtures/skills/mcp-skill",
       caseId: "network-config-01",
       caseVersion: 1,
       repetitions: 1,
@@ -711,7 +711,7 @@ describe("Schema-v1 backward compatibility and explicit unrecorded behavior", ()
       schemaVersion: 1,
       runId: "legacy-run-001",
       caseSelector: "network-config-01",
-      skillPath: "skills/arbitrum-docs",
+      skillPath: "src/test-fixtures/skills/mcp-skill",
       caseId: "network-config-01",
       caseVersion: 1,
       mode: "fake",
