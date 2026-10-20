@@ -1,10 +1,5 @@
 /**
- * Schema rejection tests.
- *
- * Every decoder at the input boundary must fail closed: unknown fields, missing
- * fields, wrong types, wrong schema version, invalid tool names, and validator output
- * drift are all rejected rather than coerced, because a silently-accepted input would
- * be frozen into evidence and bound to both arms of a pair.
+ * @notice Verifies schema decoders reject malformed, unknown, or incompatible evaluation inputs.
  */
 
 import { describe, expect, it } from "vitest";
@@ -37,7 +32,7 @@ describe("shared guest timeouts", () => {
     expect(SAFE_DEFAULT_LIMITS.maxOutputTokens).toBeNull();
     expect(SAFE_DEFAULT_LIMITS.maxToolSteps).toBeNull();
     expect(SAFE_DEFAULT_LIMITS.maxProviderRequests).toBeNull();
-    // Resource/isolation bounds remain strictly positive and can never be disabled.
+
     for (const key of ["maxExportedFiles", "maxExportedFileBytes", "maxWorkspaceBytes", "cpus", "memoryMiB", "pids", "diskMiB"] as const) {
       expect(SAFE_DEFAULT_LIMITS[key]).toBeGreaterThan(0);
     }
@@ -45,7 +40,7 @@ describe("shared guest timeouts", () => {
 
   it.each([1, 110_000, 300_000, 600_000, 900_000])("nests finite host and guest lifetimes for %ims per arm", (wallClockMs) => {
     const timeouts = resolveGuestTimeouts(wallClockMs);
-    // A finite arm yields concrete numeric guest deadlines.
+
     expect(timeouts.prePromptMs).toBe(620_000 + wallClockMs);
     expect(timeouts.supervisorMs).toBe(930_000 + wallClockMs + Math.max(wallClockMs, 180_000));
     expect(timeouts.streamMs).not.toBeNull();
@@ -173,6 +168,14 @@ describe("decodeFreshCaseConfig", () => {
   it("rejects duplicate tool names and an empty tool list", () => {
     expectEvalError(() => decodeFreshCaseConfig({ ...validCase, allowedTools: ["read", "read"] }, "case.json"), "input-invalid");
     expectEvalError(() => decodeFreshCaseConfig({ ...validCase, allowedTools: [] }, "case.json"), "input-invalid");
+  });
+
+  it("rejects a case requesting glob with actionable guidance to use native find", () => {
+    const error = expectEvalError(
+      () => decodeFreshCaseConfig({ ...validCase, allowedTools: ["read", "glob"] }, "case.json"),
+      "input-invalid",
+    );
+    expect(error.message).toContain('allowedTools: "glob" is no longer provided; use "find" (Pi native)');
   });
 
   it("rejects an unknown runtimeProfileId in a case", () => {

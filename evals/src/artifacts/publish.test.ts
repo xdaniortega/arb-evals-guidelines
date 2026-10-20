@@ -42,7 +42,7 @@ afterAll(async () => {
   }
 });
 
-async function sealRun(script?: FakeHarnessScript): Promise<RunResult> {
+async function sealRun(script?: FakeHarnessScript, repetitions: number = 1): Promise<RunResult> {
   const root = await mkdtemp(join(tmpdir(), "eval-publish-test-"));
   tempRoots.push(root);
   const workDir = await mkdtemp(join(tmpdir(), "eval-publish-work-"));
@@ -63,7 +63,7 @@ async function sealRun(script?: FakeHarnessScript): Promise<RunResult> {
     harness: createFakeHarness(script === undefined ? {} : { script }),
     sandbox: createFakeSandbox(),
     validatorRunner: createInProcessValidatorRunner(),
-    repetitions: 1,
+    repetitions,
     cliLimits: {},
     workDir,
     runsRoot: join(root, "runs"),
@@ -733,6 +733,75 @@ Some historical notes.
     tempRoots.push(tempSkillDir);
     await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: tempSkillDir }))
       .rejects.toThrow(/Publication refused: .* has ungraded arm\(s\): baseline/);
+    await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
+  });
+
+  it("publishes the mean of every pair when a multi-pair run has no --pair, with an unchanged table shape", async () => {
+    const runResult = await sealRun(undefined, 3);
+    const report = await buildRunReport(runResult.receiptPath);
+    expect(report.pairs).toHaveLength(3);
+    const labels = report.pairs.map((pair) => pair.pairId.slice(pair.pairId.lastIndexOf("-") + 1));
+
+    const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(tempSkillDir);
+
+    const result = await publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: tempSkillDir });
+    expect(result.mode).toBe("mean");
+    expect(result.pairIds).toEqual(report.pairs.map((pair) => pair.pairId));
+
+    const content = await readFile(join(tempSkillDir, "EVALS.md"), "utf8");
+    // Header names every pair; nothing else about the table shape changes.
+    expect(content).toContain(`Run: ${report.runId} · Pairs ${labels.join(", ")}`);
+    expect(content).not.toContain("Pair r001  \n");
+    expect(content).not.toContain("repetitions)");
+    // Same table headers as a single-pair publication: no extra columns or notes.
+    expect(content).toContain("| Pillar | Without this skill | With this skill | Change |");
+    expect(content).toContain("| Check | Without this skill | With this skill |");
+    expect(content).toContain("| Metric | Without this skill | With this skill |");
+  });
+
+  it("--pair on a multi-pair run publishes only that pair, unaffected by an ungraded pair elsewhere", async () => {
+    let call = 0;
+    const script: FakeHarnessScript = (request) => {
+      call += 1;
+      // Calls run in pair order, baseline then treatment: pair 2's baseline (call 3) fails.
+      const infra = call === 3;
+      return {
+        outcome: infra ? "infrastructure-failure" : "completed",
+        assistantText: infra ? "guest died" : `call-${call} (${request.conditionId})`,
+      };
+    };
+    const runResult = await sealRun(script, 3);
+    const report = await buildRunReport(runResult.receiptPath);
+    const pair1Id = report.pairs[0]!.pairId;
+
+    const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(tempSkillDir);
+
+    const result = await publishRun({ receiptPath: runResult.receiptPath, pairId: pair1Id, targetSkillDir: tempSkillDir });
+    expect(result.mode).toBe("single");
+    expect(result.pairIds).toEqual([pair1Id]);
+
+    const content = await readFile(join(tempSkillDir, "EVALS.md"), "utf8");
+    expect(content).toContain(`Run: ${report.runId} · Pair r001`);
+  });
+
+  it("refuses to publish the mean when any pair is ungraded, and names that pair", async () => {
+    let call = 0;
+    const script: FakeHarnessScript = (request) => {
+      call += 1;
+      const infra = call === 3; // pair 2's baseline
+      return {
+        outcome: infra ? "infrastructure-failure" : "completed",
+        assistantText: infra ? "guest died" : `call-${call} (${request.conditionId})`,
+      };
+    };
+    const runResult = await sealRun(script, 3);
+    const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(tempSkillDir);
+
+    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: tempSkillDir }))
+      .rejects.toThrow(/Publication refused: pair r002 of run .* has ungraded arm\(s\): baseline/);
     await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
   });
 

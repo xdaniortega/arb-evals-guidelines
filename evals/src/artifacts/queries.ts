@@ -53,6 +53,7 @@ import type {
   ScoredAccuracyTable,
   ScoredChecksTable,
   ScoredCostLatencyTable,
+  PairSelection,
 } from "./scored-report.ts";
 
 // ---------------------------------------------------------------------------
@@ -792,11 +793,67 @@ function countChecks(outcome: ValidationOutcome | null): { passed: number; total
  * @returns Compiled run report containing verification status, metadata, and per-pair evaluation results.
  * @dev Evidence is verified against disk before report generation; if verification fails, all per-pair scores and deltas are suppressed to prevent unverified evidence from being presented as valid results.
  */
-export async function buildRunReport(receiptPath: string): Promise<RunReport> {
+/**
+ * Reads and decodes only the receipt's run ID and pair list, without verifying evidence.
+ * Used to resolve a `--pair` selector against the run before the full (verified) report
+ * is built, so a bad selector fails fast with the list of available pair IDs.
+ */
+export async function peekRunPairs(
+  receiptPath: string,
+): Promise<Pick<RunReceipt, "runId" | "pairs">> {
+  const runDir = canonicalRunDir(receiptPath);
+  const canonicalReceiptPath = join(runDir, RECEIPT_FILE);
+  const receipt = decodeReceipt(await readJsonFile(canonicalReceiptPath, RECEIPT_FILE));
+  return { runId: receipt.runId, pairs: receipt.pairs };
+}
+
+/** Resolved `--pair` outcome: either one selected pair, or the mean over every pair. */
+export type ReceiptPairSelection =
+  | { readonly mode: "single"; readonly pair: ReceiptPairRef }
+  | { readonly mode: "mean"; readonly pairs: readonly ReceiptPairRef[] };
+
+/**
+ * Resolves a `--pair` selector (full pair ID or short `rNNN` label) against a run's
+ * pair list.
+ *
+ * A `null` selector (no `--pair` given) resolves to the single pair when the run has
+ * exactly one, or to the **mean over every pair** when the run has more than one. An
+ * explicit selector always resolves to that one named pair; an unknown selector always
+ * throws `input-invalid` naming the available pairs, so a single-pair publication can
+ * never cherry-pick a repetition without an explicit, named choice.
+ */
+export function resolvePairSelection(
+  receipt: Pick<RunReceipt, "runId" | "pairs">,
+  selector: string | null,
+): ReceiptPairSelection {
+  const available = receipt.pairs.map((pair) => pair.pairId);
+  if (selector === null) {
+    if (receipt.pairs.length === 1) {
+      return { mode: "single", pair: receipt.pairs[0]! };
+    }
+    return { mode: "mean", pairs: receipt.pairs };
+  }
+  const fullPairId = /^r\d+$/.test(selector) ? `${receipt.runId}-${selector}` : selector;
+  const pair = receipt.pairs.find((candidate) => candidate.pairId === fullPairId);
+  if (pair === undefined) {
+    throw new EvalError(
+      "input-invalid",
+      `receipt has no pair ${selector}. Available: ${available.join(", ")}`,
+      { at: "--pair" },
+    );
+  }
+  return { mode: "single", pair };
+}
+
+export async function buildRunReport(
+  receiptPath: string,
+  options?: { readonly pairId?: string | null },
+): Promise<RunReport> {
   const runDir = canonicalRunDir(receiptPath);
   const canonicalReceiptPath = join(runDir, RECEIPT_FILE);
   const receipt = decodeReceipt(await readJsonFile(canonicalReceiptPath, RECEIPT_FILE));
   const verification = await verifyRun(runDir);
+  const selectedPairId = options?.pairId ?? null;
 
   const pairs: PairReport[] = [];
   // Sealed evidence whose hash chain does not verify is not a result. The read model
@@ -1151,7 +1208,20 @@ export async function buildRunReport(receiptPath: string): Promise<RunReport> {
     scored: null,
   };
 
-  const scored = !isLegacy && pairs.length === 1 ? buildScoredReport(intermediateReport, rubric) : null;
+  // No explicit `--pair`: a single-pair run keeps today's single-pair rendering; a
+  // multi-pair run publishes the mean over every pair, never a silently-picked one.
+  const selection: PairSelection | undefined =
+    selectedPairId !== null
+      ? (() => {
+          const pair = pairs.find((p) => p.pairId === selectedPairId);
+          return pair === undefined ? undefined : { mode: "single" as const, pair };
+        })()
+      : pairs.length === 1
+        ? { mode: "single" as const, pair: pairs[0]! }
+        : pairs.length > 1
+          ? { mode: "mean" as const, pairs }
+          : undefined;
+  const scored = !isLegacy && selection !== undefined ? buildScoredReport(intermediateReport, rubric, selection) : null;
 
   return {
     ...intermediateReport,
@@ -2819,5 +2889,6 @@ export type {
   ScoredAccuracyTable,
   ScoredChecksTable,
   ScoredCostLatencyTable,
+  PairSelection,
 };
 

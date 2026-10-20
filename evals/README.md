@@ -1,18 +1,13 @@
-# Arbitrum Skills Evaluation Framework
+# Arbitrum Evaluation Framework
+
+<p align="center">
+  <img src="assets/arbitrum-evaluation-framework.svg" alt="Arbitrum Agent Skills"">
+</p>
+
 
 Does a skill help an agent do a task better? This framework compares the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
 
 Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
-
-## Requirements
-
-For a measured evaluation, you need:
-
-- **Apple-silicon macOS**, with Apple Container installed and running. Check with `container system status`.
-- **Node.js 24.21.0**, the selected evaluation baseline, and **pnpm 10.33.2**.
-- This repository and its dependencies, installed with `pnpm install --frozen-lockfile`.
-- An API key for the selected provider in the git-ignored `evals/.env` file: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
-- Internet access for the initial container build, model requests and any documentation tools declared by the skill.
 
 ## 1. What is an eval?
 
@@ -31,8 +26,15 @@ The checks are deterministic: **the same captured answer and frozen grading inpu
 
 The agent's answers can still vary between attempts. Deterministic grading gives us a consistent measuring tool; it does not guarantee that the skill improves every answer. Repeated pairs help us see how consistent the observed difference is.
 
-## 2. Quick start
+## Requirements
 
+For a measured evaluation, you need:
+
+- **Apple-silicon macOS**, with Apple Container installed and running. Check with `container system status`.
+- **Node.js 24.21.0**, the selected evaluation baseline, and **pnpm 10.33.2**.
+- This repository and its dependencies, installed with `pnpm install --frozen-lockfile`.
+- An API key for the selected provider in the git-ignored `evals/.env` file: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
+## 2. Quick start
 ### Set up once
 
 ```bash
@@ -56,12 +58,24 @@ pnpm eval -- --case network-config-01 \
   --model gemini-3.8-flash \
   --limit wallClockMs=300000
 ```
-
 The `wallClockMs=300000` limit gives each arm five minutes, starting when its prompt begins.
 
-The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](cases/network-config-01/case.json) and [starting configuration](cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
 
-The run prints a comparison table and the path to a `receipt.json` file. The receipt identifies the saved evidence. See [Read the output](#4-read-the-output) and [How to inspect a run](#5-how-to-inspect-a-run) below.
+Other Options for `pnpm eval`:
+
+| Option | What it does |
+|---|---|
+| `--case <id>` | Case to run. Required. |
+| `--skill <path>` | Treatment skill, relative to the repository. The baseline arm receives none. Required, unless you use the legacy `--suite` flag. |
+| `--model <id>` | Model to call. Required for a measured run. The provider is inferred from the model id. |
+| `--provider <google\|anthropic>` | Asserts or disambiguates the provider when the model id alone is not enough. |
+| `--thinking <level>` | Reasoning effort. Default `low`. Names are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; a model may reject some of them. |
+| `--repetitions <n>` | How many baseline/treatment pairs to run. Default `1`. |
+| `--capture-reasoning` | Keeps the model's reasoning in the saved session. Off by default, because it makes the session much larger. |
+| `--limit <key>=<value>` | Overrides one budget. Repeat the flag for several keys. Task budgets (`wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests`) take a positive integer, or `0` / `none` for unlimited. Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, `maxExportedFiles`, `maxExportedFileBytes`, `maxWorkspaceBytes`) stay finite. |
+
+
+The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](cases/network-config-01/case.json) and [starting configuration](cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
 
 ## 3. How scoring works
 
@@ -81,20 +95,6 @@ Accuracy is split into two parts:
 |---|---:|---|
 | Outcome correctness and completeness | 80% | Did the agent correctly and fully deliver everything requested? Check that the result matches the expected facts, values, behavior or state across the full requested scope. Where the case introduces a predefined failure, invalid input or unmet prerequisite, check that the agent identifies it and responds as expected (recover, ask, or stop). |
 | Constraints and preservation | 20% | Did the agent respect permissions and task boundaries while preserving what should remain unchanged? |
-
-Rules:
-- Outcome is 80 points, constraints 20; accuracy total is 0–100.
-- Happy- and unhappy-path checks are both outcome checks; the case decides which it needs.
-- Checks are pass/fail. Failed checks keep their weight; missing evidence shows `n/a` and never reweights.
-- Cost and latency never add accuracy points. For this trial X = 1 (single-pair observation); cost is recorded tokens.
-
-A case declares its checks in `rubric.json` (`rubricVersion: "v0.2"`); each check names its group (`outcome` or `constraints`), its points and an optional display topic. Group labels and weights are fixed by the framework, so `rubric.json` has no `groups` block.
-
-### Scores and outcomes
-- The validator returns pass/fail checks; the framework scores them against the frozen `rubric.json` before sealing. Full pass = every check passed.
-- `completed` and `task-limit` answers are graded normally; a limit alone does not fail a run.
-- Infrastructure failures and ungraded arms show `n/a` and are excluded from averages.
-- Runs scored under an earlier rubric are shown as legacy results and never reweighted.
 
 ## 4. Read the output
 
@@ -145,24 +145,7 @@ publish   pnpm eval:publish --receipt <receipt> --checks
 
 - Add `--checks` to `eval`, `eval:report` or `eval:publish` to include the **Outcome checks** table (one row per display topic, with an **Outcome total**).
 - An arm without grading evidence (for example, interrupted before its workspace was exported) shows `n/a` in every accuracy cell and in the change column. When its recorded duration is missing, latency is derived from the native session and labelled `(session-derived)`; changes that use it are labelled `approximate`.
-- Durations under a minute print as `45.2s`; longer ones as `3m34s` (precise: `3m33.947s`).
-- A run whose frozen rubric is not `v0.2` prints its original scalar score under a `LEGACY RESULT` label; its accuracy rows show `n/a (legacy run)`.
 
-`--format markdown` or `--format json` changes the report format; `--quiet` hides progress logs. Synthetic runs carry a `TEST-DOUBLE EVIDENCE` label and do not measure skill effectiveness.
-
-### Multi-pair runs
-
-Runs with several repetitions print an averages table and a per-pair table instead:
-
-| Field or column          | Meaning                                                                                                                       |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| **Baseline / Treatment** | The correctness score for each arm, from 0 to 1; in Averages, the mean over the same gradeable pairs.                         |
-| **Delta**                | Treatment score minus baseline score; in Averages, the mean paired difference. Positive values mean a higher treatment score. |
-| **Gradeable pairs**      | The number of matched pairs used in the correctness averages.                                                                 |
-| **Tokens Δ**             | Treatment-minus-baseline token use, including reported cache usage; its mean in Averages. This is not a cost calculation.     |
-| **Time Δ**               | Treatment-minus-baseline agent execution time; its mean in Averages. Separate from total run elapsed time.                    |
-
-Resource averages use eligible pairs with both measurements available; the report prints their denominators separately. `n/a` means a value is unavailable. Negative resource deltas mean treatment used fewer tokens or less time.
 
 ## 5. How to inspect a run
 
@@ -185,7 +168,7 @@ pnpm eval:inspect -- --latest --case network-config-01 \
   --condition treatment --view session --export both
 ```
 
-This prints two paths: a `.jsonl` file (the session in Pi's own native format — open it with Pi itself, or read it directly, one JSON record per line) and an `.html` file. **Open the HTML path in a browser.** It renders the same transcript as a readable, collapsible page: assistant messages, the model's reasoning (click to expand/collapse), tool calls with their arguments, and tool results. Any secret value the run was configured to guard (API keys, tokens) shows as `[REDACTED:<label>]` instead of the real value — everything else, including reasoning, is exactly what the model produced.
+This prints two paths: a `.jsonl` file (Pi's native session, one JSON record per line) and an `.html` file. **Open the HTML path in a browser.** It shows the same transcript as a collapsible page: messages, reasoning, tool calls, and tool results. Guarded secrets appear as `[REDACTED:<label>]`; everything else is exactly what the model produced.
 
 Repeat with `--condition baseline` to see the same task without the skill, and compare the two transcripts side by side.
 

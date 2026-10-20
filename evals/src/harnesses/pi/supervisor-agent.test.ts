@@ -1,3 +1,7 @@
+/**
+ * @notice Verifies the generated guest agent protocol, runtime lock, abort handling, redaction, and lifecycle boundaries.
+ */
+
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -113,7 +117,6 @@ function initFrame(steps: readonly unknown[], options: { captureReasoning?: bool
     target,
     skillPath: null,
     allowedTools: ["read", "write", "edit", "bash"],
-    ambientTools: [],
     skillToolBundle: null,
     skillToolBundleSha256: "f9cc8e2b85ebe6aa64c21b5be039960cdc74a5743ca280d0f84c440f745c993b",
     processLifetimeMs: 180_000,
@@ -210,16 +213,16 @@ describe("locked guest SDK artifact", () => {
   });
 
   it("imports the compiled ESM SDK entry with real pinned packages", async () => {
-    // @ts-expect-error generated ESM intentionally has no declaration artifact
-    const module = await import("../../../container/guest-runtime/src/harnesses/pi/guest-agent.mjs");
+    const guestAgentModule = "../../../container/guest-runtime/src/harnesses/pi/guest-agent.mjs";
+    const module = await import(guestAgentModule);
     expect(module.runGuestAgent).toBeTypeOf("function");
   });
 });
 
 describe("production supervisor process sweep", () => {
   it("uses PID+start-time identities, ignores zombies, catches forks, and fails on permission/persistent processes", async () => {
-    // @ts-expect-error production supervisor is intentionally plain image-resident ESM
-    const { createTaskProcessQuiescer } = await import("../../../container/run-measured.mjs");
+    const supervisorModule = "../../../container/run-measured.mjs";
+    const { createTaskProcessQuiescer } = await import(supervisorModule);
     let tick = 0;
     const killed: Array<[number, string]> = [];
     const scans = [
@@ -552,51 +555,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
         parseInit({ ...initFrame([{ type: "text", text: "done" }]), limits: { ...limits, maxOutputTokens: bad } }),
       ).toThrow("init.limits.maxOutputTokens");
     });
-    it("refuses an ambientTools entry that is not in allowedTools", () => {
-      expect(() =>
-        parseInit({
-          type: "init",
-          protocolVersion: 1,
-          mode: "scripted",
-          arm: "baseline",
-          target,
-          skillPath: null,
-          allowedTools: ["read", "write"],
-          ambientTools: ["glob"],
-          skillToolBundle: null,
-          skillToolBundleSha256: "00".repeat(32),
-          processLifetimeMs: 180_000,
-          armWallClockMs: 10_000,
-          limits,
-          credentialVariable: "GEMINI_API_KEY",
-          scriptedSteps: [{ type: "text", text: "ok" }],
-        }),
-      ).toThrow(/init\.ambientTools entry 'glob' is not in allowedTools/);
-    });
-
-    it("refuses duplicate ambientTools entries", () => {
-      expect(() =>
-        parseInit({
-          type: "init",
-          protocolVersion: 1,
-          mode: "scripted",
-          arm: "baseline",
-          target,
-          skillPath: null,
-          allowedTools: ["read", "glob"],
-          ambientTools: ["glob", "glob"],
-          skillToolBundle: null,
-          skillToolBundleSha256: "00".repeat(32),
-          processLifetimeMs: 180_000,
-          armWallClockMs: 10_000,
-          limits,
-          credentialVariable: "GEMINI_API_KEY",
-          scriptedSteps: [{ type: "text", text: "ok" }],
-        }),
-      ).toThrow(/init\.ambientTools contains duplicate entries/);
-    });
-
-    it("refuses invalid ambientTools tool name syntax", () => {
+    it("refuses invalid allowedTools tool name syntax", () => {
       expect(() =>
         parseInit({
           type: "init",
@@ -606,7 +565,6 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
           target,
           skillPath: null,
           allowedTools: ["read", "INVALID"],
-          ambientTools: ["INVALID"],
           skillToolBundle: null,
           skillToolBundleSha256: "00".repeat(32),
           processLifetimeMs: 180_000,
@@ -615,7 +573,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
           credentialVariable: "GEMINI_API_KEY",
           scriptedSteps: [{ type: "text", text: "ok" }],
         }),
-      ).toThrow(/init\.ambientTools must be an array of valid tool names/);
+      ).toThrow(/init\.allowedTools must be an array of valid tool names/);
     });
 
     it("refuses a baseline frame carrying a non-null skillToolBundle", () => {
@@ -628,7 +586,6 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
           target,
           skillPath: null,
           allowedTools: ["read"],
-          ambientTools: [],
           skillToolBundle: { schemaVersion: 1, source: null, sourceSha256: null, servers: [] },
           skillToolBundleSha256: "00".repeat(32),
           processLifetimeMs: 180_000,
@@ -650,7 +607,6 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
           target,
           skillPath: "/path/to/skill",
           allowedTools: ["read"],
-          ambientTools: [],
           skillToolBundle: { schemaVersion: 1, source: null, sourceSha256: null },
           skillToolBundleSha256: "00".repeat(32),
           processLifetimeMs: 180_000,
@@ -672,7 +628,6 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
           target,
           skillPath: null,
           allowedTools: ["read"],
-          ambientTools: [],
           skillToolBundle: null,
           skillToolBundleSha256: "not-a-64-char-hex-digest",
           processLifetimeMs: 180_000,
@@ -694,7 +649,6 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
           target,
           skillPath: "/path/to/skill",
           allowedTools: ["read"],
-          ambientTools: [],
           skillToolBundle: {
             schemaVersion: 1,
             source: "agents/openai.yaml",
@@ -827,8 +781,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch((error) 
     const guestModule = pathToFileURL(join(process.cwd(), "evals/src/harnesses/pi/guest-agent.ts")).href;
     writeFileSync(wrapper, `
 import { runGuestAgent } from ${JSON.stringify(guestModule)};
-// Accelerate only infrastructure timers: the old five-minute barrier becomes three
-// seconds, while the actual short prompt and process timers keep their real durations.
+
 const realSetTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (callback, milliseconds, ...args) => realSetTimeout(callback,
   milliseconds >= 300000 ? milliseconds / 100 : milliseconds, ...args);

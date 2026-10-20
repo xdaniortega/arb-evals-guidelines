@@ -273,14 +273,12 @@ export async function createPiSdkSession(options) {
         signal: options.signal,
     });
     const baseAllowedTools = options.allowedTools ? [...options.allowedTools] : ["read", "bash", "edit", "write"];
-    if (baseAllowedTools.includes(MCP_CLIENT_TOOL_NAME) || options.ambientTools?.some((tool) => tool.name === MCP_CLIENT_TOOL_NAME)) {
+    if (baseAllowedTools.includes(MCP_CLIENT_TOOL_NAME)) {
         mcpClient.dispose();
         throw new EvalError("parity-violation", "mcp is reserved for the shared client integration", { at: "pi.sdk.tools" });
     }
     const activeTools = [...baseAllowedTools, MCP_CLIENT_TOOL_NAME];
-    const ambientDefs = options.ambientTools ? [...options.ambientTools] : [];
-    const allCustomTools = [...ambientDefs, mcpClient.definition];
-    const customTools = allCustomTools.length > 0 ? allCustomTools : undefined;
+    const customTools = [mcpClient.definition];
     const { session } = await createAgentSession({
         cwd: options.cwd,
         agentDir,
@@ -437,7 +435,6 @@ export async function createPiSdkSession(options) {
             providerId: currentModel.provider,
             thinkingLevel: session.thinkingLevel,
             activeTools: currentTools,
-            ambientCustomTools: options.ambientTools ? options.ambientTools.map((t) => t.name).sort() : [],
             mcpClientId: MCP_CLIENT_POLICY.id,
             seededMcpServers: mcpClient.seededServers,
             skillToolBundleSha256: options.arm === "treatment" ? (options.skillToolBundleSha256 ?? null) : null,

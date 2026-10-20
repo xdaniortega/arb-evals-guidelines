@@ -19,12 +19,12 @@ import { canonicalJson, type Target } from "../../core/experiment.ts";
 import type { SkillToolBundle } from "../../core/skill-tools.ts";
 import {
   CONDITION_OPERATION_ALLOWANCE_MS,
-  deriveStopCause,
   resolveGuestTimeouts,
   type Limits,
+  EvalError,
 } from "../../core/types.ts";
+import { classifyTerminalState } from "./terminal-classification.ts";
 import { createPiSdkSession, type PiSdkSessionInstance } from "./sdk-session.ts";
-import { buildAmbientTools } from "./ambient-tools.ts";
 import { createScriptedStreamSimple, type ScriptedStep } from "./scripted-stream.ts";
 import { installCompletionTransportBlocker } from "../../transport-blocker.ts";
 
@@ -39,10 +39,6 @@ const MAX_PROCESS_LIFETIME_MS = 180_000;
 // barrier also allows its sibling's setup, serial prompt, capture and cleanup.
 const MAX_PRE_PROMPT_MS = CONDITION_OPERATION_ALLOWANCE_MS;
 const SYNTHETIC_KEY = "synthetic-scripted-eval-key";
-// Cancellation messages emitted by a provider or the SDK when an abort we requested
-// lands. Anchored at both ends so a decorated failure such as
-// "This operation was aborted: upstream failure" is NOT treated as a clean cancellation.
-const KNOWN_ABORT_MESSAGE = /^(?:abort(?:error)?: )?(?:this )?(?:operation|request|sdk prompt)(?: was)? aborted\.?$/i;
 
 type State = "empty" | "initializing" | "ready" | "prompting" | "settled" | "disposed";
 type InitFrame = {
@@ -53,7 +49,6 @@ type InitFrame = {
   target: Target;
   skillPath: string | null;
   allowedTools: string[];
-  ambientTools: string[];
   skillToolBundle: SkillToolBundle | null;
   skillToolBundleSha256: string;
   processLifetimeMs: number;
@@ -64,9 +59,6 @@ type InitFrame = {
   captureReasoning?: boolean;
   scriptedSteps?: ScriptedStep[];
 };
-
-type PromptFrame = { type: "prompt"; prompt: string };
-type AbortFrame = { type: "abort"; reason?: string; cause: "external" | "arm-budget" };
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -125,7 +117,7 @@ function parseSteps(value: unknown): ScriptedStep[] {
  * @returns A validated frame with canonical nullable task budgets.
  */
 export function parseInit(value: Record<string, unknown>): InitFrame {
-  knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "ambientTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "captureReasoning", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
+  knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "captureReasoning", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
   if (value.protocolVersion !== PROTOCOL_VERSION) throw new Error("unsupported guest agent protocolVersion");
   if (value.mode !== "measured" && value.mode !== "scripted") throw new Error("init.mode must be measured or scripted");
   if (value.arm !== "baseline" && value.arm !== "treatment") throw new Error("init.arm must be baseline or treatment");
@@ -139,14 +131,8 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
   if (!(value.skillPath === null || typeof value.skillPath === "string")) throw new Error("init.skillPath must be string or null");
   if (value.arm === "baseline" && value.skillPath !== null) throw new Error("baseline init must not carry a skillPath");
   if (value.arm === "treatment" && (typeof value.skillPath !== "string" || value.skillPath === "")) throw new Error("treatment init requires one skillPath");
-  if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => typeof tool !== "string" || tool === "")) throw new Error("init.allowedTools must be a string array");
-  if (!Array.isArray(value.ambientTools) || value.ambientTools.some((tool) => typeof tool !== "string" || !/^[a-z][a-z0-9_-]*$/.test(tool))) throw new Error("init.ambientTools must be an array of valid tool names");
-  const ambientToolSet = new Set<string>();
-  const allowedToolSet = new Set(value.allowedTools);
-  for (const tool of value.ambientTools) {
-    if (ambientToolSet.has(tool)) throw new Error("init.ambientTools contains duplicate entries");
-    ambientToolSet.add(tool);
-    if (!allowedToolSet.has(tool)) throw new Error(`init.ambientTools entry '${tool}' is not in allowedTools`);
+  if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => typeof tool !== "string" || !/^[a-z][a-z0-9_-]*$/.test(tool))) {
+    throw new EvalError("protocol-drift", "init.allowedTools must be an array of valid tool names", { at: "guest.init" });
   }
   if (typeof value.skillToolBundleSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.skillToolBundleSha256)) {
     throw new Error("init.skillToolBundleSha256 must be a 64-char lowercase hex digest");
@@ -234,7 +220,6 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
     target: target as Target,
     skillPath: value.skillPath,
     allowedTools: [...value.allowedTools] as string[],
-    ambientTools: [...value.ambientTools] as string[],
     skillToolBundle: (value.arm === "treatment" ? structuredClone(value.skillToolBundle) : null) as SkillToolBundle | null,
     skillToolBundleSha256: value.skillToolBundleSha256 as string,
     processLifetimeMs: value.processLifetimeMs as number,
@@ -434,7 +419,6 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
       target: init.target,
       ...(init.skillPath === null ? {} : { skillPath: init.skillPath }),
       allowedTools: init.allowedTools,
-      ambientTools: buildAmbientTools(init.ambientTools, process.cwd()),
       skillToolBundle: init.skillToolBundle,
       skillToolBundleSha256: init.skillToolBundleSha256,
       guardedSecrets: secrets,
@@ -528,32 +512,21 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
     // independently of the normalized `stopReason` used for semantic classification.
     // Absent for legacy/unmanaged responses, in which case it is null.
     const rawStopReason = typeof last?.rawStopReason === "string" ? last.rawStopReason : null;
-    const expectedAbortError = executionError instanceof Error && executionError.name === "AbortError";
     const nativeErrorMessage = typeof last?.errorMessage === "string" ? last.errorMessage : null;
-    const knownAbortMessage = nativeErrorMessage !== null && KNOWN_ABORT_MESSAGE.test(nativeErrorMessage.trim());
-    // Some providers report a cancellation we requested as a plain error rather than an
-    // abort. Normalize it only when THIS harness initiated the abort, so an unsolicited
-    // provider-side abort error still classifies as a genuine failure.
-    const stopReason = nativeStopReason === "error" && semanticAbortCause !== null && knownAbortMessage
-      ? "aborted"
-      : nativeStopReason;
-    const aborted = stopReason === "aborted";
-    // A budget-terminal message is the harness's own doing, not an arbitrary failure.
-    const nativeArbitraryFailure = aborted && nativeErrorMessage !== null && !knownAbortMessage && usage.taskLimitReason === null;
-    const arbitraryExecutionFailure = nativeArbitraryFailure || (executionError !== null && !(semanticAbortCause !== null && expectedAbortError));
-    const terminalClass = arbitraryExecutionFailure || stopReason === "error"
-      ? "execution-failure"
-      : semanticAbortCause === "external"
-        ? "interrupted"
-        : semanticAbortCause === "arm-budget" || usage.taskLimitReason !== null || stopReason === "length"
-          ? "task-limit"
-          : aborted
-            ? "unexpected-abort"
-            : "completed";
-    const outcome = terminalClass === "completed" ? "completed" : terminalClass === "task-limit" ? "task-limit" : "infrastructure-failure";
-    // Precise stop cause: a provider-native `length` truncation is reported distinctly and
-    // is never conflated with a harness cumulative-output-token cap (see deriveStopCause).
-    const stopCause = deriveStopCause({ terminalClass, semanticAbortCause, taskLimitReason: usage.taskLimitReason, stopReason });
+
+    const classification = classifyTerminalState({
+      stopReason: nativeStopReason,
+      rawStopReason,
+      errorMessage: nativeErrorMessage,
+      semanticAbortCause,
+      taskLimitReason: usage.taskLimitReason,
+      executionError,
+    });
+    const terminalClass = classification.terminalClass;
+    const outcome = classification.outcome;
+    const stopCause = classification.stopCause;
+    const stopReason = classification.normalizedStopReason;
+
     capture.finish(terminalClass === "completed", terminalClass === "completed" ? null : executionError === null ? terminalClass : safeError(executionError));
     state = "settled";
     emitFrame({

@@ -26,8 +26,8 @@
 !guest-runtime/src/harnesses/pi
 !guest-runtime/src/harnesses/pi/export-viewer.mjs
 !guest-runtime/src/harnesses/pi/scripted-stream.mjs
-!guest-runtime/src/harnesses/pi/ambient-tools.mjs
 !guest-runtime/src/harnesses/pi/mcp-http-client.mjs
 !guest-runtime/src/harnesses/pi/mcp-tools.mjs
 !guest-runtime/src/harnesses/pi/sdk-session.mjs
+!guest-runtime/src/harnesses/pi/terminal-classification.mjs
 !guest-runtime/src/harnesses/pi/guest-agent.mjs

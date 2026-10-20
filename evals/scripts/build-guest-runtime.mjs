@@ -28,10 +28,10 @@ const sources = [
   "evals/src/artifacts/native-prefix.ts",
   "evals/src/harnesses/pi/export-viewer.ts",
   "evals/src/harnesses/pi/scripted-stream.ts",
-  "evals/src/harnesses/pi/ambient-tools.ts",
   "evals/src/harnesses/pi/mcp-http-client.ts",
   "evals/src/harnesses/pi/mcp-tools.ts",
   "evals/src/harnesses/pi/sdk-session.ts",
+  "evals/src/harnesses/pi/terminal-classification.ts",
   "evals/src/harnesses/pi/guest-agent.ts",
 ];
 const expectedCompiler = "5.9.3";

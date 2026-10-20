@@ -1,9 +1,5 @@
 /**
- * Fake harness conformance.
- *
- * The double must reproduce the one difference the experiment claims to measure:
- * baseline runs with zero skill paths and treatment with exactly one, both self-labeled
- * as test-double evidence so a fake run can never be read as a measured result.
+ * @notice Verifies deterministic fake harness outcomes, parity metadata, and skill isolation.
  */
 
 import { describe, expect, it } from "vitest";
@@ -49,7 +45,6 @@ function request(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
     workspaceRoot: "/work",
     skillPaths: [],
     allowedTools: ["read", "write"],
-    ambientTools: [],
     skillToolBundle: null,
     skillToolBundleSha256: canonicalJsonSha256(EMPTY_SKILL_TOOL_BUNDLE),
     limits: SAFE_DEFAULT_LIMITS,

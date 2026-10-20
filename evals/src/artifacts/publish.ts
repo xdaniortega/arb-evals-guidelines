@@ -13,7 +13,11 @@
  * - Exact marker validation fails closed on mismatched, reversed, nested, duplicate, or malformed markers.
  * - Authored coverage notes outside the markers are preserved verbatim byte-for-byte.
  * - Real status and available measurements are published; never substitutes mock scores.
- * - Both arms must be graded: a run with an ungraded arm is refused rather than published as `n/a`.
+ * - Both arms must be graded for every rendered pair: an ungraded arm is refused rather than
+ *   published as `n/a`, or silently dropped out of a mean.
+ * - A multi-pair run with no `--pair` publishes the mean over every pair; `--pair` publishes
+ *   one named pair. Verification (`verifyRun`) always covers the whole run either way; pair
+ *   selection only narrows what gets rendered, never what gets verified.
  * - Badges describe execution/grading status and do not claim certification.
  * - Receipt paths and operational footers remain outside EVALS.md.
  */
@@ -21,7 +25,8 @@
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { EvalError } from "../core/types.ts";
-import { buildRunReport } from "./queries.ts";
+import { buildRunReport, peekRunPairs, resolvePairSelection } from "./queries.ts";
+import type { PairReport } from "./queries.ts";
 import { renderScoredMarkdown } from "./scored-report.ts";
 
 export const EVAL_BEGIN_MARKER = "<!-- AF-EVAL:BEGIN generated -->";
@@ -435,6 +440,12 @@ export interface PublishOptions {
   readonly checks?: boolean;
   readonly repoRoot?: string;
   readonly targetSkillDir?: string;
+  /**
+   * Full pair ID or short `rNNN` label. Omitted (or `null`): a single-pair run publishes
+   * that pair; a multi-pair run publishes the **mean over every pair**. Given: publishes
+   * that one named pair, exactly like a single-pair run.
+   */
+  readonly pairId?: string | null;
 }
 
 export interface PublishResult {
@@ -443,6 +454,10 @@ export interface PublishResult {
   readonly relativeTargetPath: string;
   readonly status: string;
   readonly renderedMarkdown: string;
+  /** "single" for one published pair, "mean" when the tables hold the mean of every pair. */
+  readonly mode: "single" | "mean";
+  /** Full pair IDs actually published: one pair ID in single mode, every pair ID in mean mode. */
+  readonly pairIds: readonly string[];
 }
 
 /**
@@ -450,7 +465,17 @@ export interface PublishResult {
  */
 export async function publishRun(options: PublishOptions): Promise<PublishResult> {
   const receiptPath = resolve(options.receiptPath);
-  const report = await buildRunReport(receiptPath);
+
+  // Resolve the `--pair` selection against the receipt's pair list before building the
+  // (verified) report, so a bad `--pair` fails fast with the list of available pairs,
+  // even if the run can't be published for other reasons. Never picks a pair silently:
+  // a multi-pair run with no `--pair` resolves to the mean over every pair.
+  const receiptSummary = await peekRunPairs(receiptPath);
+  const selection = resolvePairSelection(receiptSummary, options.pairId ?? null);
+
+  const report = await buildRunReport(receiptPath, {
+    pairId: selection.mode === "single" ? selection.pair.pairId : null,
+  });
 
   // 1. Verify evidence first: refuse if verification fails
   if (!report.verification.ok) {
@@ -486,13 +511,6 @@ export async function publishRun(options: PublishOptions): Promise<PublishResult
         { at: receiptPath },
       );
     }
-    if (report.pairs.length !== 1) {
-      throw new EvalError(
-        "input-invalid",
-        `Publication refused: rubric v0.2 publication requires a single-pair run (found ${report.pairs.length} pairs).`,
-        { at: receiptPath },
-      );
-    }
     throw new EvalError(
       "evidence-invalid",
       `Publication refused: no scored report model available for run ${report.runId}.`,
@@ -500,19 +518,30 @@ export async function publishRun(options: PublishOptions): Promise<PublishResult
     );
   }
 
-  // 3b. Both arms must be graded; an ungraded arm is never published as `n/a`.
-  const ungraded = [
-    ["baseline", report.scored.baselineAccuracy],
-    ["treatment", report.scored.treatmentAccuracy],
-  ].filter(([, accuracy]) => typeof accuracy !== "object" || accuracy === null || accuracy.total.got === null)
-    .map(([arm]) => arm as string);
-  if (ungraded.length > 0) {
-    throw new EvalError(
-      "evidence-invalid",
-      `Publication refused: run ${report.runId} has ungraded arm(s): ${ungraded.join(", ")}; ` +
-      `status: ${report.scored.statusLine}. Re-run the case to obtain a graded pair.`,
-      { at: receiptPath },
-    );
+  // 3b. Every rendered pair must be graded in both arms; an ungraded arm is never
+  // published as `n/a`. In mean mode this checks EVERY pair, so an ungraded pair never
+  // silently drops out of the average; in single-pair mode it checks only the selected
+  // pair, so an ungraded pair elsewhere in the run does not block publishing a graded one.
+  const renderedPairs: readonly PairReport[] =
+    selection.mode === "mean"
+      ? report.pairs
+      : report.pairs.filter((pair) => pair.pairId === selection.pair.pairId);
+  for (const pair of renderedPairs) {
+    const ungraded = ((["baseline", "treatment"] as const)).filter((armId) => {
+      const condition = pair.conditions.find((c) => c.conditionId === armId);
+      return !(condition !== undefined && condition.gradeable && condition.rubricScore != null);
+    });
+    if (ungraded.length > 0) {
+      const pairLabel = pair.pairId.slice(pair.pairId.lastIndexOf("-") + 1);
+      const scope = selection.mode === "mean" ? "mean" : `pair ${pairLabel}`;
+      const suggestion = selection.mode === "mean" ? " Pass --pair to publish a single pair." : "";
+      throw new EvalError(
+        "evidence-invalid",
+        `Publication refused: pair ${pairLabel} of run ${report.runId} has ungraded arm(s): ${ungraded.join(", ")}; ` +
+        `cannot publish the ${scope}.${suggestion} Re-run the case to obtain a graded pair.`,
+        { at: receiptPath },
+      );
+    }
   }
 
   // 4. Render markdown using the shared scored model (without operational footer)
@@ -558,5 +587,7 @@ export async function publishRun(options: PublishOptions): Promise<PublishResult
     relativeTargetPath,
     status: report.status,
     renderedMarkdown,
+    mode: selection.mode,
+    pairIds: renderedPairs.map((pair) => pair.pairId),
   };
 }

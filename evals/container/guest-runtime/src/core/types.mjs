@@ -425,6 +425,9 @@ export function decodeFreshCaseConfig(value, at, options) {
         if (!TOOL_NAME_PATTERN.test(tool)) {
             throw new EvalError("input-invalid", `${at}.allowedTools[${index}] is not a valid tool name`, { at });
         }
+        if (tool === "glob") {
+            throw new EvalError("input-invalid", `${at}.allowedTools: "glob" is no longer provided; use "find" (Pi native)`, { at: `${at}.allowedTools` });
+        }
     }
     const candidateMode = resolveCandidateMode(record.candidateMode, at);
     const outputPath = requireString(record.outputPath, `${at}.outputPath`);

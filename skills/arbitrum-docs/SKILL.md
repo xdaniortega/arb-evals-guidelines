@@ -2,7 +2,7 @@
 name: arbitrum-docs
 description: Verify Arbitrum concepts, architecture, SDK behavior, bridging, transaction lifecycle, chain configuration, deployment, and troubleshooting against the official Arbitrum documentation. Use when answering how Arbitrum works, explaining or implementing an Arbitrum integration, checking version-sensitive technical claims, or whenever an Arbitrum answer should be grounded in current primary documentation.
 metadata:
-  evals: "PASS"
+  af-evals: "PASS"
 ---
 
 # Arbitrum Docs

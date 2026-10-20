@@ -13,20 +13,20 @@
  */
 
 import { scheduleTimeout, type DeadlineTimer } from "../../core/timing.ts";
-import { mkdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, posix } from "node:path";
+import { mkdirSync } from "node:fs";
+import { posix } from "node:path";
 import type { GuestStreamSession } from "../../sandboxes/sandbox.ts";
 import type { Api, Context, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { deriveMessagesFromNativeSession, deriveToolStepsFromNativeSession } from "../../artifacts/queries.ts";
 import { canonicalJson } from "../../core/experiment.ts";
 import { scanForSecrets } from "../../core/secret-scan.ts";
-import { assertNotAborted, CONDITION_OPERATION_ALLOWANCE_MS, deriveStopCause, EvalError, resolveGuestTimeouts, SAFE_DEFAULT_LIMITS, STOP_CAUSES, toStructuredFailure } from "../../core/types.ts";
+import { assertNotAborted, CONDITION_OPERATION_ALLOWANCE_MS, EvalError, resolveGuestTimeouts, STOP_CAUSES } from "../../core/types.ts";
 import type { ConditionId, StopCause, StructuredFailure, TerminalClass } from "../../core/types.ts";
 import { validateTargetConfiguration } from "../../runner/models.ts";
 import type { Guest } from "../../sandboxes/sandbox.ts";
 import { sanitizeNativeSessionEntries, type NativeSessionEntry } from "./export-viewer.ts";
 import type { ScriptedStep } from "./scripted-stream.ts";
+import { classifyTerminalState, failureCodeForTerminalClass } from "./terminal-classification.ts";
 import type {
   Harness,
   HarnessAttestation,
@@ -36,14 +36,12 @@ import type {
   HarnessRunResult,
   HarnessUsage,
   NormalizedMessage,
-  NormalizedToolStep,
   RuntimeIdentity,
 } from "../harness.ts";
 import {
   createPiSdkSession,
   type PiSdkSessionInstance,
 } from "./sdk-session.ts";
-import { buildAmbientTools } from "./ambient-tools.ts";
 import { MCP_CLIENT_POLICY, MCP_CLIENT_TOOL_NAME } from "./mcp-tools.ts";
 
 export const PI_HARNESS_ID = "pi";
@@ -206,7 +204,6 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
     model: request.target.model,
     thinking: request.target.thinking,
     allowedTools: [...request.allowedTools],
-    ambientTools: [...request.ambientTools],
     activeTools: [...request.allowedTools, MCP_CLIENT_TOOL_NAME],
     mcpClientId: MCP_CLIENT_POLICY.id,
     seededMcpServers: (request.conditionId === "treatment" ? request.skillToolBundle?.servers ?? [] : []).map((server) => server.name).sort(),
@@ -267,7 +264,6 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       target: request.target,
       skillPath,
       allowedTools: request.allowedTools,
-      ambientTools: buildAmbientTools(request.ambientTools, workspaceDir),
       skillToolBundle: request.conditionId === "treatment" ? (request.skillToolBundle ?? null) : null,
       skillToolBundleSha256: request.conditionId === "treatment" ? request.skillToolBundleSha256 : null,
       streamSimpleOverride: options.streamSimpleOverrideFactory?.(request.conditionId) ?? options.streamSimpleOverride,
@@ -446,7 +442,6 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       target: request.target,
       skillPath: request.skillPaths[0] ?? null,
       allowedTools: [...request.allowedTools],
-      ambientTools: [...request.ambientTools],
       skillToolBundle: request.conditionId === "treatment" ? (request.skillToolBundle ?? null) : null,
       skillToolBundleSha256: request.skillToolBundleSha256,
       processLifetimeMs: REMOTE_PROCESS_LIFETIME_MS,
@@ -505,13 +500,12 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       if (!attestation || typeof attestation !== "object" || Array.isArray(attestation)) {
         throw new EvalError("parity-violation", "guest SDK readiness omitted attestation", { at: "pi.attestation" });
       }
-      exactFields(attestation, ["arm", "target", "modelId", "providerId", "thinkingLevel", "activeTools", "ambientCustomTools", "mcpClientId", "seededMcpServers", "skillToolBundleSha256", "loadedSkills", "agentsFilesCount", "extensionsCount", "promptsCount", "themesCount", "retryEnabled", "compactionEnabled"], "pi.attestation");
+      exactFields(attestation, ["arm", "target", "modelId", "providerId", "thinkingLevel", "activeTools", "mcpClientId", "seededMcpServers", "skillToolBundleSha256", "loadedSkills", "agentsFilesCount", "extensionsCount", "promptsCount", "themesCount", "retryEnabled", "compactionEnabled"], "pi.attestation");
       if (!attestation.target || typeof attestation.target !== "object" || Array.isArray(attestation.target)) throw new EvalError("parity-violation", "guest SDK readiness omitted target attestation", { at: "pi.attestation.target" });
       exactFields(attestation.target, ["provider", "model", "thinking"], "pi.attestation.target");
       if (attestation.arm !== request.conditionId || attestation.modelId !== request.target.model ||
           attestation.providerId !== request.target.provider || attestation.thinkingLevel !== request.target.thinking ||
           JSON.stringify(attestation.target) !== JSON.stringify(request.target) ||
-          JSON.stringify(attestation.ambientCustomTools) !== JSON.stringify([...request.ambientTools].sort()) ||
           attestation.agentsFilesCount !== 0 || attestation.extensionsCount !== 0 ||
           attestation.promptsCount !== 0 || attestation.themesCount !== 0 ||
           attestation.retryEnabled !== false || attestation.compactionEnabled !== false) {
@@ -636,7 +630,7 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
             throw new EvalError("protocol-drift", "guest SDK result carried inconsistent terminal state", { at: "pi.remote.result" });
           }
           const failures: StructuredFailure[] = outcome === "infrastructure-failure" ? [{
-            code: terminal.classification === "interrupted" ? "interrupted" : terminal.classification === "execution-failure" ? "provider-error" : "protocol-drift",
+            code: failureCodeForTerminalClass(terminal.classification as TerminalClass, terminal.error) ?? "protocol-drift",
             failureClass: "infrastructure",
             message: String(terminal.error ?? terminal.classification),
             at: "pi.remote.run",
@@ -719,14 +713,12 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
         instance.setDeadline?.(Number.POSITIVE_INFINITY);
       }
       let executionError: unknown = null;
-      let executionFailed = false;
 
       try {
         try {
           await instance.runPrompt(request.prompt);
         } catch (err: unknown) {
           executionError = err;
-          executionFailed = true;
         } finally {
           if (timeoutTimer !== null) timeoutTimer.cancel();
           request.signal?.removeEventListener("abort", onSignalAbort);
@@ -771,103 +763,77 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
         const allMessages = instance.session.messages;
         const lastMsg = allMessages.filter((m: any) => m.role === "assistant").pop() as any;
 
-      let infrastructureFailure: StructuredFailure | null = null;
-      if (lastMsg) {
-        if (lastMsg.stopReason === "length" && !taskLimitReason) {
-          taskLimitReason = "length limit reached";
-        } else if (lastMsg.stopReason === "error") {
-          const errorMsg = String(lastMsg.errorMessage ?? executionError ?? "model execution error");
-          if (errorMsg.includes("protocol-drift") || errorMsg.includes("drift_event")) {
-            infrastructureFailure = {
-              code: "protocol-drift",
-              failureClass: "infrastructure",
-              message: errorMsg,
-              at: "pi.run",
-            };
+        const semanticAbortForCause: "external" | "arm-budget" | null =
+          (wallClockTimedOut || (request.signal?.reason instanceof Error && request.signal.reason.name === "ArmBudgetExceeded"))
+            ? "arm-budget"
+            : request.signal?.aborted
+              ? "external"
+              : null;
+
+        const normalizedStopReason = typeof lastMsg?.stopReason === "string" ? lastMsg.stopReason : null;
+        const rawStopReason = typeof lastMsg?.rawStopReason === "string" ? lastMsg.rawStopReason : null;
+        const nativeErrorMessage = typeof lastMsg?.errorMessage === "string"
+          ? lastMsg.errorMessage
+          : executionError instanceof Error
+            ? executionError.message
+            : executionError !== null && executionError !== undefined
+              ? String(executionError)
+              : null;
+
+        const classification = classifyTerminalState({
+          stopReason: normalizedStopReason,
+          rawStopReason,
+          errorMessage: nativeErrorMessage,
+          semanticAbortCause: semanticAbortForCause,
+          taskLimitReason,
+          executionError,
+        });
+
+        // Bounded messages
+        const normalizedMessages: NormalizedMessage[] = derivedMessages.map((m) => {
+          const trunc = truncateText(m.text);
+          return {
+            index: m.index,
+            role: m.role,
+            text: trunc.text,
+            truncated: trunc.truncated,
+          };
+        });
+
+        const usage: HarnessUsage = {
+          inputTokens: budgetSnapshot.inputTokens,
+          outputTokens: budgetSnapshot.outputTokens,
+          cacheReadTokens: budgetSnapshot.cacheReadTokens,
+          cacheWriteTokens: budgetSnapshot.cacheWriteTokens,
+          providerRequests: budgetSnapshot.providerRequests,
+          toolSteps: budgetSnapshot.toolSteps,
+        };
+
+        if (classification.terminalClass === "interrupted") {
+          throw new EvalError("interrupted", `prompt cancelled: ${String(request.signal?.reason ?? "")}`);
+        }
+
+        const outcome: HarnessOutcome = classification.outcome;
+        const failures: StructuredFailure[] = [];
+
+        if (outcome === "infrastructure-failure") {
+          if (executionError instanceof EvalError) {
+            failures.push(executionError.toStructured());
           } else {
-            infrastructureFailure = {
-              code: "provider-error",
+            const formattedMessage = (executionError !== null && executionError !== undefined && !lastMsg?.errorMessage)
+              ? (executionError instanceof Error ? `${executionError.name}: ${executionError.message}` : String(executionError))
+              : (typeof lastMsg?.errorMessage === "string" ? lastMsg.errorMessage : classification.terminalClass);
+            failures.push({
+              code: classification.failureCode ?? "protocol-drift",
               failureClass: "infrastructure",
-              message: errorMsg,
+              message: formattedMessage.slice(0, 2_000),
               at: "pi.run",
-            };
+            });
           }
         }
-      }
 
-      const cancellationError = (request.signal?.aborted || wallClockTimedOut) &&
-        (executionError instanceof Error && executionError.name === "AbortError" ||
-         executionError instanceof EvalError && executionError.code === "interrupted");
-      if (!infrastructureFailure && executionFailed && !cancellationError) {
-        const errMsg = executionError instanceof Error ? executionError.message : String(executionError);
-        if (errMsg.includes("Thinking level") || errMsg.includes("400") || errMsg.includes("quota") || errMsg.includes("provider") || errMsg.includes("Synthetic upstream")) {
-          infrastructureFailure = {
-            code: "provider-error",
-            failureClass: "infrastructure",
-            message: errMsg,
-            at: "pi.run",
-          };
-        } else {
-          // Unknown SDK failures are infrastructure, never successful task completion.
-          infrastructureFailure = toStructuredFailure(executionError, "protocol-drift");
-        }
-      }
-
-      // Bounded messages
-      const normalizedMessages: NormalizedMessage[] = derivedMessages.map((m) => {
-        const trunc = truncateText(m.text);
-        return {
-          index: m.index,
-          role: m.role,
-          text: trunc.text,
-          truncated: trunc.truncated,
-        };
-      });
-
-      const usage: HarnessUsage = {
-        inputTokens: budgetSnapshot.inputTokens,
-        outputTokens: budgetSnapshot.outputTokens,
-        cacheReadTokens: budgetSnapshot.cacheReadTokens,
-        cacheWriteTokens: budgetSnapshot.cacheWriteTokens,
-        providerRequests: budgetSnapshot.providerRequests,
-        toolSteps: budgetSnapshot.toolSteps,
-      };
-
-      let outcome: HarnessOutcome = "completed";
-      const failures: StructuredFailure[] = [];
-
-      if (infrastructureFailure) {
-        outcome = "infrastructure-failure";
-        failures.push(infrastructureFailure);
-      } else if (request.signal?.aborted && !(request.signal.reason instanceof Error && request.signal.reason.name === "ArmBudgetExceeded")) {
-        throw new EvalError("interrupted", `prompt cancelled: ${String(request.signal.reason ?? "")}`);
-      } else if (taskLimitReason !== null || wallClockTimedOut || request.signal?.aborted) {
-        outcome = "task-limit";
-      }
-
-      // Precise, structured stop cause. A provider-native `length` truncation observed
-      // while the output budget is unlimited resolves to `provider-response-length`, not
-      // to a harness cumulative-output-token cause (see deriveStopCause).
-      //
-      // Classification uses the NORMALIZED stop reason (length/stop/error/...), but the
-      // persisted `providerStopReason` preserves the RAW provider reason (e.g.
-      // MAX_TOKENS/STOP) verbatim, falling back to the normalized reason only when no raw
-      // reason was captured (backwards compatible).
-      const normalizedStopReason = typeof lastMsg?.stopReason === "string" ? lastMsg.stopReason : null;
-      const rawStopReason = typeof lastMsg?.rawStopReason === "string" ? lastMsg.rawStopReason : null;
-      const providerStopReason = rawStopReason ?? normalizedStopReason;
-      const terminalClass: TerminalClass = infrastructureFailure
-        ? (infrastructureFailure.code === "interrupted" ? "interrupted" : "execution-failure")
-        : outcome === "task-limit"
-          ? "task-limit"
-          : "completed";
-      const semanticAbortForCause: "external" | "arm-budget" | null =
-        (wallClockTimedOut || (request.signal?.reason instanceof Error && request.signal.reason.name === "ArmBudgetExceeded"))
-          ? "arm-budget"
-          : request.signal?.aborted
-            ? "external"
-            : null;
-      const stopCause = deriveStopCause({ terminalClass, semanticAbortCause: semanticAbortForCause, taskLimitReason, stopReason: normalizedStopReason });
+        const stopCause = classification.stopCause;
+        const providerStopReason = classification.providerStopReason;
 
       return {
         outcome,

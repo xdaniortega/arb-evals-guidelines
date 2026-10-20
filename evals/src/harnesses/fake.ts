@@ -69,7 +69,6 @@ function runtimeIdentity(request: HarnessRequest, version: string): RuntimeIdent
     model: request.target.model,
     thinking: request.target.thinking,
     allowedTools: [...request.allowedTools],
-    ambientTools: [...request.ambientTools],
     skillPaths: [...request.skillPaths],
     ambientDiscoveryDisabled: true,
     implicitRetryDisabled: true,

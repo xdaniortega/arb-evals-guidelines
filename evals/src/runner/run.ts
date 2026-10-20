@@ -140,22 +140,6 @@ export const EVAL_NETWORK_POLICY: NetworkPolicy = {
   ],
 };
 
-export const EVAL_AMBIENT_TOOLS: readonly string[] = ["glob"];
-
-/**
- * Ambient tools OFFERED to a case, intersected with its frozen allowlist.
- *
- * The case's `allowedTools` is the frozen, parity-bound native/optional-ambient tool policy,
- * and the guest independently refuses an ambient tool outside it, so requesting one the
- * case never allowed would fail every arm at readiness. Intersecting keeps the ambient set
- * identical across arms (it derives only from frozen case bytes) while letting a case that
- * does not list `glob` run exactly as before.
- */
-export function resolveAmbientTools(allowedTools: readonly string[]): readonly string[] {
-  const allowed = new Set(allowedTools);
-  return EVAL_AMBIENT_TOOLS.filter((tool) => allowed.has(tool));
-}
-
 /**
  * Identical for both arms. Read-only root plus explicitly bounded writable paths.
  *
@@ -191,7 +175,6 @@ export interface ExecutionPolicy {
   readonly mcpClient: typeof MCP_CLIENT_POLICY;
   readonly schemaVersion: number;
   readonly armOrder: readonly ConditionId[];
-  readonly ambientTools: readonly string[];
   readonly sequentialExecution: boolean;
   readonly destroyPreviousBeforeNext: boolean;
   readonly verifyDestructionBeforeNext: boolean;
@@ -225,7 +208,6 @@ export function buildExecutionPolicy(input: {
   readonly armOrder: readonly ConditionId[];
   readonly candidateMode: CandidateMode;
   readonly validatorIsolationMode: string;
-  readonly ambientTools: readonly string[];
   readonly schedulingPolicy?: "serial" | "overlap";
 }): ExecutionPolicy {
   const schedulingPolicy = input.schedulingPolicy ?? "serial";
@@ -234,7 +216,6 @@ export function buildExecutionPolicy(input: {
     schemaVersion: SCHEMA_VERSION,
     mcpClient: MCP_CLIENT_POLICY,
     armOrder: [...input.armOrder],
-    ambientTools: [...input.ambientTools],
     sequentialExecution,
     destroyPreviousBeforeNext: true,
     verifyDestructionBeforeNext: true,
@@ -990,7 +971,6 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       armOrder: ["baseline", "treatment"],
       candidateMode,
       validatorIsolationMode: options.validatorRunner.id,
-      ambientTools: resolveAmbientTools(frozen.config.allowedTools),
       schedulingPolicy: options.schedulingPolicy,
     });
     const skillGuestPath = `${EVAL_SKILL_GUEST_ROOT}/${frozen.suite.id}`;
@@ -1889,7 +1869,6 @@ async function prepareCondition(input: {
     workspaceRoot: EVAL_WORKSPACE_ROOT,
     skillPaths: [...state.plan.skillPaths],
     allowedTools: [...frozen.config.allowedTools],
-    ambientTools: resolveAmbientTools(frozen.config.allowedTools),
     skillToolBundle: conditionId === "treatment" ? input.skillToolBundle : null,
     skillToolBundleSha256: input.skillToolBundleSha256,
     limits: input.limits,
@@ -2658,7 +2637,7 @@ async function sealCondition(
     guestName: state.step.guestName,
     networkName: state.step.networkName,
     parity: state.plan.parity,
-    runtime: state.runtime === null ? null : { ...state.runtime, allowedTools: [...state.runtime.allowedTools], ambientTools: [...state.runtime.ambientTools], skillPaths: [...state.runtime.skillPaths] },
+    runtime: state.runtime === null ? null : { ...state.runtime, allowedTools: [...state.runtime.allowedTools], skillPaths: [...state.runtime.skillPaths] },
     timing: state.timing === null ? null : { ...state.timing },
     usage: state.usage === null ? null : { ...state.usage },
     // Structured stop cause plus preserved provider raw stop reason. A never-started or

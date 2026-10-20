@@ -1,9 +1,13 @@
+/**
+ * @notice Verifies the Pi harness adapter normalizes runtime outcomes, budgets, cancellation, attestation, and evidence.
+ */
+
 import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { EMPTY_SKILL_TOOL_BUNDLE, type SkillToolBundle } from "../../core/skill-tools.ts";
+import { EMPTY_SKILL_TOOL_BUNDLE } from "../../core/skill-tools.ts";
 import { EvalError, SAFE_DEFAULT_LIMITS } from "../../core/types.ts";
 import { canonicalJsonSha256 } from "../../core/experiment.ts";
 import type { Guest } from "../../sandboxes/sandbox.ts";
@@ -56,7 +60,6 @@ function createMockRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequ
     workspaceRoot: "/workspace",
     skillPaths: [],
     allowedTools: ["read", "write", "edit", "bash"],
-    ambientTools: [],
     skillToolBundle: null,
     skillToolBundleSha256: canonicalJsonSha256(EMPTY_SKILL_TOOL_BUNDLE),
     limits: {
@@ -85,7 +88,7 @@ function remoteGuestForFrames(mutate: (type: "ready" | "result", frame: any) => 
       buffer = buffer.slice(newline + 1);
       const header = { type: "session", version: 3, id: "session-1", timestamp: new Date().toISOString(), cwd: "/workspace" };
       if (request.type === "init") {
-        const ready = { type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash", "mcp"], ambientCustomTools: [], mcpClientId: "shared-mcp-client-v1", seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } };
+        const ready = { type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash", "mcp"], mcpClientId: "shared-mcp-client-v1", seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } };
         output.write(`${JSON.stringify(mutate("ready", ready))}\n`);
         output.write(`${JSON.stringify({ type: "record", protocolVersion: 1, sequence: 1, record: header, redactions: { count: 0, entries: [] } })}\n`);
       } else if (request.type === "prompt") {
@@ -183,7 +186,7 @@ describe("Pi SDK harness adapter", () => {
         sent.push(frame);
         if (frame.type === "init") {
           const header = { type: "session", version: 3, id: "session-1", timestamp: new Date().toISOString(), cwd: "/work" };
-          output.write(JSON.stringify({ type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash", "mcp"], ambientCustomTools: [], mcpClientId: "shared-mcp-client-v1", seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } }) + "\n");
+          output.write(JSON.stringify({ type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash", "mcp"], mcpClientId: "shared-mcp-client-v1", seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } }) + "\n");
           output.write(JSON.stringify({ type: "record", protocolVersion: 1, sequence: 1, record: header, redactions: { count: 0, entries: [] } }) + "\n");
         } else if (frame.type === "prompt") {
           output.write(JSON.stringify({ type: "record", protocolVersion: 1, sequence: 2, record: { type: "message", id: "m1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: frame.prompt } }, redactions: { count: 0, entries: [] } }) + "\n");
@@ -451,6 +454,7 @@ describe("Pi SDK harness adapter", () => {
     const result = await harness.run(guest, request);
 
     expect(result.outcome).toBe("task-limit");
+    expect(result.stopCause).toBe("tool-steps");
     expect(result.usage.toolSteps).toBe(2);
     expect(existsSync(join(ws, "f1.txt"))).toBe(true);
     expect(existsSync(join(ws, "f2.txt"))).toBe(true);
@@ -479,6 +483,7 @@ describe("Pi SDK harness adapter", () => {
     const result = await harness.run(guest, request);
 
     expect(result.outcome).toBe("task-limit");
+    expect(result.stopCause).toBe("provider-requests");
     expect(result.usage.providerRequests).toBe(2);
     expect(driverCalls).toBe(2);
     expect(existsSync(join(ws, "f1.txt"))).toBe(true);
@@ -586,6 +591,7 @@ describe("Pi SDK harness adapter", () => {
     expect(observedMaxRetries).toEqual([0, 0]);
     expect(result.usage.outputTokens).toBe(11);
     expect(result.outcome).toBe("task-limit");
+    expect(result.stopCause).toBe("cumulative-output-tokens");
     rmSync(ws, { recursive: true, force: true });
   });
 
@@ -698,6 +704,7 @@ describe("Pi SDK harness adapter", () => {
     const result = await harness.run(guest, request);
 
     expect(result.outcome).toBe("task-limit");
+    expect(result.stopCause).toBe("wall-clock");
     rmSync(ws, { recursive: true, force: true });
   });
 
@@ -851,49 +858,107 @@ describe("Pi SDK harness adapter", () => {
     expect(capturedOptions.timeoutMs).toBeGreaterThanOrEqual(240_000);
   });
 
-  it("classifies provider error as infrastructure-failure with provider-error code", async () => {
-    const ws = makeTempDir("pi-provider-error");
+  it.each([
+    {
+      name: "provider error",
+      step: { type: "error", errorMessage: "Thinking level MINIMAL is not supported for this model (400 Bad Request)" },
+      stopCause: "infrastructure-error",
+      code: "provider-error",
+      message: "Thinking level MINIMAL is not supported",
+      providerStopReason: null,
+      inspectable: false,
+    },
+    {
+      name: "protocol drift",
+      step: { type: "error", errorMessage: "protocol-drift: unrecognized event shape" },
+      stopCause: "infrastructure-error",
+      code: "protocol-drift",
+      message: null,
+      providerStopReason: null,
+      inspectable: false,
+    },
+    {
+      name: "unsolicited abort",
+      step: { type: "text", text: "partial progress before unsolicited abort", stopReason: "aborted" },
+      stopCause: "unexpected-abort",
+      code: "protocol-drift",
+      message: null,
+      providerStopReason: "aborted",
+      inspectable: true,
+    },
+    {
+      name: "aborted response with arbitrary error",
+      step: { type: "error", stopReason: "aborted", errorMessage: "upstream connection dropped: unexpected EOF" },
+      stopCause: "infrastructure-error",
+      code: "provider-error",
+      message: "upstream connection dropped",
+      providerStopReason: "aborted",
+      inspectable: false,
+    },
+  ] as const)("classifies $name as infrastructure failure", async ({ name, step, stopCause, code, message, providerStopReason, inspectable }) => {
+    const ws = makeTempDir(`pi-${name.replaceAll(" ", "-")}`);
+    try {
+      const harness = createPiHarness({ streamSimpleOverride: createScriptedStreamSimple([step]) });
+      const result = await harness.run(createMockGuest(ws), createMockRequest());
+      expect(result).toMatchObject({ outcome: "infrastructure-failure", stopCause });
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toMatchObject({ code, failureClass: "infrastructure" });
+      if (message !== null) expect(result.failures[0]?.message).toContain(message);
+      if (providerStopReason !== null) expect(result.providerStopReason).toBe(providerStopReason);
+      if (inspectable) {
+        expect(result.nativeSessionEntries).toBeDefined();
+        expect(result.messages.length).toBeGreaterThan(0);
+      }
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves genuine provider error precedence over concurrent user cancellation in local harness", async () => {
+    const ws = makeTempDir("pi-error-precedence");
     const guest = createMockGuest(ws);
-    const request = createMockRequest();
+    const controller = new AbortController();
+    const request = createMockRequest({ signal: controller.signal });
 
-    const streamSimpleOverride = createScriptedStreamSimple([
-      {
-        type: "error",
-        errorMessage: "Thinking level MINIMAL is not supported for this model (400 Bad Request)",
-      },
-    ]);
+    const streamSimpleOverride = () => {
+      controller.abort("concurrent user abort");
+      return createScriptedStreamSimple([
+        {
+          type: "error",
+          stopReason: "error",
+          errorMessage: "quota exceeded (429 Too Many Requests)",
+        },
+      ])({} as any, {} as any);
+    };
 
-    const harness = createPiHarness({ streamSimpleOverride });
+    const harness = createPiHarness({ streamSimpleOverride: streamSimpleOverride as any });
+    // Must NOT throw EvalError('interrupted'); provider error takes precedence
     const result = await harness.run(guest, request);
-
     expect(result.outcome).toBe("infrastructure-failure");
+    expect(result.stopCause).toBe("infrastructure-error");
     expect(result.failures.length).toBe(1);
-    const failure = result.failures[0]!;
-    expect(failure.code).toBe("provider-error");
-    expect(failure.failureClass).toBe("infrastructure");
-    expect(failure.message).toContain("Thinking level MINIMAL is not supported");
+    expect(result.failures[0]?.code).toBe("provider-error");
     rmSync(ws, { recursive: true, force: true });
   });
 
-  it("classifies protocol drift as infrastructure-failure with protocol-drift code", async () => {
-    const ws = makeTempDir("pi-protocol-drift");
+  it("preserves local user cancellation by throwing EvalError('interrupted')", async () => {
+    const ws = makeTempDir("pi-user-cancellation");
     const guest = createMockGuest(ws);
-    const request = createMockRequest();
+    const controller = new AbortController();
+    const request = createMockRequest({ signal: controller.signal });
+    const streamSimpleOverride = () => {
+      controller.abort("user cancelled the run");
+      return createScriptedStreamSimple([
+        { type: "error", stopReason: "aborted", errorMessage: "operation was aborted" },
+      ])({} as any, {} as any);
+    };
 
-    const streamSimpleOverride = createScriptedStreamSimple([
-      {
-        type: "error",
-        errorMessage: "protocol-drift: unrecognized event shape",
-      },
-    ]);
-
-    const harness = createPiHarness({ streamSimpleOverride });
-    const result = await harness.run(guest, request);
-
-    expect(result.outcome).toBe("infrastructure-failure");
-    expect(result.failures.length).toBe(1);
-    const failure = result.failures[0]!;
-    expect(failure.code).toBe("protocol-drift");
+    const harness = createPiHarness({ streamSimpleOverride: streamSimpleOverride as any });
+    await expect(harness.run(guest, request)).rejects.toMatchObject({
+      name: "EvalError",
+      code: "interrupted",
+      message: expect.stringContaining("prompt cancelled"),
+    });
     rmSync(ws, { recursive: true, force: true });
   });
 

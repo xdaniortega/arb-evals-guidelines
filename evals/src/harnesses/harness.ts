@@ -8,7 +8,7 @@
 
 import type { NativeSessionEntryRecorder } from "../artifacts/native-prefix.ts";
 import type { SkillToolBundle } from "../core/skill-tools.ts";
-import type { ConditionId, Limits, ProbeDetail, StopCause, StructuredFailure } from "../core/types.ts";
+import type { ConditionId, HarnessOutcome, Limits, ProbeDetail, StopCause, StructuredFailure } from "../core/types.ts";
 import type { Target } from "../core/experiment.ts";
 import type { Guest } from "../sandboxes/sandbox.ts";
 import type { GuardedSecret, SecretRedaction } from "../core/secret-scan.ts";
@@ -21,7 +21,6 @@ export interface HarnessRequest {
   /** Zero paths for baseline, exactly one frozen skill path for treatment. */
   readonly skillPaths: readonly string[];
   readonly allowedTools: readonly string[];
-  readonly ambientTools: readonly string[];
   /** The frozen skill-declared tool bundle. Null for baseline; the resolved bundle for treatment. */
   readonly skillToolBundle: SkillToolBundle | null;
   /** Hash of the bundle bound to BOTH arms; the empty-bundle hash when the skill declares none. */
@@ -82,7 +81,6 @@ export interface RuntimeIdentity {
   readonly model: string;
   readonly thinking: string;
   readonly allowedTools: readonly string[];
-  readonly ambientTools: readonly string[];
   readonly skillPaths: readonly string[];
   /** Effective Pi tools and client identity; absent for historical evidence and non-Pi doubles. */
   readonly activeTools?: readonly string[];
@@ -98,7 +96,7 @@ export interface HarnessAttestation {
   readonly checkedAt: string;
 }
 
-export type HarnessOutcome = "completed" | "task-limit" | "infrastructure-failure";
+export type { HarnessOutcome } from "../core/types.ts";
 
 export interface NativeSessionRedactions {
   readonly count: number;

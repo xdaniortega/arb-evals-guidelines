@@ -1,7 +1,7 @@
 # network-config-01: Network Configuration Migration
 
 Case ID: `network-config-01`  
-Case Version: `9`  
+Case Version: `10`  
 Scoring Standard: Rubric v0.2 (`rubric.json`)
 
 ## Overview

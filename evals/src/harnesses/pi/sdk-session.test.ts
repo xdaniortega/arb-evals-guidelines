@@ -1,16 +1,5 @@
 /**
- * L1 Integration Tests: Real Pi SDK and Pinned HTML Exporter without API Calls.
- *
- * Covers the in-guest SDK session contract:
- *
- * THE NARROW TEST BOUNDARY:
- * - Instantiates the ACTUAL pinned SDK session (@earendil-works/pi-coding-agent@0.85.0).
- * - Replaces ONLY `ModelRuntime.streamSimple` at the test boundary with a scripted native event stream.
- * - Does NOT mock or replace `createAgentSession`, the tool loop, resource discovery, or SessionManager.
- *
- * HONEST LIMIT STATEMENT:
- * Mocking completion proves target wiring and SDK behaviour — it does NOT prove
- * live authentication, provider wire-protocol compatibility, quotas, latency or skill quality.
+ * @notice Verifies the pinned Pi SDK session, native tools, resource isolation, budgets, redaction, and MCP integration without provider calls.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -37,7 +26,6 @@ import {
   lengthStopExhaustedOutputBudget,
   outputClampReachTolerance,
 } from "./sdk-session.ts";
-import { buildAmbientTools } from "./ambient-tools.ts";
 import { createMcpStub } from "./mcp-stub.test-helper.ts";
 import type { SkillToolBundle } from "../../core/skill-tools.ts";
 
@@ -874,73 +862,39 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
     });
   });
 
-  describe("Ambient custom glob tool integration", () => {
-    it("registers glob via customTools, executes it, and attests ambientCustomTools and activeTools matching allowlist", async () => {
-      const workspace = makeTempDir("pi-ambient-glob");
-      try {
-        mkdirSync(join(workspace, "src"), { recursive: true });
-        writeFileSync(join(workspace, "greeting.txt"), "hello");
-        writeFileSync(join(workspace, "src/app.ts"), "console.log('hi');");
-        writeFileSync(join(workspace, "src/util.ts"), "export const x = 1;");
-
-        const allowedTools = ["read", "bash", "edit", "write", "grep", "find", "ls", "glob"];
-        const scriptedStream = createScriptedStreamSimple([
-          {
-            type: "toolCall",
-            toolCalls: [
-              {
-                id: "call_glob_1",
-                name: "glob",
-                arguments: { pattern: "**/*.ts" },
-              },
-            ],
-            usage: {
-              input: 50, output: 15, cacheRead: 0, cacheWrite: 0, totalTokens: 65,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-          },
-          {
-            type: "text",
-            text: "Glob search completed.",
-            usage: {
-              input: 65, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 75,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-          },
-        ]);
-
-        const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+  describe("Native find tool registration", () => {
+    it.each(["baseline", "treatment"] as const)(
+      "exposes native find and omits glob in the %s arm",
+      async (arm) => {
+        const workspace = makeTempDir(`pi-find-${arm}`);
+        const skillDir = arm === "treatment" ? makeTempDir(`skill-${arm}`) : undefined;
+        if (skillDir) {
+          writeFileSync(
+            join(skillDir, "SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Test Skill\n",
+          );
+        }
+        const allowedTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
         const sessionInstance = await createPiSdkSession({
           cwd: workspace,
-          arm: "baseline",
-          target,
+          arm,
+          target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
+          skillPath: skillDir,
           allowedTools,
-          ambientTools: buildAmbientTools(["glob"], workspace),
-          streamSimpleOverride: scriptedStream,
+          streamSimpleOverride: createScriptedStreamSimple([{ type: "text", text: "unused" }]),
         });
-
-        // 1. Attestation check
-        const attestation = sessionInstance.attest();
-        expect(attestation.ambientCustomTools).toEqual(["glob"]);
-        expect(attestation.activeTools).toEqual([...allowedTools, "mcp"]);
-        expect(attestation.mcpClientId).toBe("shared-mcp-client-v1");
-
-        // 2. Run prompt and verify real execution of glob tool
-        await sessionInstance.runPrompt("Find all TypeScript files using glob.");
-
-        const messages = sessionInstance.session.messages;
-        const toolResult = messages.find(
-          (m) => m.role === "toolResult" && (m as any).toolCallId === "call_glob_1",
-        ) as any;
-        expect(toolResult).toBeDefined();
-        expect(toolResult.toolName).toBe("glob");
-        expect(toolResult.content[0].text).toBe("src/app.ts\nsrc/util.ts");
-
-        sessionInstance.dispose();
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    });
+        try {
+          const attestation = sessionInstance.attest();
+          expect(attestation.activeTools).toEqual([...allowedTools, "mcp"]);
+          expect(attestation.activeTools).toContain("find");
+          expect(attestation.activeTools).not.toContain("glob");
+          expect(attestation.mcpClientId).toBe("shared-mcp-client-v1");
+        } finally {
+          sessionInstance.dispose();
+          rmSync(workspace, { recursive: true, force: true });
+        }
+      },
+    );
   });
 
   describe("Shared MCP client integration", () => {

@@ -15,20 +15,25 @@ import { EvalError, toStructuredFailure } from "../src/core/types.ts";
 import { publishRun } from "../src/artifacts/publish.ts";
 
 const USAGE =
-  "usage: eval:publish --receipt <path to receipt.json> [--checks] [--repo-root <path>]\n" +
+  "usage: eval:publish --receipt <path to receipt.json> [--pair <pair-id|rNNN>] [--checks] [--repo-root <path>]\n" +
   "  Verifies run evidence, derives destination skill, and updates bounded EVALS.md section.\n" +
+  "  Without --pair: a single-pair run publishes that pair; a multi-pair run publishes the\n" +
+  "  mean over every pair. With --pair <id>: publishes that one named pair (full pair ID or\n" +
+  "  short rNNN label).\n" +
   "  --checks includes topic-level check breakdown table.";
 
 interface Args {
   readonly receiptPath: string;
   readonly checks: boolean;
   readonly repoRoot?: string;
+  readonly pairId?: string;
 }
 
 function parseArgs(argv: readonly string[]): Args {
   let receiptPath: string | undefined;
   let checks = false;
   let repoRoot: string | undefined;
+  let pairId: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -53,6 +58,15 @@ function parseArgs(argv: readonly string[]): Args {
       }
       repoRoot = resolve(value);
       index += 1;
+    } else if (flag === "--pair") {
+      if (pairId !== undefined) {
+        throw new EvalError("input-invalid", `--pair given twice. ${USAGE}`, { at: "--pair" });
+      }
+      if (value === undefined || value.startsWith("--")) {
+        throw new EvalError("input-invalid", `--pair requires a value. ${USAGE}`, { at: "--pair" });
+      }
+      pairId = value;
+      index += 1;
     } else {
       throw new EvalError("input-invalid", `unknown argument: ${String(flag)}. ${USAGE}`, { at: "argv" });
     }
@@ -62,13 +76,17 @@ function parseArgs(argv: readonly string[]): Args {
     throw new EvalError("input-invalid", `--receipt is required. ${USAGE}`, { at: "--receipt" });
   }
 
-  return { receiptPath, checks, repoRoot };
+  return { receiptPath, checks, repoRoot, ...(pairId !== undefined ? { pairId } : {}) };
 }
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
   const result = await publishRun(args);
-  process.stdout.write(`Published evaluation results for run ${result.runId} to ${result.relativeTargetPath}\n`);
+  const suffix =
+    result.mode === "mean"
+      ? ` (mean of ${result.pairIds.length} pairs)`
+      : ` pair ${result.pairIds[0]?.slice(result.pairIds[0].lastIndexOf("-") + 1) ?? ""}`;
+  process.stdout.write(`Published evaluation results for run ${result.runId}${suffix} to ${result.relativeTargetPath}\n`);
   return 0;
 }
 

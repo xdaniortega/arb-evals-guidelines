@@ -1,15 +1,5 @@
 /**
- * Real Apple Container conformance and isolation proof.
- *
- * These tests build an image, start guests, and talk to the `container` CLI, so they are
- * slow and host-dependent. They are therefore OPT-IN: they run only when
- * `EVAL_CONTAINER_TESTS=1` and the CLI is present, and otherwise report a VISIBLE skip
- * rather than silently disappearing — an absent test and a passing test must never look
- * the same.
- *
- * Run them with `pnpm test:container`.
- *
- * Every identity they create is exact, namespaced with a per-run nonce, and destroyed.
+ * @notice Verifies Apple Container conformance, isolation, native Pi tool execution, resource cleanup, and recovery.
  */
 
 import { execFileSync } from "node:child_process";
@@ -82,7 +72,6 @@ async function cleanupSdkTestResources(
   }
   return errors;
 }
-
 
 /**
  * Host-independent behaviour: these never touch the runtime, so they run everywhere and
@@ -377,7 +366,7 @@ if (!available) {
     );
   });
 } else {
-  // The SAME assertions the fake satisfies, against the real runtime.
+
   defineSandboxConformance({
     name: APPLE_CONTAINER_SANDBOX_ID,
     testDouble: false,
@@ -424,7 +413,21 @@ if (!available) {
         expect(boundary.uid).toBe(10001);
         const secret = `synthetic-l2-key-${nonce}`;
         await guest.deliverCredential({ variable: "GEMINI_API_KEY", value: secret });
-        await guest.stage({ destDir: "/work", files: [], readOnly: false });
+        await guest.stage({
+          destDir: "/work",
+          files: [
+            { path: "src/app.ts", base64: Buffer.from("export const app = true;\n").toString("base64"), mode: 0o644 },
+            { path: "src/ignored.ts", base64: Buffer.from("export const ignored = true;\n").toString("base64"), mode: 0o644 },
+          ],
+          readOnly: false,
+        });
+        const gitFixture = await guest.exec({
+          command: ["sh", "-c", "mkdir -p /work/.git && printf 'ref: refs/heads/main\\n' > /work/.git/HEAD && printf 'src/ignored.ts\\n' > /work/.gitignore"],
+          cwd: "/work",
+          timeoutMs: 5_000,
+          maxOutputBytes: 4_096,
+        });
+        expect(gitFixture.exitCode, gitFixture.stderr).toBe(0);
         expect(guest.execStream).toBeTypeOf("function");
         stream = await guest.execStream!({ command: ["node", "/opt/eval/run-measured.mjs", "agent"], cwd: "/work", timeoutMs: 15_000 });
         let stderr = "";
@@ -441,12 +444,13 @@ if (!available) {
         const frames: Array<Record<string, any>> = [];
         const init = { type: "init", protocolVersion: 1, mode: "scripted", arm: "baseline",
           target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
-          skillPath: null, allowedTools: ["read", "write", "bash"], ambientTools: [],
+          skillPath: null, allowedTools: ["read", "write", "bash", "find"],
           skillToolBundle: null,
           skillToolBundleSha256: "f9cc8e2b85ebe6aa64c21b5be039960cdc74a5743ca280d0f84c440f745c993b",
           processLifetimeMs: 180_000, armWallClockMs: 10_000,
           limits: { maxProviderRequests: 4, maxToolSteps: 4, maxOutputTokens: 4096 }, credentialVariable: "GEMINI_API_KEY",
           scriptedSteps: [
+            { type: "toolCall", toolCalls: [{ id: "find-guest", name: "find", arguments: { pattern: "*.ts", path: "src" } }] },
             { type: "toolCall", toolCalls: [{ id: "write-guest", name: "write", arguments: { path: "nested/result.txt", content: "42" } }] },
             { type: "toolCall", toolCalls: [{ id: "read-env", name: "bash", arguments: { command: 'printf "%s\\n" "$GEMINI_API_KEY"; printf "%s" "$GEMINI_API_KEY" | base64' } }] },
             { type: "text", text: "done" },
@@ -480,6 +484,10 @@ if (!available) {
         const records = frames.filter((frame) => frame.type === "record");
         expect(records[0]?.record).toMatchObject({ type: "session", id: ready!.sessionId });
         expect(records.some((frame) => frame.record.message?.toolCallId === "write-guest")).toBe(true);
+        const findResult = records.find((frame) => frame.record.message?.toolCallId === "find-guest")?.record.message;
+        expect(findResult?.isError).toBe(false);
+        expect(JSON.stringify(findResult?.content)).toContain("app.ts");
+        expect(JSON.stringify(findResult?.content)).not.toContain("ignored.ts");
         const output = JSON.stringify(frames);
         expect(output).toContain("[REDACTED:GEMINI_API_KEY]");
         expect(output).not.toContain(secret);
@@ -488,6 +496,44 @@ if (!available) {
         const exported = await guest.exportFiles({ root: "/work", maxFiles: 8, maxFileBytes: 4096, maxTotalBytes: 8192 });
         const file = exported.files.find((entry) => entry.path === "nested/result.txt");
         expect(Buffer.from(file!.base64, "base64").toString("utf8")).toBe("42");
+
+        // Run pathological-pattern and cancellation checks in a separate guest process,
+        // but through Pi's native find implementation rather than copied fd arguments.
+        const findSafety = await guest.exec({
+          command: ["node", "--input-type=module", "-e", `
+import { writeFileSync } from "node:fs";
+import { createFindToolDefinition } from "file:///opt/eval/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/find.js";
+writeFileSync("/work/x", "x");
+const find = createFindToolDefinition("/work");
+let timedOut = false;
+const patternAbort = new AbortController();
+const timer = setTimeout(() => { timedOut = true; patternAbort.abort(); }, 4000);
+try {
+  await find.execute("pathological", { pattern: "**/**/**/**/**/**/**/**/x", path: "." }, patternAbort.signal);
+} catch (error) {
+  if (timedOut) throw new Error("pathological pattern exceeded 4s hard timeout", { cause: error });
+  throw error;
+} finally {
+  clearTimeout(timer);
+}
+const cancellation = new AbortController();
+const pending = find.execute("cancel", { pattern: "**/*", path: "/usr" }, cancellation.signal);
+setTimeout(() => cancellation.abort(), 0);
+let cancellationObserved = false;
+try { await pending; } catch (error) {
+  cancellationObserved = error instanceof Error && error.message === "Operation aborted";
+}
+if (!cancellationObserved) throw new Error("Pi native find did not report cancellation");
+console.log(JSON.stringify({ cancellationObserved }));
+`],
+          cwd: "/work",
+          timeoutMs: 10_000,
+          maxOutputBytes: 4_096,
+        });
+        expect(findSafety.exitCode, findSafety.stderr).toBe(0);
+        expect(findSafety.timedOut).toBe(false);
+        expect(findSafety.stdout).toContain('"cancellationObserved":true');
+
         console.log(JSON.stringify({ phase: "sdk-l2-verified", imageDigest: image.digest, sessionId: ready!.sessionId,
           platform: ready!.process.platform, uid: ready!.process.uid, nativeRecords: records.length, agentMs: result!.timing.durationMs }));
       } finally {

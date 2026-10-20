@@ -1,11 +1,5 @@
 /**
- * Tests for zero-paid-call test guards and fail-fast completion transport blocking.
- *
- * Covers the zero-paid-call guard contract (see current-implementation.md):
- * - Fail-fast guard against reaching real model completion transport fails BEFORE networking.
- * - Negative tests deliberately attempt the forbidden paths and prove they are blocked.
- * - Tests do not read real credentials.
- * - Socket fixtures reject listen errors promptly with named SocketFixtureError.
+ * @notice Verifies tests block paid provider transport, real credentials, and unsafe socket or network access.
  */
 
 import { createServer } from "node:net";
@@ -261,7 +255,7 @@ async function main() {
     finalHttpCalls: -1,
   };
 
-  // 1. Synthetic fetch to Gemini endpoint
+
   try {
     await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=AIzaSy-SYNTHETIC-KEY", {
       method: "POST",
@@ -277,7 +271,7 @@ async function main() {
     }
   }
 
-  // 2. Synthetic https.request to Anthropic endpoint
+
   try {
     https.request("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -292,7 +286,7 @@ async function main() {
     }
   }
 
-  // 3. Synthetic http.get to OpenAI endpoint
+
   try {
     http.get("http://api.openai.com/v1/chat/completions");
     throw new Error("Synthetic http.get was NOT blocked!");
@@ -304,7 +298,7 @@ async function main() {
     }
   }
 
-  // 4. net.connect with options object to Gemini host
+
   await new Promise((resolve, reject) => {
     const sock = net.connect({ host: "generativelanguage.googleapis.com", port: 443 });
     sock.on("error", (err) => {
@@ -320,7 +314,7 @@ async function main() {
     });
   });
 
-  // 5. net.connect with (port, host) to Anthropic host
+
   await new Promise((resolve, reject) => {
     const sock = net.connect(443, "api.anthropic.com");
     sock.on("error", (err) => {
@@ -336,7 +330,7 @@ async function main() {
     });
   });
 
-  // Real final counters across all probes: test guards must intercept before safety net fallback or network
+
   const counters = globalThis.__safetyCounters || {};
   verified.finalDnsCalls = counters.dnsCalls ?? -1;
   verified.finalSocketConnectCalls = counters.socketConnectCalls ?? -1;
@@ -596,7 +590,6 @@ main().catch((err) => {
         target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
         skillPath: null,
         allowedTools: ["read"],
-        ambientTools: [],
         skillToolBundle: null,
         skillToolBundleSha256: "f9cc8e2b85ebe6aa64c21b5be039960cdc74a5743ca280d0f84c440f745c993b",
         processLifetimeMs: 180_000,

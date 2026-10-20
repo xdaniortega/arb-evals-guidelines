@@ -74,7 +74,7 @@ function parseArgs(argv: readonly string[]): Args {
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
-  const reports = await Promise.all(args.receiptPaths.map(buildRunReport));
+  const reports = await Promise.all(args.receiptPaths.map((receiptPath) => buildRunReport(receiptPath)));
   const rendered = reports.map((report, index) => formatRunReport(report, {
     format: args.format, details: args.details, checks: args.checks,
     ...(reports.length > 1 ? { runNumber: index + 1 } : {}),

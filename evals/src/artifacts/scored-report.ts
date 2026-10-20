@@ -13,7 +13,17 @@
 import { basename } from "node:path";
 import { ACCURACY_GROUPS, RUBRIC_GROUPS } from "../runner/rubric.ts";
 import type { Rubric, RubricGroupId, RubricScore } from "../runner/rubric.ts";
-import type { ConditionReport, RunReport } from "./queries.ts";
+import type { ConditionId } from "../core/types.ts";
+import type { ConditionReport, PairReport, RunReport } from "./queries.ts";
+
+/**
+ * Resolved rendering selection for a run's pair(s): either one selected pair
+ * (rendered exactly like today's single-pair output), or the mean over every
+ * pair (default when a run has more than one and none was named with `--pair`).
+ */
+export type PairSelection =
+  | { readonly mode: "single"; readonly pair: PairReport | undefined }
+  | { readonly mode: "mean"; readonly pairs: readonly PairReport[] };
 
 export const REPORT_JSON_SCHEMA_VERSION = 3;
 export const LEGACY_RESULT_LABEL = "LEGACY RESULT — scored under an earlier rubric; not reweighted";
@@ -112,6 +122,12 @@ export interface ScoredReportModel {
   readonly observationLabel: string;
   readonly repetitionCount: number;
   readonly validPairCount: number;
+  /** "single" for one rendered pair, "mean" when the tables hold the mean of every pair. */
+  readonly selectionMode: "single" | "mean";
+  /** Short labels of the rendered pair(s): `["r001"]` or `["r001", "r002", "r003"]`. */
+  readonly pairLabels: readonly string[];
+  /** Full pair IDs of the rendered pair(s), same order as `pairLabels`. */
+  readonly pairIds: readonly string[];
 
   readonly pillars: ScoredPillars;
   readonly accuracyTable: ScoredAccuracyTable;
@@ -282,6 +298,68 @@ function effectiveDuration(condition: ConditionReport | undefined): { ms: number
   return { ms: derived, derived: derived !== null };
 }
 
+// ---------------------------------------------------------------------------
+// Mean aggregation across pairs (multi-pair run, no `--pair` selector)
+// ---------------------------------------------------------------------------
+
+/** Mean of the finite numeric values present; `null` when none are available. */
+function meanOrNull(values: readonly (number | null | undefined)[]): number | null {
+  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  return nums.length === 0 ? null : nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+/** Rounds to one decimal place; whole means still render without a trailing `.0`. */
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+function findCondition(pair: PairReport, conditionId: ConditionId): ConditionReport | undefined {
+  return pair.conditions.find((c) => c.conditionId === conditionId);
+}
+
+/** Mean accuracy for one arm across every pair. Rubric groups and topics share the same rubric, so points/max stay fixed. */
+function meanArmAccuracy(rubric: Rubric, pairs: readonly PairReport[], conditionId: ConditionId): ScoredArmAccuracy {
+  const armScore = (c: ConditionReport | undefined): RubricScore | null =>
+    c !== undefined && c.gradeable ? (c.rubricScore ?? null) : null;
+  const scores = pairs.map((p) => armScore(findCondition(p, conditionId)));
+  const meanGroupCell = (id: RubricGroupId): ScoredCell => {
+    const got = meanOrNull(scores.map((s) => s?.groups[id].got ?? null));
+    return cell(got === null ? null : round1(got), ACCURACY_GROUPS[id].points, true);
+  };
+  const totalGot = meanOrNull(scores.map((s) => s?.accuracyTotal ?? null));
+  return {
+    total: cell(totalGot === null ? null : round1(totalGot), 100, true),
+    outcome: meanGroupCell("outcome"),
+    constraints: meanGroupCell("constraints"),
+    topics: (rubric.topics ?? []).map((t) => {
+      const got = meanOrNull(scores.map((s) => (s === null ? null : s.topics.find((st) => st.id === t.id)?.got ?? 0)));
+      return { id: t.id, label: t.label, ...cell(got === null ? null : round1(got), t.points, false) };
+    }),
+  };
+}
+
+/**
+ * Synthesizes a mean condition for one arm across every pair, for the tables that read
+ * tokens, duration and status/gradeability from a single `ConditionReport`. Accuracy is
+ * aggregated separately by `meanArmAccuracy`; this only feeds cost, latency and status.
+ * Status, gradeability and stop cause are read from the first pair, since eligibility
+ * already requires every pair to be graded before a mean is rendered.
+ */
+function meanCondition(pairs: readonly PairReport[], conditionId: ConditionId): ConditionReport | undefined {
+  const conditions = pairs.map((p) => findCondition(p, conditionId)).filter((c): c is ConditionReport => c !== undefined);
+  if (conditions.length === 0) return undefined;
+  const base = conditions[0]!;
+  const meanTokens = meanOrNull(conditions.map((c) => c.consumedTokens));
+  const durations = conditions.map((c) => effectiveDuration(c));
+  const meanMs = meanOrNull(durations.map((d) => d.ms));
+  const derived = durations.some((d) => d.derived);
+  const roundedMeanMs = meanMs === null ? null : Math.round(meanMs);
+  return {
+    ...base,
+    consumedTokens: meanTokens === null ? null : Math.round(meanTokens),
+    durationMs: derived ? null : roundedMeanMs,
+    sessionDurationMs: derived ? roundedMeanMs : null,
+  };
+}
+
 function withDerivedLabel(text: string, derived: boolean): string {
   return derived && text !== NA ? `${text} (${SESSION_DERIVED_LABEL})` : text;
 }
@@ -374,11 +452,21 @@ function buildStatusLine(
 
 const bold = (text: string): string => `**${text}**`;
 
-export function buildScoredReport(report: RunReport, rubric: Rubric | null): ScoredReportModel {
+export function buildScoredReport(
+  report: RunReport,
+  rubric: Rubric | null,
+  selection: PairSelection = { mode: "single", pair: report.pairs[0] },
+): ScoredReportModel {
   const isLegacy = rubric === null || report.rubricVersion === undefined;
-  const firstPair = report.pairs[0];
+  const isMean = selection.mode === "mean";
+  // Representative single pair backing every field that isn't arm-aggregated below
+  // (case/agent/skill metadata, and the legacy branch, which stays single-pair only).
+  const firstPair = selection.mode === "single" ? selection.pair : selection.pairs[0];
   const pairId = firstPair?.pairId ?? `${report.runId}-r001`;
   const pairLabel = pairId.slice(pairId.lastIndexOf("-") + 1);
+  const renderedPairs = selection.mode === "mean" ? selection.pairs : firstPair ? [firstPair] : [];
+  const pairLabels = renderedPairs.map((p) => p.pairId.slice(p.pairId.lastIndexOf("-") + 1));
+  const pairIds = renderedPairs.map((p) => p.pairId);
 
   const neutralFallback = report.caseSelector || report.caseId || NA;
   const caseTitle = report.caseTitle ?? rubric?.display?.title ?? neutralFallback;
@@ -389,13 +477,18 @@ export function buildScoredReport(report: RunReport, rubric: Rubric | null): Sco
   const agentLabel = `${harnessName} · ${targetModel}`;
   const skillLabel = report.skillSourcePath ? basename(report.skillSourcePath) : NA;
 
-  const baselineCond = firstPair?.conditions.find((c) => c.conditionId === "baseline");
-  const treatmentCond = firstPair?.conditions.find((c) => c.conditionId === "treatment");
+  // In mean mode, cost/latency/status read from a synthesized mean condition per arm;
+  // in single mode, they read the selected pair's own condition, exactly as before.
+  const baselineCond = isMean ? meanCondition(selection.pairs, "baseline") : firstPair?.conditions.find((c) => c.conditionId === "baseline");
+  const treatmentCond = isMean ? meanCondition(selection.pairs, "treatment") : firstPair?.conditions.find((c) => c.conditionId === "treatment");
 
   const common = {
     runId: report.runId,
     pairId,
     pairLabel,
+    selectionMode: selection.mode,
+    pairLabels,
+    pairIds,
     caseSelector: report.caseSelector,
     caseId: report.caseId,
     caseTitle,
@@ -403,7 +496,11 @@ export function buildScoredReport(report: RunReport, rubric: Rubric | null): Sco
     agentLabel,
     skillLabel,
     status: report.status,
-    observationLabel: "single-pair observation",
+    observationLabel: isMean
+      ? `mean of ${renderedPairs.length} repetitions`
+      : report.pairs.length > 1
+        ? `pair ${pairLabel} of ${report.pairs.length} repetitions`
+        : "single-pair observation",
     repetitionCount: report.pairs.length,
     validPairCount: report.counts?.validPairs ?? 0,
     costLatencyTable: buildCostLatencyTable(baselineCond, treatmentCond),
@@ -411,6 +508,7 @@ export function buildScoredReport(report: RunReport, rubric: Rubric | null): Sco
 
   if (isLegacy) {
     // Legacy run: original scalar scores, never reweighted into rubric groups.
+    // Legacy rendering stays single-pair only; mean aggregation is rubric v0.2 only.
     const legacyAccuracy = (c: ConditionReport | undefined): number | null =>
       c !== undefined && c.gradeable && c.score !== null ? Math.round(c.score * 100) : null;
     const baselineAcc = legacyAccuracy(baselineCond);
@@ -436,8 +534,12 @@ export function buildScoredReport(report: RunReport, rubric: Rubric | null): Sco
 
   const armScore = (c: ConditionReport | undefined): RubricScore | null =>
     c !== undefined && c.gradeable ? (c.rubricScore ?? null) : null;
-  const baselineAccuracy = buildArmAccuracy(rubric, armScore(baselineCond));
-  const treatmentAccuracy = buildArmAccuracy(rubric, armScore(treatmentCond));
+  const baselineAccuracy = isMean
+    ? meanArmAccuracy(rubric, selection.pairs, "baseline")
+    : buildArmAccuracy(rubric, armScore(baselineCond));
+  const treatmentAccuracy = isMean
+    ? meanArmAccuracy(rubric, selection.pairs, "treatment")
+    : buildArmAccuracy(rubric, armScore(treatmentCond));
   const badge = generateBadge(treatmentCond, report.status, treatmentAccuracy.total.got);
 
   const accuracyTable: ScoredAccuracyTable = {
@@ -507,7 +609,12 @@ function headerFields(model: ScoredReportModel): readonly (readonly [string, str
   return [
     ["Agent", model.agentLabel],
     ["Skill", model.skillLabel],
-    ["Run", `${model.runId} · Pair ${model.pairLabel}`],
+    [
+      "Run",
+      model.selectionMode === "mean"
+        ? `${model.runId} · Pairs ${model.pairLabels.join(", ")}`
+        : `${model.runId} · Pair ${model.pairLabel}`,
+    ],
     ["Status", model.statusLine],
   ];
 }
@@ -668,6 +775,10 @@ export function renderScoredJson(model: ScoredReportModel): Record<string, unkno
       isLegacy: true,
       legacyLabel: model.legacyLabel ?? LEGACY_RESULT_LABEL,
       status: model.statusLine,
+      mode: model.selectionMode,
+      selectedPairId: model.pairId,
+      pairIds: model.pairIds,
+      repetitionCount: model.repetitionCount,
       ...jsonPillars(model),
     };
   }
@@ -685,6 +796,10 @@ export function renderScoredJson(model: ScoredReportModel): Record<string, unkno
     rubricVersion: model.rubricVersion ?? null,
     isLegacy: false,
     status: model.statusLine,
+    mode: model.selectionMode,
+    selectedPairId: model.pairId,
+    pairIds: model.pairIds,
+    repetitionCount: model.repetitionCount,
     ...jsonPillars(model),
     groups: { outcome: group("outcome"), constraints: group("constraints") },
     topics: (model.checksTable?.rows ?? []).map((r) => ({

@@ -14,9 +14,9 @@ import { join } from "node:path";
 import { createNativeSessionCapture, NATIVE_PREFIX_MAX_RECORD_BYTES, NATIVE_PREFIX_MAX_RECORDS, NATIVE_PREFIX_MAX_TOTAL_BYTES } from "../../artifacts/native-prefix.mjs";
 import { redactSecrets, scanForSecrets } from "../../core/secret-scan.mjs";
 import { canonicalJson } from "../../core/experiment.mjs";
-import { CONDITION_OPERATION_ALLOWANCE_MS, deriveStopCause, resolveGuestTimeouts, } from "../../core/types.mjs";
+import { CONDITION_OPERATION_ALLOWANCE_MS, resolveGuestTimeouts, EvalError, } from "../../core/types.mjs";
+import { classifyTerminalState } from "./terminal-classification.mjs";
 import { createPiSdkSession } from "./sdk-session.mjs";
-import { buildAmbientTools } from "./ambient-tools.mjs";
 import { createScriptedStreamSimple } from "./scripted-stream.mjs";
 import { installCompletionTransportBlocker } from "../../transport-blocker.mjs";
 const PROTOCOL_VERSION = 1;
@@ -30,10 +30,6 @@ const MAX_PROCESS_LIFETIME_MS = 180_000;
 // barrier also allows its sibling's setup, serial prompt, capture and cleanup.
 const MAX_PRE_PROMPT_MS = CONDITION_OPERATION_ALLOWANCE_MS;
 const SYNTHETIC_KEY = "synthetic-scripted-eval-key";
-// Cancellation messages emitted by a provider or the SDK when an abort we requested
-// lands. Anchored at both ends so a decorated failure such as
-// "This operation was aborted: upstream failure" is NOT treated as a clean cancellation.
-const KNOWN_ABORT_MESSAGE = /^(?:abort(?:error)?: )?(?:this )?(?:operation|request|sdk prompt)(?: was)? aborted\.?$/i;
 function object(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -101,7 +97,7 @@ function parseSteps(value) {
  * @returns A validated frame with canonical nullable task budgets.
  */
 export function parseInit(value) {
-    knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "ambientTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "captureReasoning", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
+    knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "captureReasoning", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
     if (value.protocolVersion !== PROTOCOL_VERSION)
         throw new Error("unsupported guest agent protocolVersion");
     if (value.mode !== "measured" && value.mode !== "scripted")
@@ -122,18 +118,8 @@ export function parseInit(value) {
         throw new Error("baseline init must not carry a skillPath");
     if (value.arm === "treatment" && (typeof value.skillPath !== "string" || value.skillPath === ""))
         throw new Error("treatment init requires one skillPath");
-    if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => typeof tool !== "string" || tool === ""))
-        throw new Error("init.allowedTools must be a string array");
-    if (!Array.isArray(value.ambientTools) || value.ambientTools.some((tool) => typeof tool !== "string" || !/^[a-z][a-z0-9_-]*$/.test(tool)))
-        throw new Error("init.ambientTools must be an array of valid tool names");
-    const ambientToolSet = new Set();
-    const allowedToolSet = new Set(value.allowedTools);
-    for (const tool of value.ambientTools) {
-        if (ambientToolSet.has(tool))
-            throw new Error("init.ambientTools contains duplicate entries");
-        ambientToolSet.add(tool);
-        if (!allowedToolSet.has(tool))
-            throw new Error(`init.ambientTools entry '${tool}' is not in allowedTools`);
+    if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => typeof tool !== "string" || !/^[a-z][a-z0-9_-]*$/.test(tool))) {
+        throw new EvalError("protocol-drift", "init.allowedTools must be an array of valid tool names", { at: "guest.init" });
     }
     if (typeof value.skillToolBundleSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.skillToolBundleSha256)) {
         throw new Error("init.skillToolBundleSha256 must be a 64-char lowercase hex digest");
@@ -230,7 +216,6 @@ export function parseInit(value) {
         target: target,
         skillPath: value.skillPath,
         allowedTools: [...value.allowedTools],
-        ambientTools: [...value.ambientTools],
         skillToolBundle: (value.arm === "treatment" ? structuredClone(value.skillToolBundle) : null),
         skillToolBundleSha256: value.skillToolBundleSha256,
         processLifetimeMs: value.processLifetimeMs,
@@ -455,7 +440,6 @@ export async function runGuestAgent(options) {
             target: init.target,
             ...(init.skillPath === null ? {} : { skillPath: init.skillPath }),
             allowedTools: init.allowedTools,
-            ambientTools: buildAmbientTools(init.ambientTools, process.cwd()),
             skillToolBundle: init.skillToolBundle,
             skillToolBundleSha256: init.skillToolBundleSha256,
             guardedSecrets: secrets,
@@ -564,32 +548,19 @@ export async function runGuestAgent(options) {
         // independently of the normalized `stopReason` used for semantic classification.
         // Absent for legacy/unmanaged responses, in which case it is null.
         const rawStopReason = typeof last?.rawStopReason === "string" ? last.rawStopReason : null;
-        const expectedAbortError = executionError instanceof Error && executionError.name === "AbortError";
         const nativeErrorMessage = typeof last?.errorMessage === "string" ? last.errorMessage : null;
-        const knownAbortMessage = nativeErrorMessage !== null && KNOWN_ABORT_MESSAGE.test(nativeErrorMessage.trim());
-        // Some providers report a cancellation we requested as a plain error rather than an
-        // abort. Normalize it only when THIS harness initiated the abort, so an unsolicited
-        // provider-side abort error still classifies as a genuine failure.
-        const stopReason = nativeStopReason === "error" && semanticAbortCause !== null && knownAbortMessage
-            ? "aborted"
-            : nativeStopReason;
-        const aborted = stopReason === "aborted";
-        // A budget-terminal message is the harness's own doing, not an arbitrary failure.
-        const nativeArbitraryFailure = aborted && nativeErrorMessage !== null && !knownAbortMessage && usage.taskLimitReason === null;
-        const arbitraryExecutionFailure = nativeArbitraryFailure || (executionError !== null && !(semanticAbortCause !== null && expectedAbortError));
-        const terminalClass = arbitraryExecutionFailure || stopReason === "error"
-            ? "execution-failure"
-            : semanticAbortCause === "external"
-                ? "interrupted"
-                : semanticAbortCause === "arm-budget" || usage.taskLimitReason !== null || stopReason === "length"
-                    ? "task-limit"
-                    : aborted
-                        ? "unexpected-abort"
-                        : "completed";
-        const outcome = terminalClass === "completed" ? "completed" : terminalClass === "task-limit" ? "task-limit" : "infrastructure-failure";
-        // Precise stop cause: a provider-native `length` truncation is reported distinctly and
-        // is never conflated with a harness cumulative-output-token cap (see deriveStopCause).
-        const stopCause = deriveStopCause({ terminalClass, semanticAbortCause, taskLimitReason: usage.taskLimitReason, stopReason });
+        const classification = classifyTerminalState({
+            stopReason: nativeStopReason,
+            rawStopReason,
+            errorMessage: nativeErrorMessage,
+            semanticAbortCause,
+            taskLimitReason: usage.taskLimitReason,
+            executionError,
+        });
+        const terminalClass = classification.terminalClass;
+        const outcome = classification.outcome;
+        const stopCause = classification.stopCause;
+        const stopReason = classification.normalizedStopReason;
         capture.finish(terminalClass === "completed", terminalClass === "completed" ? null : executionError === null ? terminalClass : safeError(executionError));
         state = "settled";
         emitFrame({

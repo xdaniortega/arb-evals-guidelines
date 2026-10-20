@@ -242,6 +242,9 @@ export const STOP_CAUSES = [
 ] as const;
 export type StopCause = (typeof STOP_CAUSES)[number];
 
+/** Coarse execution outcome returned by every harness implementation. */
+export type HarnessOutcome = "completed" | "task-limit" | "infrastructure-failure";
+
 /** The terminal classes the harness computes before mapping to an outcome/stop cause. */
 export type TerminalClass =
   | "completed"
@@ -659,6 +662,13 @@ export function decodeFreshCaseConfig(
   for (const [index, tool] of allowedTools.entries()) {
     if (!TOOL_NAME_PATTERN.test(tool)) {
       throw new EvalError("input-invalid", `${at}.allowedTools[${index}] is not a valid tool name`, { at });
+    }
+    if (tool === "glob") {
+      throw new EvalError(
+        "input-invalid",
+        `${at}.allowedTools: "glob" is no longer provided; use "find" (Pi native)`,
+        { at: `${at}.allowedTools` },
+      );
     }
   }
   const candidateMode = resolveCandidateMode(record.candidateMode, at);

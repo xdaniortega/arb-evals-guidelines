@@ -1,22 +1,10 @@
 /**
- * Paired-run lifecycle proof.
- *
- * These tests exist to make the subsystem's central claims falsifiable rather than
- * asserted in prose: that skill presence is the only difference between the arms, that
- * both arms ran from one image digest, that a guest and network are destroyed AND
- * verified absent before the next condition is created, that an ungradeable arm produces
- * no delta, that an interrupted run still seals inspectable partial evidence, that
- * `measured` refuses test doubles, and that a secret echoed by a harness is quarantined
- * rather than written.
- *
- * They run against the REAL suite and case data (frozen inputs must be exercised as they
- * actually are) but write every artifact into temporary roots, so no run evidence is ever
- * left in the repository.
+ * @notice Verifies paired evaluation parity, lifecycle, grading, evidence sealing, cleanup, and interruption behavior.
  */
 
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PARITY_FIELDS, buildManifestTree, canonicalJson, canonicalJsonSha256, resourceNameFor, runIdFor, sha256Hex } from "../core/experiment.ts";
@@ -26,6 +14,8 @@ import { EvalError } from "../core/types.ts";
 import { scanManyForSecrets } from "../core/secret-scan.ts";
 import { createFakeHarness } from "../harnesses/fake.ts";
 import type { FakeHarnessScript } from "../harnesses/fake.ts";
+import { createPiHarness } from "../harnesses/pi/adapter.ts";
+import { createScriptedStreamSimple } from "../harnesses/pi/scripted-stream.ts";
 import { createFakeSandbox } from "../sandboxes/fake.ts";
 import { createInProcessValidatorRunner } from "./validation.ts";
 import { readRunJournal } from "../artifacts/store.ts";
@@ -37,25 +27,13 @@ import type { ValidatorRunner } from "./validation.ts";
 import {
   assertModeAllows,
   disposeRunWorkDir,
-  resolveAmbientTools,
   runPairedEvaluation,
 } from "./run.ts";
 
-describe("ambient tool resolution", () => {
-  it("offers ambient tools only within the case's frozen allowlist, identically for both arms", () => {
-    // Regression: the runner requested `glob` unconditionally while the guest refuses an
-    // ambient tool outside allowedTools, so every arm of a case omitting glob failed at
-    // readiness with protocol-drift. The real-container gate caught it, not the host suite.
-    expect(resolveAmbientTools(["read", "bash", "edit", "write", "grep", "find", "ls", "glob"])).toEqual(["glob"]);
-    expect(resolveAmbientTools(["read", "write", "edit", "bash"])).toEqual([]);
-    // Derived only from frozen case bytes, so the two arms cannot diverge.
-    const allowed = ["read", "glob"];
-    expect(resolveAmbientTools(allowed)).toEqual(resolveAmbientTools(allowed));
-  });
-
+describe("empty-bundle digest pin", () => {
   it("pins the empty-bundle digest that hand-written guest fixtures hard-code", () => {
-    // Several init-frame fixtures embed this literal; if the bundle shape ever changes, this
-    // fails loudly instead of letting those fixtures drift out of sync.
+
+
     expect(canonicalJsonSha256(EMPTY_SKILL_TOOL_BUNDLE)).toBe(
       "f9cc8e2b85ebe6aa64c21b5be039960cdc74a5743ca280d0f84c440f745c993b",
     );
@@ -79,8 +57,8 @@ describe("startup deadline and image build", () => {
         throw new Error("unreachable");
       },
     };
-    // The startup watchdog is anchored to the process-boundary clock and is deliberately
-    // NOT a function of the per-arm wall clock, so it never becomes a hidden arm cap.
+
+
     const invocationStartedAtMs = Date.now() - 600;
     const { result } = await runFake({ sandbox, startupAllowanceMs: 1_000, invocationStartedAtMs });
     expect(buildDeadlineAtMs).toBe(invocationStartedAtMs + 1_000);
@@ -123,12 +101,16 @@ interface Harnessed {
 async function createTempEvalsRootWithRubric(rubric: unknown): Promise<string> {
   const tempEvals = await mkdtemp(join(tmpdir(), "eval-rubric-evals-"));
   tempRoots.push(tempEvals);
+  const sourceCaseDir = join(evalsRoot, "cases", "network-config-01");
   const targetCaseDir = join(tempEvals, "cases", "network-config-01");
   await mkdir(join(tempEvals, "cases"), { recursive: true });
-  await cp(join(evalsRoot, "cases", "network-config-01"), targetCaseDir, { recursive: true });
-  // Symlink (not recursive-copy) the large container dir: it is only used as a faked
-  // image-build contextDir under the fake sandbox, and a per-test recursive copy of it
-  // races/times out under full-suite parallelism. A symlink is atomic and instant.
+  await cp(sourceCaseDir, targetCaseDir, {
+    recursive: true,
+    filter: (src) => relative(sourceCaseDir, src).split(sep)[0] !== "runs",
+  });
+
+
+
   await symlink(join(evalsRoot, "container"), join(tempEvals, "container"));
   await writeFile(join(targetCaseDir, "rubric.json"), JSON.stringify(rubric, null, 2), "utf8");
   return tempEvals;
@@ -332,7 +314,7 @@ describe("parity", () => {
     }
     // Case identity and policy, skill snapshot, and tool bundle hashes must be populated.
     expect(left.caseId).toBe("network-config-01");
-    expect(left.caseVersion).toBe(9);
+    expect(left.caseVersion).toBe(10);
     expect(String(left.executionPolicySha256)).toMatch(/^[0-9a-f]{64}$/);
     expect(String(left.skillSnapshotTreeSha256)).toMatch(/^[0-9a-f]{64}$/);
     expect(String(left.skillToolBundleSha256)).toMatch(/^[0-9a-f]{64}$/);
@@ -365,7 +347,6 @@ describe("parity", () => {
     const { runDir } = await runFake();
     const policy = (await readRecord(runDir, "inputs/policy.json")).execution as Record<string, unknown>;
     expect(policy.armOrder).toEqual(["baseline", "treatment"]);
-    expect(policy.ambientTools).toEqual(["glob"]);
     expect(policy.sequentialExecution).toBe(true);
     expect(policy.destroyPreviousBeforeNext).toBe(true);
     expect(policy.verifyDestructionBeforeNext).toBe(true);
@@ -511,6 +492,54 @@ describe("delta validity", () => {
     }
     const pair = await readRecord(runDir, `pairs/${result.runId}-r001/pair.json`);
     expect(pair).toMatchObject({ gradeable: true, delta: 0 });
+  });
+
+  it("proves a local unsolicited abort is inspectable but ungraded with stopCause unexpected-abort", async () => {
+    const streamSimpleOverride = createScriptedStreamSimple([
+      {
+        type: "text",
+        text: "partial progress before unsolicited abort",
+        stopReason: "aborted",
+      },
+    ]);
+    const harness = createPiHarness({ streamSimpleOverride });
+    const { result, runDir } = await runFake({
+      harness,
+      target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
+    });
+
+    // Both arms hit unsolicited abort and classify as infrastructure-failure / unexpected-abort
+    const baseline = await readRecord(runDir, `${conditionDir(result.runId, "baseline")}/condition.json`);
+    expect(baseline.status).toBe("infrastructure-failure");
+    expect(baseline.stopCause).toBe("unexpected-abort");
+    expect(baseline.gradeable).toBe(false);
+    expect(baseline.failureClass).toBe("infrastructure");
+
+    // Pair comparison is ungradeable and delta is null
+    const pair = await readRecord(runDir, `pairs/${result.runId}-r001/pair.json`);
+    expect(pair.gradeable).toBe(false);
+    expect(pair.delta).toBeNull();
+    expect(String(pair.deltaReason)).toContain("baseline");
+
+    // Condition evidence is preserved and inspectable: condition, session, validation
+    const session = await readRecord(runDir, `${conditionDir(result.runId, "baseline")}/session.json`);
+    expect(session).toBeDefined();
+
+    const validation = await readRecord(runDir, `${conditionDir(result.runId, "baseline")}/validation.json`);
+    expect(validation.outcome).toBeNull();
+
+    // Verification via inspectCondition confirms evidence integrity and inspection
+    const inspection = await inspectCondition({
+      receiptPath: result.receiptPath,
+      pairId: `${result.runId}-r001`,
+      conditionId: "baseline",
+      view: "condition",
+    });
+    expect(inspection.content).toMatchObject({
+      status: "infrastructure-failure",
+      stopCause: "unexpected-abort",
+      gradeable: false,
+    });
   });
 
   it("grades a task-limit arm under the frozen rubric and shows it in the accuracy and outcome checks tables", async () => {

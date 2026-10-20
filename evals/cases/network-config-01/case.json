@@ -1,8 +1,8 @@
 {
   "id": "network-config-01",
-  "version": 9,
+  "version": 10,
   "prompt": "Migrate this app’s production and staging network configuration in config.json from Ethereum to Arbitrum. Production should target Arbitrum One and staging should target Arbitrum Sepolia. Update the network identities, public RPC and explorer endpoints, sequencer routing and submission policy, withdrawal finality and force-inclusion settings, canonical bridge onboarding settings, and WETH/USDC token identities needed for the migration. Preserve unrelated application settings and configuration structure.",
   "outputPath": "config.json",
-  "allowedTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "glob"],
+  "allowedTools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
   "validator": "validator.ts"
 }
