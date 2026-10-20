@@ -1,0 +1,4 @@
+[submodule "arbitrum-skill-evals"]
+	path = arbitrum-skill-evals
+	url = git@github.com:xdaniortega/arbitrum-skills-evals.git
+	branch = feat/evals-guidelines

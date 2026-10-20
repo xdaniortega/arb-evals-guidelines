@@ -78,7 +78,7 @@ Swap the `--skill` path to `arbitrum-skill-evals/skills/arbitrum-network` to eva
 
 ## 10. Results
 
-- Published reports sit next to each skill in arbitrum-skill-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (<ARBITRUM_SKILL_EVALS_URL>).
+- Published reports sit next to each skill in arbitrum-skill-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (https://github.com/xdaniortega/arbitrum-skills-evals).
 - Sealed evidence kept in this folder:
   - `runs/20260924T151721Z-bfb34c20`: `arbitrum-docs`, 3 pairs.
   - `runs/20260924T170734Z-b115674e`: `arbitrum-network`, 3 pairs.

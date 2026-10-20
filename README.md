@@ -5,7 +5,7 @@ Does a skill help an agent do a task better? The Arbitrum evals guidelines compa
 
 Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
 
-The skills under test live in [arbitrum-skill-evals](<ARBITRUM_SKILL_EVALS_URL>). This repository holds the runner, the eval cases and the sealed run evidence. The skills repository is pinned here as the `arbitrum-skill-evals/` git submodule.
+The skills under test live in [arbitrum-skill-evals](https://github.com/xdaniortega/arbitrum-skills-evals). This repository holds the runner, the eval cases and the sealed run evidence. The skills repository is pinned here as the `arbitrum-skill-evals/` git submodule.
 
 ## 1. What is an eval?
 
@@ -50,7 +50,7 @@ Edit `.env` and fill in the key for your chosen provider. For the example below,
 
 ### Step 2: Choose the skill
 
-Pick a skill in [arbitrum-skill-evals](<ARBITRUM_SKILL_EVALS_URL>). It must have a pinned body (the registry `commit` and `digest`). Check out the submodule at that commit, then confirm the digest, which is the sha256 of `SKILL.md`:
+Pick a skill in [arbitrum-skill-evals](https://github.com/xdaniortega/arbitrum-skills-evals). It must have a pinned body (the registry `commit` and `digest`). Check out the submodule at that commit, then confirm the digest, which is the sha256 of `SKILL.md`:
 
 ```bash
 git -C arbitrum-skill-evals checkout <pinned-commit>
@@ -340,7 +340,7 @@ eval-cases/
         └── runs/                    # Sealed evidence created by runs (views/ is git-ignored)
 ```
 
-Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skill-evals](<ARBITRUM_SKILL_EVALS_URL>), for example [`skills/arbitrum-docs/EVALS.md`](<ARBITRUM_SKILL_EVALS_URL>/blob/<ref>/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
+Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skill-evals](https://github.com/xdaniortega/arbitrum-skills-evals), for example [`skills/arbitrum-docs/EVALS.md`](https://github.com/xdaniortega/arbitrum-skills-evals/blob/feat/evals-guidelines/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
 
 To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need the submodule.
 
