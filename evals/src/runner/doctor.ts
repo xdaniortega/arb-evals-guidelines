@@ -1,14 +1,13 @@
 /**
  * No-request readiness doctor for the skill evaluation subsystem.
  *
- * WHY this exists: Phase 4 introduces the real Pi agent runtime and credentials, but spends
- * ZERO money. Before Phase 5 executes paid evaluations, the doctor verifies every prerequisite:
+ * Validates the target against the pinned Pi catalog, then checks local prerequisites
+ * without spending provider credits:
  * 1. Platform is Apple-silicon macOS (darwin arm64).
  * 2. Apple Container runtime is installed and running (`container system status`).
  * 3. Container image lock verifies and Pi is present at pinned version 0.85.0.
  * 4. Provider credential is present and non-blank in git-ignored evals/.env, WITHOUT printing or hashing it.
- * 5. Requested model is exact, pinned, non-preview, and non-alias in the Pi catalog.
- * 6. Guest readiness: a credential-free guest starts, attests, and destroys cleanly.
+ * 5. Guest readiness: a credential-free guest starts, attests, and destroys cleanly.
  *
  * ZERO-REQUEST GUARANTEE: this doctor never sends a prompt or completion request. The guest
  * is launched without credentials, tested for privilege and network attestation only, and destroyed.
@@ -19,11 +18,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { runIdFor } from "../core/experiment.ts";
-import { EvalError, SAFE_DEFAULT_LIMITS, type ProviderId } from "../core/types.ts";
-import { assertGitIgnored, getProviderCredential, parseDotEnv } from "./credentials.ts";
-import { FROZEN_MODEL_ID, FROZEN_PROVIDER_ID, FROZEN_THINKING_LEVEL, validateTargetModel } from "./models.ts";
+import { createRunJournal, type RunJournal } from "../artifacts/store.ts";
+import { PROVIDER_CREDENTIAL_VARIABLES, SAFE_DEFAULT_LIMITS, type ProviderId } from "../core/types.ts";
+import type { Target } from "../core/experiment.ts";
+import { getProviderCredential, loadGuardedCredentials } from "./credentials.ts";
+import { FROZEN_MODEL_ID, resolveTargetConfiguration } from "./models.ts";
 import type { Sandbox } from "../sandboxes/sandbox.ts";
 import { createAppleContainerSandbox } from "../sandboxes/apple-container.ts";
+import { EVAL_NETWORK_POLICY } from "./run.ts";
 
 export interface DoctorCheckItem {
   readonly id: string;
@@ -36,6 +38,7 @@ export interface DoctorReport {
   readonly ready: boolean;
   readonly provider: ProviderId;
   readonly model: string;
+  readonly thinking: Target["thinking"];
   readonly providerRequests: 0;
   readonly checks: readonly DoctorCheckItem[];
   readonly durationMs: number;
@@ -44,22 +47,12 @@ export interface DoctorReport {
 export interface DoctorOptions {
   readonly repoRoot: string;
   readonly evalsRoot: string;
-  readonly provider?: ProviderId;
+  readonly provider?: string;
   readonly model?: string;
+  readonly thinking?: string;
   readonly sandbox?: Sandbox;
   readonly skipGuestReadiness?: boolean;
 }
-
-const GUEST_READINESS_LIMITS = {
-  cpus: 2,
-  memoryMiB: 2048,
-  pids: 256,
-  wallClockMs: 30_000,
-  maxWorkspaceBytes: 10 * 1024 * 1024,
-  maxExportedFiles: 100,
-  maxExportedFileBytes: 1024 * 1024,
-  maxRetries: 0,
-};
 
 const GUEST_READINESS_POLICY = {
   readOnlyRoot: true,
@@ -70,10 +63,18 @@ const GUEST_READINESS_POLICY = {
   dropCapabilities: true,
 };
 
+/**
+ * @notice Checks target compatibility and local readiness without model requests.
+ * @param options Requested model/provider/thinking and paths to the evaluation setup.
+ * @returns Readiness checks for the resolved target, without credential values.
+ */
 export async function runReadinessDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const startedAt = Date.now();
-  const provider = options.provider ?? FROZEN_PROVIDER_ID;
-  const model = options.model ?? FROZEN_MODEL_ID;
+  const { provider, model, thinking } = resolveTargetConfiguration({
+    model: options.model ?? FROZEN_MODEL_ID,
+    provider: options.provider,
+    thinking: options.thinking,
+  });
   const checks: DoctorCheckItem[] = [];
 
   // 1. Platform check: Apple-silicon macOS
@@ -155,18 +156,16 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
   let credDetail = "";
   try {
     const envPath = join(options.evalsRoot, ".env");
-    assertGitIgnored(envPath, options.repoRoot);
-    const envContent = await readFile(envPath, "utf8");
-    const parsed = parseDotEnv(envContent);
-    const value = getProviderCredential(provider, parsed);
+    const loaded = await loadGuardedCredentials(envPath, options.repoRoot);
+    const value = getProviderCredential(provider, loaded.credentials);
     if (value !== null && value.length > 0) {
       credOk = true;
-      credDetail = `${provider === "google" ? "GEMINI_API_KEY" : "API key"} present in git-ignored evals/.env (non-blank)`;
+      credDetail = `${PROVIDER_CREDENTIAL_VARIABLES[provider]} present for ${provider} / ${model} in git-ignored evals/.env (non-blank)`;
     } else {
-      credDetail = `no non-blank credential found for provider '${provider}' in evals/.env`;
+      credDetail = `no non-blank ${PROVIDER_CREDENTIAL_VARIABLES[provider]} found for ${provider} / ${model} in evals/.env`;
     }
   } catch (error) {
-    credDetail = `credential gate check failed: ${error instanceof Error ? error.message : String(error)}`;
+    credDetail = `credential check for ${provider} / ${model} failed: ${error instanceof Error ? error.message : String(error)}`;
   }
   checks.push({
     id: "credential-present",
@@ -175,24 +174,7 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
     detail: credDetail,
   });
 
-  // 5. Model compatibility check
-  let modelOk = false;
-  let modelDetail = "";
-  try {
-    validateTargetModel(provider, model);
-    modelOk = true;
-    modelDetail = `${model} (pinned, non-preview, non-alias in Pi catalog)`;
-  } catch (error) {
-    modelDetail = `model validation failed: ${error instanceof Error ? error.message : String(error)}`;
-  }
-  checks.push({
-    id: "model-compatibility",
-    label: "model-compatibility",
-    passed: modelOk,
-    detail: modelDetail,
-  });
-
-  // 6. Guest readiness: credential-free guest starts, attests, and shuts down cleanly
+  // 5. Guest readiness: credential-free guest starts, attests, and shuts down cleanly
   let guestOk = false;
   let guestDetail = "";
   if (options.skipGuestReadiness) {
@@ -204,31 +186,31 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
     const now = new Date();
     const runId = runIdFor(now, randomBytes(4).toString("hex"));
     const sandbox = options.sandbox ?? createAppleContainerSandbox({ runId });
-    let createdGuestName: string | null = null;
-    let createdNetworkName: string | null = null;
-    let createdImageDigest: string | null = null;
+    const nonce = randomBytes(4).toString("hex");
+    const owned: Array<{ kind: "guest" | "network"; name: string; conditionId: null }> = [];
+    let journal: RunJournal | undefined;
 
     try {
+      journal = await createRunJournal({ stateDir: join(options.evalsRoot, ".state"), runId, nonce });
       // Build image
       const image = await sandbox.buildImage({
         runtimeProfileId: "default",
         contextDir: join(options.evalsRoot, "container"),
       });
-      createdImageDigest = image.digest;
 
       // Create network
-      const network = await sandbox.createNetwork(`doc-${randomBytes(3).toString("hex")}-net`, {
-        allowPublicDns: true,
-        allowPublicTcpPorts: "all",
-        denyRanges: ["10.0.0.0/8", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8"],
-      });
-      createdNetworkName = network.name;
+      const networkIdentity = { kind: "network" as const, name: `eval-dnet-${nonce}`, conditionId: null };
+      await journal.record({ ...networkIdentity, event: "intent", action: "create", status: null });
+      owned.push(networkIdentity);
+      const network = await sandbox.createNetwork(networkIdentity.name, EVAL_NETWORK_POLICY);
+      await journal.record({ ...networkIdentity, event: "observed", action: "create", status: "created" });
 
       // Start credential-free guest
-      const guestName = `doc-${randomBytes(3).toString("hex")}-guest`;
-      createdGuestName = guestName;
+      const guestIdentity = { kind: "guest" as const, name: `eval-dguest-${nonce}`, conditionId: null };
+      await journal.record({ ...guestIdentity, event: "intent", action: "create", status: null });
+      owned.push(guestIdentity);
       const guest = await sandbox.createGuest({
-        name: guestName,
+        name: guestIdentity.name,
         networkName: network.name,
         imageDigest: image.digest,
         limits: SAFE_DEFAULT_LIMITS,
@@ -239,33 +221,41 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
         deadlineAtMs: Date.now() + 120_000,
         env: { HOME: "/tmp", TMPDIR: "/tmp" }, // NO CREDENTIALS
       });
+      await journal.record({ ...guestIdentity, event: "observed", action: "create", status: "created" });
 
       // Attest guest facts (privilege drop, noNewPrivs, egress)
       const attestation = await guest.attest();
       if (attestation.uid === 10001 && attestation.noNewPrivileges && attestation.capabilitiesDropped) {
-        // Destroy guest
-        const destroyOutcome = await guest.destroy();
-        if (destroyOutcome.verified) {
-          createdGuestName = null;
-          guestOk = true;
-          guestDetail = "credential-free guest started, attested, and destroyed cleanly";
-        } else {
-          guestDetail = `guest destruction not verified: ${destroyOutcome.status}`;
-        }
+        guestOk = true;
+        guestDetail = "credential-free guest started and attested";
       } else {
         guestDetail = `guest attestation failed privilege criteria: uid=${attestation.uid}`;
       }
     } catch (error) {
       guestDetail = `guest readiness probe failed: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
-      if (createdGuestName !== null) {
-        await sandbox.destroyResource("guest", createdGuestName).catch(() => undefined);
+      const cleanupFailures: string[] = [];
+      // The immutable image is shared with measured runs. Only this probe's fresh
+      // guest and network are owned, and each intent survives interruption for recovery.
+      for (const resource of [...owned].reverse()) {
+        try { await journal!.record({ ...resource, event: "intent", action: "destroy", status: null }); }
+        catch { cleanupFailures.push(`could not journal destruction of ${resource.name}`); }
+        try {
+          const outcome = await sandbox.destroyResource(resource.kind, resource.name);
+          const absent = await sandbox.inspectResource(resource.kind, resource.name) === "absent";
+          const verified = outcome.verified && absent;
+          await journal!.record({ ...resource, event: "observed", action: "destroy", status: verified ? outcome.status : "failed" });
+          if (!verified) cleanupFailures.push(`${resource.kind} ${resource.name} cleanup was not verified`);
+        } catch (error) {
+          cleanupFailures.push(`${resource.kind} ${resource.name} cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+          await journal!.record({ ...resource, event: "observed", action: "destroy", status: "failed" }).catch(() => undefined);
+        }
       }
-      if (createdNetworkName !== null) {
-        await sandbox.destroyNetwork(createdNetworkName).catch(() => undefined);
-      }
-      if (createdImageDigest !== null) {
-        await sandbox.destroyResource("image", createdImageDigest).catch(() => undefined);
+      if (cleanupFailures.length > 0) {
+        guestOk = false;
+        guestDetail += `; ${cleanupFailures.join("; ")}. Recovery: pnpm eval:recover --run ${runId}; journal: ${journal!.path}`;
+      } else if (guestOk) {
+        guestDetail += "; guest and network destruction verified";
       }
     }
   }
@@ -277,7 +267,7 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
     detail: guestDetail,
   });
 
-  // 7. Structural Zero-Request Guard
+  // 6. Structural Zero-Request Guard
   checks.push({
     id: "zero-request-guard",
     label: "zero-request-guard",
@@ -290,16 +280,19 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
     ready,
     provider,
     model,
+    thinking,
     providerRequests: 0,
     checks,
     durationMs: Date.now() - startedAt,
   };
 }
 
+/** @notice Renders readiness findings and actionable failures without exposing credentials. */
 export function formatDoctorReport(report: DoctorReport): string {
   const lines: string[] = [
     "Evaluation Subsystem Readiness Doctor",
-    `Target: ${report.provider} / ${report.model} (thinking: ${FROZEN_THINKING_LEVEL})`,
+    `Target: ${report.provider} / ${report.model} (thinking: ${report.thinking})`,
+    "Target configuration validated against the pinned Pi catalog; live provider compatibility is untested.",
     "",
   ];
 
@@ -312,7 +305,7 @@ export function formatDoctorReport(report: DoctorReport): string {
   lines.push("");
   if (report.ready) {
     lines.push(`Readiness verdict: READY (${report.checks.filter((c) => c.passed).length}/${report.checks.length} checks passed)`);
-    lines.push("Phase 4 verified: ready for Phase 5 paid evaluation runs.");
+    lines.push("Local prerequisites are ready. No provider completion request was sent; live authentication and model responses remain untested.");
   } else {
     lines.push(`Readiness verdict: NOT READY (${report.checks.filter((c) => !c.passed).length} check(s) failed)`);
   }

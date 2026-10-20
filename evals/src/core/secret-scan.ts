@@ -98,21 +98,25 @@ export function secretNeedles(secret: GuardedSecret): ReadonlyArray<{ encoding: 
   });
 }
 
-/** Scans one payload. Returns every distinct (label, encoding) hit, never the value. */
+/**
+ * @notice Detects guarded secret spellings without returning their values.
+ * @param payload Named text or binary content to scan.
+ * @param secrets Credentials whose encoded forms must be detected.
+ * @returns Distinct label and encoding matches with their artifact paths.
+ */
 export function scanForSecrets(
   payload: { readonly path: string; readonly content: string | Uint8Array },
   secrets: readonly GuardedSecret[],
 ): readonly SecretHit[] {
   if (secrets.length === 0) return [];
-  // latin1 maps every byte 1:1 onto a code unit. utf8 would replace invalid byte
-  // sequences with U+FFFD and could destroy a match sitting inside binary output.
-  const text = typeof payload.content === "string"
-    ? payload.content
-    : Buffer.from(payload.content).toString("latin1");
+  const content = typeof payload.content === "string" ? payload.content : Buffer.from(payload.content);
   const hits: SecretHit[] = [];
   for (const secret of secrets) {
     for (const { encoding, needle } of secretNeedles(secret)) {
-      if (text.includes(needle)) hits.push({ label: secret.label, encoding, path: payload.path });
+      // Binary output is searched as bytes: decoding it as UTF-8 would alter invalid
+      // sequences, while matching a Unicode string against latin1 would miss its UTF-8 bytes.
+      const found = typeof content === "string" ? content.includes(needle) : content.includes(Buffer.from(needle, "utf8"));
+      if (found) hits.push({ label: secret.label, encoding, path: payload.path });
     }
   }
   return hits;
@@ -155,6 +159,15 @@ export function redactSecrets(
   secrets: readonly GuardedSecret[],
   path = "",
 ): RedactSecretsResult {
+  return redactEncodedSecrets(text, secrets, path, (value) => value);
+}
+
+function redactEncodedSecrets(
+  text: string,
+  secrets: readonly GuardedSecret[],
+  path: string,
+  encode: (value: string) => string,
+): RedactSecretsResult {
   if (secrets.length === 0 || text === "") {
     return { text, count: 0, redactions: [] };
   }
@@ -163,8 +176,8 @@ export function redactSecrets(
       secretNeedles(secret).map((entry) => ({
         label: secret.label,
         encoding: entry.encoding,
-        needle: entry.needle,
-        placeholder: secretPlaceholder(secret.label),
+        needle: encode(entry.needle),
+        placeholder: encode(secretPlaceholder(secret.label)),
       })),
     )
     .sort((a, b) => b.needle.length - a.needle.length || a.needle.localeCompare(b.needle));
@@ -204,8 +217,12 @@ export interface RedactSecretBytesResult {
 }
 
 /**
- * Replaces guarded secret occurrences in raw bytes using a 1:1 latin1 mapping.
- * Non-needle bytes are preserved bit-for-bit.
+ * @notice Redacts guarded secret spellings while preserving unrelated output bytes.
+ * @param bytes Binary payload, including potentially invalid UTF-8.
+ * @param secrets Credentials whose encoded forms must be replaced.
+ * @param path Artifact location recorded with each redaction.
+ * @returns Redacted bytes and redaction metadata.
+ * @dev Payload and UTF-8 needles share a lossless latin1 byte view.
  */
 export function redactSecretBytes(
   bytes: Uint8Array,
@@ -216,11 +233,10 @@ export function redactSecretBytes(
     return { bytes, count: 0, redactions: [] };
   }
   const latin1 = Buffer.from(bytes).toString("latin1");
-  const result = redactSecrets(latin1, secrets, path);
+  const result = redactEncodedSecrets(latin1, secrets, path, (value) => Buffer.from(value, "utf8").toString("latin1"));
   if (result.count === 0) {
     return { bytes, count: 0, redactions: [] };
   }
   const redactedBytes = new Uint8Array(Buffer.from(result.text, "latin1"));
   return { bytes: redactedBytes, count: result.count, redactions: result.redactions };
 }
-

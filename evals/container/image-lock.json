@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "documentation": {
     "why": "A runtime profile identifier is meaningless unless it resolves to a pinned identity. This file is that resolution: RUNTIME_PROFILES in evals/src/core/types.ts maps a profile id here, and the Apple Container sandbox refuses to build when a build-context file no longer matches the identity recorded below. Without it, 'both arms ran the same image' would rest on a tag, which is mutable.",
-    "baseDigestObtainedBy": "container image inspect node:24-trixie-slim | .[0].configuration.descriptor.digest — the OCI image index digest of the tag as resolved on the build host (Apple Container 1.2.2, macOS arm64). Re-verify with the same command before changing the tag.",
+    "baseDigestObtainedBy": "Verified Docker Hub metadata and the registry OCI index for node:24.21.0-trixie-slim; the linux/arm64 config declares NODE_VERSION=24.21.0.",
     "guestScriptDigestsObtainedBy": "shasum -a 256 evals/container/<file>",
     "nodeVersionObtainedBy": "the NODE_VERSION environment entry of the pinned base image configuration",
     "notCopiedIntoTheImage": "no skill, fixture, oracle, validator, test, answer, or credential; see evals/container/.dockerignore, which denies everything by default"
@@ -13,13 +13,13 @@
       "description": "Common guest runtime: pinned Node, egress packages, Pi 0.85.0, and the source/compiler-locked framed SDK agent.",
       "platform": "linux/arm64",
       "base": {
-        "reference": "docker.io/library/node:24-trixie-slim",
-        "tag": "24-trixie-slim",
-        "digest": "sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0",
+        "reference": "docker.io/library/node:24.21.0-trixie-slim",
+        "tag": "24.21.0-trixie-slim",
+        "digest": "sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590",
         "mediaType": "application/vnd.oci.image.index.v1+json"
       },
       "node": {
-        "version": "24.20.0"
+        "version": "24.21.0"
       },
       "pi": {
         "package": "@earendil-works/pi-coding-agent",
@@ -35,24 +35,25 @@
         "gid": 10001
       },
       "buildContextFiles": {
-        "Containerfile": "sha256:2196a3a1a57c7f2f8f7975113e9cb912289f4953ab6de96be352e9d248f120e6",
-        ".dockerignore": "sha256:8288df63a5bf080369b78055a2e59379431770806fd5819d499b9e4a6893812c",
-        "configure-egress.sh": "sha256:3ff4fcfd300d81cf0018259509f28b319cba32457a62c3cc9a9ae052b32ebe5d",
-        "run-measured.mjs": "sha256:5e94063569b7da2c3a89fae473b8014d15688b3836de67bcefb07f1a18dcb54c",
-        "guest-runtime/artifact-lock.json": "sha256:e549d4c8864a5a198299d449f75911259b964330f23f72719a091e7142f42119",
-        "guest-runtime/src/core/types.mjs": "sha256:dda5683ffcb5d4d5bdad9f57734ef47bc7e3f91e282f4f716a99f597160b4675",
-        "guest-runtime/src/core/experiment.mjs": "sha256:701282537b8d0b7a3d7e44644ef0b92a734ee840622a47cec74381404cd8f676",
-        "guest-runtime/src/core/secret-scan.mjs": "sha256:7bd85be67db733c8649dd20b9d23c140591da5d02e550db563246e78a4308482",
+        "Containerfile": "sha256:025c48b943f010fbf341c4ca9b6ed5d3d2b4f9cf4ea1457ea8ccd3d090d71f11",
+        ".dockerignore": "sha256:dd7a604bf07eb2eccbd3bbf550c540b77ba70b62629ed22298fe74ceddfe5eb7",
+        "configure-egress.sh": "sha256:0a2bb7a175f62fbf7fb8318dd26c6afe4ceffc2592d81989db95c50d916e6c9b",
+        "run-measured.mjs": "sha256:ce6b837aa0cf6ab30810c5f7c3cc53f23a9f9cb75ea7fe58f97dcda4e423cf75",
+        "guest-runtime/artifact-lock.json": "sha256:2c4b3fbcca9c5f726f1a819af423326ede68f26901d9d9d3d7fa02987c78c50a",
+        "guest-runtime/src/core/types.mjs": "sha256:7c186a8046eacc6fceb64e7904105e10ac990837c295c0a8a5a1a676b02f1988",
+        "guest-runtime/src/core/timing.mjs": "sha256:75061b5d3b14718ba0eafd905586e8cf8359f8b6cc1e1bcd6678b02b2770d805",
+        "guest-runtime/src/core/experiment.mjs": "sha256:49e1643f58369930ed423c5b0501324f3a0d27322f96decbd98dba2455b08683",
+        "guest-runtime/src/core/secret-scan.mjs": "sha256:ad84bddf0f714fc640a6d064fe3713820a54eb361e4493aff392b9f6de87b4ea",
         "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
         "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
         "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:296c54b210a13340d7335290dd4d7a016356102e55545c328aaa36ddb1582096",
-        "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:cfc09ddcb9e93d1615d8a1691a876eab42d03a7d76ebaac4e3bc65a3e726ef51",
-        "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:b52a7697dd09bc8f251242af578d4814b1bed0684ba509f3ab8bbbcae5a2867a",
-        "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:5fd7ad17134a9913fa49c65c79c1ca50551c3ed04a6b7122b8360bd702430039",
-        "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:5a9b238674aae2ce773d301da71e4011eedd1d1548b474cb7dc5f07228355f84",
+        "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:b14e208bfffa310e6bbe913a74d4e275ef38d40f5f2dd459e93f65bb671514ef",
+        "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:cf1639a26b2079c8932200298b79efad93641c27c41cb111c6bbdf9dc54f855d",
+        "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:f38d2087416398d9046d1d1b7dccc9ffe8423f44c55377513ca8d2dd5f7589ec",
+        "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:bf59dccbe72174031e28386a2ecd235f27f0c8298333db55569737f50fb4cf12",
         "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
-        "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:4341e9c80245f88da684c614d9ae593353e83ff3a36b7c56400f8284a70958d0",
-        "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:bcca9ebd96bc694287044832495d7d068e67542ed40b426215730f521122ddf0"
+        "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:3283b699e2a5e42c5149b3ee792450fcb5804cbba980d9877a7b4ff26a83ab40",
+        "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:a683c4c6d70afd215044aede67903f387909bd8addec85578eb0f6d2df9c48bc"
       },
       "guestPaths": {
         "entrypoint": "/opt/eval/configure-egress.sh",
@@ -67,34 +68,36 @@
           "version": "5.9.3"
         },
         "sources": {
-          "evals/src/core/types.ts": "sha256:c7ba867296bbc8f6f253ba6b04699fa30f6599e66ee7655f2d389902076debc3",
-          "evals/src/core/experiment.ts": "sha256:6a3294714fdad8729317737da2b934ebd06f0555ae7dbc34a71466965d864724",
-          "evals/src/core/secret-scan.ts": "sha256:3b5cf8cbe91eb4a49cfd908ab9669b3816d1e6e668ddaa476b41016cda193595",
+          "evals/src/core/types.ts": "sha256:a4469b742e7dbd64743e25898024f87f99d4944ff70bc95e43ad6d054d9a38f1",
+          "evals/src/core/timing.ts": "sha256:3e21cbf113930c680f891ee658b89fc027f243c17205ea0f68e2d7d059943ff1",
+          "evals/src/core/experiment.ts": "sha256:aa8527cda31ae9159e48b1f7ecfadab78c19c90e19030edb4d8ce46f5c1de694",
+          "evals/src/core/secret-scan.ts": "sha256:c7fc684fad1821b574d668f9ea9b960027a9057a366d89c25d39de11ae8daaf5",
           "evals/src/transport-blocker.ts": "sha256:c2d69fec78cf18115a1c1494a9b1f654102c52538d5e3836475094df747257e6",
           "evals/src/runner/models.ts": "sha256:c2ea4b9729a8160e33fbf714be98bf655c2ad445cd40f76cb5a5d0f222b9d8dd",
           "evals/src/artifacts/native-prefix.ts": "sha256:bc0242956a581c86babdcb95ed8be55f82d4d719125a81b3f9d3388067121244",
-          "evals/src/harnesses/pi/export-viewer.ts": "sha256:7e7cd03ee9f65dabbb9fb59fc6d3e0da7c6611bff5abd604c6a3d4c6f0f2913c",
-          "evals/src/harnesses/pi/scripted-stream.ts": "sha256:32f2ad3c5be540489fe1ead6db1d1a73425ea21e4d81443eff008d9967450708",
-          "evals/src/harnesses/pi/ambient-tools.ts": "sha256:b8a7a6f5576d246a24bf6d990cf318af1c6886ea841942e9de81ff4a02463104",
-          "evals/src/harnesses/pi/mcp-http-client.ts": "sha256:a44e0df67f01ba48b8cadc72a0c2007b2cf5c96ab5c7a3d662945d4b2c81a419",
+          "evals/src/harnesses/pi/export-viewer.ts": "sha256:e00ae0ce5a1513958acf27c50429a71e256d60cb5970df755fa311fc95b6dd14",
+          "evals/src/harnesses/pi/scripted-stream.ts": "sha256:bc88665085ec7720000de6ada4c338fce127aecd21f598430f88c60a199f825d",
+          "evals/src/harnesses/pi/ambient-tools.ts": "sha256:7e95e21baaa893a184a7ad024eddea2ab6f0a3675b74edf217eed2e05ab0219b",
+          "evals/src/harnesses/pi/mcp-http-client.ts": "sha256:1df95f0a5312c39d733ba8cdf8fc53c7257cc78530b3da83bd15e91b83629f41",
           "evals/src/harnesses/pi/mcp-tools.ts": "sha256:8fb611b4f324cf5ecce4e0a30bbe885454e454c9c5b9041078d56ec5aa36b10e",
-          "evals/src/harnesses/pi/sdk-session.ts": "sha256:45b84fd3f1d2bc79136528557e62f4ccd0062be4aa2779e8623ea45b6add1fda",
-          "evals/src/harnesses/pi/guest-agent.ts": "sha256:e3a0731d1820c419688cc3632d3dc624a105a7e3872e85c0211092926d0d95c3"
+          "evals/src/harnesses/pi/sdk-session.ts": "sha256:05ee4e075fe435ca518b9fde02f8e8ae91be80b74bc4e3b5e0073f0efc24fdb9",
+          "evals/src/harnesses/pi/guest-agent.ts": "sha256:370c4cf2f3a25a240bba89cb7dab92c1959c9b8376947194c47c6fa8b62f9a8f"
         },
         "artifacts": {
-          "guest-runtime/src/core/types.mjs": "sha256:dda5683ffcb5d4d5bdad9f57734ef47bc7e3f91e282f4f716a99f597160b4675",
-          "guest-runtime/src/core/experiment.mjs": "sha256:701282537b8d0b7a3d7e44644ef0b92a734ee840622a47cec74381404cd8f676",
-          "guest-runtime/src/core/secret-scan.mjs": "sha256:7bd85be67db733c8649dd20b9d23c140591da5d02e550db563246e78a4308482",
+          "guest-runtime/src/core/types.mjs": "sha256:7c186a8046eacc6fceb64e7904105e10ac990837c295c0a8a5a1a676b02f1988",
+          "guest-runtime/src/core/timing.mjs": "sha256:75061b5d3b14718ba0eafd905586e8cf8359f8b6cc1e1bcd6678b02b2770d805",
+          "guest-runtime/src/core/experiment.mjs": "sha256:49e1643f58369930ed423c5b0501324f3a0d27322f96decbd98dba2455b08683",
+          "guest-runtime/src/core/secret-scan.mjs": "sha256:ad84bddf0f714fc640a6d064fe3713820a54eb361e4493aff392b9f6de87b4ea",
           "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
           "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
           "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:296c54b210a13340d7335290dd4d7a016356102e55545c328aaa36ddb1582096",
-          "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:cfc09ddcb9e93d1615d8a1691a876eab42d03a7d76ebaac4e3bc65a3e726ef51",
-          "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:b52a7697dd09bc8f251242af578d4814b1bed0684ba509f3ab8bbbcae5a2867a",
-          "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:5fd7ad17134a9913fa49c65c79c1ca50551c3ed04a6b7122b8360bd702430039",
-          "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:5a9b238674aae2ce773d301da71e4011eedd1d1548b474cb7dc5f07228355f84",
+          "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:b14e208bfffa310e6bbe913a74d4e275ef38d40f5f2dd459e93f65bb671514ef",
+          "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:cf1639a26b2079c8932200298b79efad93641c27c41cb111c6bbdf9dc54f855d",
+          "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:f38d2087416398d9046d1d1b7dccc9ffe8423f44c55377513ca8d2dd5f7589ec",
+          "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:bf59dccbe72174031e28386a2ecd235f27f0c8298333db55569737f50fb4cf12",
           "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
-          "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:4341e9c80245f88da684c614d9ae593353e83ff3a36b7c56400f8284a70958d0",
-          "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:bcca9ebd96bc694287044832495d7d068e67542ed40b426215730f521122ddf0"
+          "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:3283b699e2a5e42c5149b3ee792450fcb5804cbba980d9877a7b4ff26a83ab40",
+          "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:a683c4c6d70afd215044aede67903f387909bd8addec85578eb0f6d2df9c48bc"
         }
       }
     }

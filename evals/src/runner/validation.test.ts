@@ -7,8 +7,9 @@
  */
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { EvalError } from "../core/types.ts";
 import { sha256Hex } from "../core/experiment.ts";
@@ -275,6 +276,52 @@ describe("createInProcessValidatorRunner", () => {
     });
     expect(run.outcome.status).toBe("graded");
     expect(run.failure).toBeNull();
+  });
+
+  it("terminates a synchronous infinite validator loop at its own deadline", async () => {
+    const path = await writeValidator(`
+      import { writeFileSync } from "node:fs";
+      export function validateSnapshot(input) {
+        writeFileSync(input.oracle.marker, "entered validator");
+        while (true) {}
+      }
+    `);
+    const marker = join(dirname(path), "started.txt");
+    const started = Date.now();
+    const run = await createInProcessValidatorRunner().run({
+      validatorPath: path, input: { ...input, oracle: { marker } }, deadlineMs: 1_000,
+    });
+    expect(existsSync(marker)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(run.failure?.code).toBe("validator-infrastructure");
+    expect(run.failure?.message).toContain("deadline");
+    expect(run.outcome.score).toBeNull();
+  });
+
+  it("terminates an already-running synchronous validator on cancellation", async () => {
+    const path = await writeValidator(`
+      import { writeFileSync } from "node:fs";
+      export function validateSnapshot(input) {
+        writeFileSync(input.oracle.marker, "entered validator");
+        while (true) {}
+      }
+    `);
+    const marker = join(dirname(path), "started.txt");
+    const controller = new AbortController();
+    const pending = createInProcessValidatorRunner().run({
+      validatorPath: path, input: { ...input, oracle: { marker } }, deadlineMs: 5_000, signal: controller.signal,
+    });
+    try {
+      for (let attempt = 0; attempt < 200 && !existsSync(marker); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      controller.abort();
+    }
+    const run = await pending;
+    expect(run.failure?.code).toBe("interrupted");
+    expect(run.outcome.score).toBeNull();
   });
 
   it("honours an abort signal", async () => {

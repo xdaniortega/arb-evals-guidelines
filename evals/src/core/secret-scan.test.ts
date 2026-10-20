@@ -28,6 +28,7 @@ import type { GuardedSecret } from "./secret-scan.ts";
  */
 const SECRET: GuardedSecret = { label: "FAKE_TEST_KEY", value: "sk-test-NOTREAL?~>>0123456789abcdef" };
 const SECRET_WITH_SPECIALS: GuardedSecret = { label: "FAKE_SPECIAL", value: 'ab"cd\\ef gh/ij+kl=mn?~>>' };
+const UTF8_SECRET: GuardedSecret = { label: "FAKE_UTF8_KEY", value: 'clé-密钥-🔑-"\\?~>>0123456789' };
 
 function encodings(hits: readonly { encoding: string }[]): readonly string[] {
   return [...new Set(hits.map((hit) => hit.encoding))].sort();
@@ -74,6 +75,16 @@ describe("secretNeedles", () => {
 });
 
 describe("scanForSecrets", () => {
+  it.each([
+    ["raw", UTF8_SECRET.value],
+    ["json-escaped", JSON.stringify({ key: UTF8_SECRET.value })],
+    ["percent-encoded", encodeURIComponent(UTF8_SECRET.value)],
+  ])("detects a non-ASCII secret's %s spelling in both text and UTF-8 bytes", (encoding, content) => {
+    for (const payload of [content, Buffer.from(content, "utf8")]) {
+      expect(encodings(scanForSecrets({ path: "utf8.txt", content: payload }, [UTF8_SECRET]))).toContain(encoding);
+    }
+  });
+
   it("returns nothing when there is no secret to guard", () => {
     expect(scanForSecrets({ path: "a", content: SECRET.value }, [])).toEqual([]);
   });
@@ -164,6 +175,53 @@ describe("scanManyForSecrets", () => {
 });
 
 describe("redaction", () => {
+  it("redacts UTF-8 secret bytes without changing surrounding binary or unrelated Unicode text", () => {
+    const prefix = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, 0x81]), Buffer.from("visible café | ", "utf8")]);
+    const suffix = Buffer.concat([Buffer.from(" | visible 終", "utf8"), Buffer.from([0xc3, 0x28, 0x80])]);
+    const bytes = Buffer.concat([prefix, Buffer.from(UTF8_SECRET.value, "utf8"), suffix]);
+    expect(encodings(scanForSecrets({ path: "file.bin", content: bytes }, [UTF8_SECRET]))).toContain("raw");
+
+    const result = redactSecretBytes(bytes, [UTF8_SECRET], "file.bin");
+    expect(result.count).toBe(1);
+    expect(Buffer.from(result.bytes)).toEqual(Buffer.concat([
+      prefix, Buffer.from(secretPlaceholder(UTF8_SECRET.label), "utf8"), suffix,
+    ]));
+    expect(scanForSecrets({ path: "file.bin", content: result.bytes }, [UTF8_SECRET])).toEqual([]);
+  });
+
+  it("keeps UTF-8 JSON valid and produces the same redaction for text and bytes", () => {
+    const original = JSON.stringify({ note: "naïve € 終", key: UTF8_SECRET.value });
+    const text = redactSecrets(original, [UTF8_SECRET], "output.json");
+    const bytes = redactSecretBytes(Buffer.from(original, "utf8"), [UTF8_SECRET], "output.json");
+    expect(bytes.count).toBe(1);
+    expect(Buffer.from(bytes.bytes).toString("utf8")).toBe(text.text);
+    expect(JSON.parse(text.text)).toEqual({ note: "naïve € 終", key: secretPlaceholder(UTF8_SECRET.label) });
+    expect(scanForSecrets({ path: "output.json", content: bytes.bytes }, [UTF8_SECRET])).toEqual([]);
+  });
+
+  it.each([0, 1, 2])("detects and redacts non-ASCII secrets in encoded JSON at byte alignment %i", (offset) => {
+    const blob = Buffer.concat([Buffer.alloc(offset, 0x5a), Buffer.from(UTF8_SECRET.value, "utf8"), Buffer.from("tail")]);
+    for (const encoding of ["base64", "base64url"] as const) {
+      const original = JSON.stringify({ data: blob.toString(encoding), note: "unrelated café" });
+      const binary = Buffer.from(original, "utf8");
+      expect(scanForSecrets({ path: "workspace.json", content: original }, [UTF8_SECRET]).length).toBeGreaterThan(0);
+      expect(scanForSecrets({ path: "workspace.json", content: binary }, [UTF8_SECRET]).length).toBeGreaterThan(0);
+      const result = redactSecretBytes(binary, [UTF8_SECRET], "workspace.json");
+      expect(result.count).toBeGreaterThan(0);
+      expect(scanForSecrets({ path: "workspace.json", content: result.bytes }, [UTF8_SECRET])).toEqual([]);
+      expect(JSON.parse(Buffer.from(result.bytes).toString("utf8")).note).toBe("unrelated café");
+    }
+  });
+
+  it("preserves clean binary output exactly and emits Unicode labels as UTF-8", () => {
+    const clean = Buffer.from([0xff, 0xfe, 0xc3, 0x28, 0x00, 0x81]);
+    const cleanResult = redactSecretBytes(clean, [UTF8_SECRET]);
+    expect(cleanResult.bytes).toBe(clean);
+    const labeled = { ...UTF8_SECRET, label: "CLÉ_密钥" };
+    const result = redactSecretBytes(Buffer.from(labeled.value, "utf8"), [labeled]);
+    expect(Buffer.from(result.bytes)).toEqual(Buffer.from(secretPlaceholder(labeled.label), "utf8"));
+  });
+
   it("generates stable non-reversible placeholder naming variable", () => {
     expect(secretPlaceholder("GEMINI_API_KEY")).toBe("[REDACTED:GEMINI_API_KEY]");
   });
@@ -242,4 +300,3 @@ describe("redaction", () => {
     expect(resultBuf.subarray(resultBuf.length - suffix.length)).toEqual(suffix);
   });
 });
-

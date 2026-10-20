@@ -8,7 +8,7 @@
 
 import type { NativeSessionEntryRecorder } from "../artifacts/native-prefix.ts";
 import type { SkillToolBundle } from "../core/skill-tools.ts";
-import type { ConditionId, Limits, ProbeDetail, StructuredFailure } from "../core/types.ts";
+import type { ConditionId, Limits, ProbeDetail, StopCause, StructuredFailure } from "../core/types.ts";
 import type { Target } from "../core/experiment.ts";
 import type { Guest } from "../sandboxes/sandbox.ts";
 import type { GuardedSecret, SecretRedaction } from "../core/secret-scan.ts";
@@ -105,6 +105,14 @@ export interface NativeSessionRedactions {
 
 export interface HarnessRunResult {
   readonly outcome: HarnessOutcome;
+  /**
+   * Precise, structured reason the arm stopped. Distinguishes a harness cumulative-budget
+   * exhaustion from a provider-native response truncation and from external cancellation.
+   * Coarse `outcome` is retained for compatibility; this refines it.
+   */
+  readonly stopCause: StopCause;
+  /** Provider raw stop reason (e.g. "length", "stop", "aborted", "error"), when known. */
+  readonly providerStopReason: string | null;
   readonly messages: readonly NormalizedMessage[];
   readonly toolSteps: readonly NormalizedToolStep[];
   readonly usage: HarnessUsage;

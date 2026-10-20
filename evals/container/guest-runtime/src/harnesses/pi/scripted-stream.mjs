@@ -17,6 +17,11 @@ function generateToolCallId() {
     callCounter += 1;
     return `tool_call_${Date.now()}_${callCounter}`;
 }
+/**
+ * @notice Emulates provider streaming for deterministic tests without network requests.
+ * @param stepsOrDriver Fixed responses or a request-aware response generator.
+ * @returns An SDK-compatible streaming function with synthetic usage and stop reasons.
+ */
 export function createScriptedStreamSimple(stepsOrDriver) {
     const steps = Array.isArray(stepsOrDriver) ? [...stepsOrDriver] : undefined;
     const driver = typeof stepsOrDriver === "function" ? stepsOrDriver : undefined;
@@ -170,6 +175,7 @@ export function createScriptedStreamSimple(stepsOrDriver) {
                         model: model.id,
                         ...(step.usage === undefined ? {} : { usage: step.usage }),
                         stopReason,
+                        ...(step.rawStopReason === undefined ? {} : { rawStopReason: step.rawStopReason }),
                         timestamp: Date.now(),
                     };
                     stream.push({ type: "start", partial: { ...msg, content: [] } });
@@ -202,6 +208,7 @@ export function createScriptedStreamSimple(stepsOrDriver) {
                     model: model.id,
                     ...(step.usage === undefined ? {} : { usage: step.usage }),
                     stopReason,
+                    ...(step.rawStopReason === undefined ? {} : { rawStopReason: step.rawStopReason }),
                     timestamp: Date.now(),
                 };
                 stream.push({ type: "start", partial: { ...msg, content: [] } });

@@ -31,7 +31,12 @@ import {
 } from "./export-viewer.ts";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createScriptedStreamSimple } from "./scripted-stream.ts";
-import { createPiSdkSession } from "./sdk-session.ts";
+import {
+  computeOutputClamp,
+  createPiSdkSession,
+  lengthStopExhaustedOutputBudget,
+  outputClampReachTolerance,
+} from "./sdk-session.ts";
 import { buildAmbientTools } from "./ambient-tools.ts";
 import { createMcpStub } from "./mcp-stub.test-helper.ts";
 import type { SkillToolBundle } from "../../core/skill-tools.ts";
@@ -41,7 +46,7 @@ function sha256File(path: string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
+describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
   let tempDirs: string[] = [];
 
   function makeTempDir(prefix: string): string {
@@ -318,8 +323,9 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
       const baselineAttest = baselineInstance.attest();
       expect(baselineAttest.arm).toBe("baseline");
       expect(baselineAttest.loadedSkills.length).toBe(0);
-      expect(baselineAttest.activeTools).not.toContain("mcp");
-      expect(baselineAttest.mcpClientId).toBeNull();
+      expect(baselineAttest.activeTools).toContain("mcp");
+      expect(baselineAttest.mcpClientId).toBe("shared-mcp-client-v1");
+      expect(baselineAttest.seededMcpServers).toEqual([]);
       expect(baselineAttest.agentsFilesCount).toBe(0);
       expect(baselineAttest.extensionsCount).toBe(0);
       expect(baselineAttest.promptsCount).toBe(0);
@@ -343,8 +349,9 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
       expect(treatmentAttest.arm).toBe("treatment");
       expect(treatmentAttest.loadedSkills.length).toBe(1);
       expect(treatmentAttest.loadedSkills[0]!.name).toBe("arbitrum-docs");
-      expect(treatmentAttest.activeTools).not.toContain("mcp");
-      expect(treatmentAttest.mcpClientId).toBeNull();
+      expect(treatmentAttest.activeTools).toEqual(baselineAttest.activeTools);
+      expect(treatmentAttest.mcpClientId).toBe(baselineAttest.mcpClientId);
+      expect(treatmentAttest.seededMcpServers).toEqual([]);
       expect(treatmentAttest.agentsFilesCount).toBe(0);
       expect(treatmentAttest.extensionsCount).toBe(0);
       expect(treatmentAttest.promptsCount).toBe(0);
@@ -533,6 +540,139 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
       expect((lastMsg as any).stopReason).toBe("length");
       expect((lastMsg as any).content[0].text).toContain("Truncated");
       expect((lastMsg as any).usage.output).toBe(8192);
+
+      // Unlimited output budget: no cumulative clamp was ever injected, so this native
+      // `length` truncation must NOT be attributed to a harness cap. The snapshot proves
+      // both facts: no task-limit reason and no binding clamp on the terminating request.
+      const snapshot = instance.getBudgetSnapshot();
+      expect(snapshot.taskLimitReason).toBeNull();
+      expect(snapshot.outputClampBoundLastRequest).toBe(false);
+
+      instance.dispose();
+    });
+
+    it("attributes a clamped near-boundary `length` stop (7996/8000) to the cumulative output cap, not a native limit", async () => {
+      const workspace = makeTempDir("pi-clamp-boundary");
+      const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+
+      // Multi-turn cumulative consumption under a finite 8000-token budget. Turn 1 consumes
+      // 7992 output tokens (via a tool call that forces continuation). On turn 2 the harness
+      // clamps maxTokens to the SHRUNKEN remainder (8) and the provider stops at `length`
+      // having produced 4 more — cumulative 7996, four short of the cap. Because the clamp
+      // was the binding constraint on a shrunken remainder, this is harness cumulative-output
+      // exhaustion, not provider-native truncation, even though usage never equals 8000.
+      const observedMaxTokens: (number | undefined)[] = [];
+      let turn = 0;
+      const instance = await createPiSdkSession({
+        cwd: workspace,
+        arm: "baseline",
+        target,
+        budget: { maxOutputTokens: 8000, maxToolSteps: null, maxProviderRequests: null },
+        streamSimpleOverride: createScriptedStreamSimple((_model, _context, options) => {
+          observedMaxTokens.push(options?.maxTokens);
+          turn += 1;
+          if (turn === 1) {
+            return {
+              type: "toolCall",
+              toolCalls: [{ name: "write", arguments: { path: "draft.txt", content: "partial draft" } }],
+              usage: { input: 100, output: 7992, cacheRead: 0, cacheWrite: 0, totalTokens: 8092, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            };
+          }
+          return {
+            type: "stop",
+            stopReason: "length",
+            text: "Truncated at the clamped remaining allowance",
+            usage: { input: 100, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 104, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          };
+        }),
+      });
+
+      await instance.runPrompt("Generate very long text");
+
+      // Turn 1 forwarded the full budget (no shrink yet); turn 2 forwarded the shrunken
+      // remainder (8) as the binding maxTokens.
+      expect(observedMaxTokens[0]).toBe(8000);
+      expect(observedMaxTokens[1]).toBe(8);
+      const snapshot = instance.getBudgetSnapshot();
+      expect(snapshot.outputTokens).toBe(7996);
+      expect(snapshot.outputClampBoundLastRequest).toBe(true);
+      // Source-level attribution: the reason names the cumulative output budget so both the
+      // host adapter and the in-guest agent derive `cumulative-output-tokens` identically,
+      // even though usage (7996) never equals the cap (8000).
+      expect(snapshot.taskLimitReason).not.toBeNull();
+      expect(snapshot.taskLimitReason).toContain("output token budget of 8000");
+
+      instance.dispose();
+    });
+
+    it("treats a FIRST-turn `length` stop that truncated BELOW the forwarded clamp as provider-native truncation", async () => {
+      const workspace = makeTempDir("pi-first-turn-native");
+      const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+
+      // A single response stops at `length` on the very first turn under a finite 8000-token
+      // budget, having produced only 5000 output tokens — well below the 8000 the harness
+      // forwarded. The harness remainder WAS the binding forwarded cap (so the clamp is
+      // reported bound), but the response did not reach it: the provider hit its own
+      // per-response limit within the allowance, so this stays provider-native and no
+      // cumulative task-limit reason is set. Attribution comes from observed output, not
+      // turn position.
+      const instance = await createPiSdkSession({
+        cwd: workspace,
+        arm: "baseline",
+        target,
+        budget: { maxOutputTokens: 8000, maxToolSteps: null, maxProviderRequests: null },
+        streamSimpleOverride: createScriptedStreamSimple([
+          {
+            type: "stop",
+            stopReason: "length",
+            text: "Truncated by the provider within the full allowance",
+            usage: { input: 100, output: 5000, cacheRead: 0, cacheWrite: 0, totalTokens: 5100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          },
+        ]),
+      });
+
+      await instance.runPrompt("Generate very long text");
+
+      const snapshot = instance.getBudgetSnapshot();
+      expect(snapshot.outputTokens).toBe(5000);
+      // The remainder was the binding forwarded cap even on turn one (no native cap won).
+      expect(snapshot.outputClampBoundLastRequest).toBe(true);
+      // But the response truncated far below it, so it is NOT cumulative exhaustion.
+      expect(snapshot.taskLimitReason).toBeNull();
+
+      instance.dispose();
+    });
+
+    it("attributes a FIRST-turn `length` stop that REACHED the forwarded budget to cumulative-output exhaustion", async () => {
+      const workspace = makeTempDir("pi-first-turn-bound");
+      const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+
+      // A finite harness cap can bind on the FIRST response. Here the single first-turn
+      // response reaches the full 8000-token budget the harness forwarded and stops at
+      // `length`, so it IS harness cumulative-output exhaustion — there is no blanket
+      // first-turn exclusion.
+      const instance = await createPiSdkSession({
+        cwd: workspace,
+        arm: "baseline",
+        target,
+        budget: { maxOutputTokens: 8000, maxToolSteps: null, maxProviderRequests: null },
+        streamSimpleOverride: createScriptedStreamSimple([
+          {
+            type: "stop",
+            stopReason: "length",
+            text: "Truncated at the full forwarded budget on the first turn",
+            usage: { input: 100, output: 8000, cacheRead: 0, cacheWrite: 0, totalTokens: 8100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          },
+        ]),
+      });
+
+      await instance.runPrompt("Generate very long text");
+
+      const snapshot = instance.getBudgetSnapshot();
+      expect(snapshot.outputTokens).toBe(8000);
+      expect(snapshot.outputClampBoundLastRequest).toBe(true);
+      expect(snapshot.taskLimitReason).not.toBeNull();
+      expect(snapshot.taskLimitReason).toContain("output token budget of 8000");
 
       instance.dispose();
     });
@@ -764,8 +904,8 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
         // 1. Attestation check
         const attestation = sessionInstance.attest();
         expect(attestation.ambientCustomTools).toEqual(["glob"]);
-        expect(attestation.activeTools).toEqual(allowedTools);
-        expect(attestation.mcpClientId).toBeNull();
+        expect(attestation.activeTools).toEqual([...allowedTools, "mcp"]);
+        expect(attestation.mcpClientId).toBe("shared-mcp-client-v1");
 
         // 2. Run prompt and verify real execution of glob tool
         await sessionInstance.runPrompt("Find all TypeScript files using glob.");
@@ -788,12 +928,8 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
   describe("Shared MCP client integration", () => {
     it("records a bad agent endpoint as a native tool error and continues the task", async () => {
       const workspace = makeTempDir("pi-mcp-error");
-      const stub = await createMcpStub();
-      writeFileSync(join(workspace, "SKILL.md"), "---\nname: test-skill\ndescription: test\n---\nUse tools.\n");
       const instance = await createPiSdkSession({
-        cwd: workspace, arm: "treatment", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
-        skillPath: workspace,
-        skillToolBundle: { schemaVersion: 1, source: "test", sourceSha256: null, servers: [{ name: "seed", transport: "streamable_http", url: stub.url, description: null }] },
+        cwd: workspace, arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
         streamSimpleOverride: createScriptedStreamSimple([
           { type: "toolCall", toolCalls: [{ id: "bad-endpoint", name: "mcp", arguments: { action: "connect", server: "docs", url: "not-a-url" } }] },
           { type: "toolCall", toolCalls: [{ id: "list-after-error", name: "mcp", arguments: { action: "list" } }] },
@@ -805,14 +941,16 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
         const results = instance.session.messages.filter((message) => message.role === "toolResult") as any[];
         expect(results.map((result) => result.isError)).toEqual([true, false]);
         expect(results[0].content[0].text).toContain("invalid URL");
-        expect(results[1].content[0].text).toContain('"server":"seed"');
+        expect(results[1].content[0].text).toBe('{"servers":[]}');
         const native = instance.getNativeSessionEntries() as any[];
         expect(native.find((entry) => entry.message?.toolCallId === "bad-endpoint")?.message.isError).toBe(true);
         expect(instance.getBudgetSnapshot().taskLimitReason).toBeNull();
-      } finally { instance.dispose(); await stub.close(); }
+      } finally { instance.dispose(); }
     });
 
     it.each([
+      { arm: "baseline" as const, seeded: false },
+      { arm: "treatment" as const, seeded: false },
       { arm: "treatment" as const, seeded: true },
     ])("$arm actual SDK discovers and calls MCP tools (seeded=$seeded)", async ({ arm, seeded }) => {
       const stub = await createMcpStub({
@@ -848,7 +986,7 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
         expect(attestation.activeTools).toEqual(["read", "bash", "edit", "write", "mcp"]);
         expect(attestation.mcpClientId).toBe("shared-mcp-client-v1");
         expect(attestation.seededMcpServers).toEqual(seeded ? ["docs"] : []);
-        expect(attestation.loadedSkills).toHaveLength(1);
+        expect(attestation.loadedSkills).toHaveLength(arm === "baseline" ? 0 : 1);
         expect(stub.requests).toHaveLength(seeded ? 3 : 0);
         await instance.runPrompt("Complete the task using relevant documentation.");
         const results = instance.session.messages.filter((message) => message.role === "toolResult") as any[];
@@ -866,5 +1004,273 @@ describe("Phase 2: Pi SDK Guest Wrapper and Native Session Integration (L1)", ()
         await stub.close();
       }
     });
+  });
+
+  describe("Unlimited task budgets (Phase 2)", () => {
+    const usage = (output: number) => ({
+      input: 1,
+      output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 1 + output,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    });
+
+    it(
+      "runs past 8000 output tokens, 120 tool steps, and 200 provider requests with null budgets and never shrinks maxTokens",
+      async () => {
+        const workspace = makeTempDir("pi-unlimited");
+        writeFileSync(join(workspace, "data.txt"), "payload\n");
+        const TOOL_TURNS = 205; // exceeds 120 tool steps and, with the final turn, 200 provider requests
+        let turn = 0;
+        const driver = () => {
+          turn += 1;
+          if (turn <= TOOL_TURNS) {
+            return {
+              type: "toolCall" as const,
+              toolCalls: [{ id: `read_${turn}`, name: "read", arguments: { path: "data.txt" } }],
+              usage: usage(100),
+            };
+          }
+          return { type: "text" as const, text: "done", usage: usage(100) };
+        };
+        const scripted = createScriptedStreamSimple(driver);
+        const seenMaxTokens: Array<number | undefined> = [];
+        const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+        const instance = await createPiSdkSession({
+          cwd: workspace,
+          arm: "baseline",
+          target,
+          // Explicit unlimited across all three cumulative task budgets.
+          budget: { maxProviderRequests: null, maxToolSteps: null, maxOutputTokens: null },
+          streamSimpleOverride: (model, context, options) => {
+            seenMaxTokens.push(options?.maxTokens);
+            return scripted(model, context, options);
+          },
+        });
+        try {
+          await instance.runPrompt("Read data.txt many times, then finish.");
+          const snapshot = instance.getBudgetSnapshot();
+          // No harness budget stopped the run.
+          expect(snapshot.taskLimitReason).toBeNull();
+          // All three former default thresholds are crossed.
+          expect(snapshot.outputTokens).not.toBeNull();
+          expect(snapshot.outputTokens!).toBeGreaterThan(8000);
+          expect(snapshot.toolSteps).toBeGreaterThan(120);
+          expect(snapshot.providerRequests).toBeGreaterThan(200);
+          // Unlimited mode never injects a shrinking cumulative maxTokens clamp: every
+          // per-request value is identical (either an untouched SDK default or absent).
+          expect(new Set(seenMaxTokens).size).toBe(1);
+        } finally {
+          instance.dispose();
+        }
+      },
+      120_000,
+    );
+
+    it("still enforces a finite output-token budget and shrinks the per-request clamp toward it", async () => {
+      const workspace = makeTempDir("pi-finite-output");
+      writeFileSync(join(workspace, "data.txt"), "payload\n");
+      let turn = 0;
+      const driver = () => {
+        turn += 1;
+        // Each tool turn adds 30 output tokens; the finite 50-token budget is exceeded on
+        // the second turn, which must stop the run at the output-token boundary.
+        if (turn <= 10) {
+          return {
+            type: "toolCall" as const,
+            toolCalls: [{ id: `read_${turn}`, name: "read", arguments: { path: "data.txt" } }],
+            usage: usage(30),
+          };
+        }
+        return { type: "text" as const, text: "done", usage: usage(30) };
+      };
+      const scripted = createScriptedStreamSimple(driver);
+      const seenMaxTokens: Array<number | undefined> = [];
+      const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+      const instance = await createPiSdkSession({
+        cwd: workspace,
+        arm: "baseline",
+        target,
+        budget: { maxProviderRequests: null, maxToolSteps: null, maxOutputTokens: 50 },
+        streamSimpleOverride: (model, context, options) => {
+          seenMaxTokens.push(options?.maxTokens);
+          return scripted(model, context, options);
+        },
+      });
+      try {
+        await instance.runPrompt("Read data.txt, then finish.");
+        const snapshot = instance.getBudgetSnapshot();
+        expect(snapshot.taskLimitReason).toBe("output token budget of 50 exhausted");
+        // The finite clamp is applied and shrinks with accumulated output: the second
+        // request carries a smaller remaining allowance than the first.
+        const clamps = seenMaxTokens.filter((value): value is number => typeof value === "number");
+        expect(clamps.length).toBeGreaterThanOrEqual(2);
+        expect(clamps[1]!).toBeLessThan(clamps[0]!);
+      } finally {
+        instance.dispose();
+      }
+    });
+
+    it("keeps a finite wall clock while leaving tokens/tools/requests unlimited (mixed policy)", async () => {
+      const workspace = makeTempDir("pi-mixed");
+      writeFileSync(join(workspace, "data.txt"), "payload\n");
+      let turn = 0;
+      const driver = () => {
+        turn += 1;
+        if (turn <= 12) {
+          return {
+            type: "toolCall" as const,
+            toolCalls: [{ id: `read_${turn}`, name: "read", arguments: { path: "data.txt" } }],
+            usage: usage(1000),
+          };
+        }
+        return { type: "text" as const, text: "done", usage: usage(1000) };
+      };
+      const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+      const instance = await createPiSdkSession({
+        cwd: workspace,
+        arm: "baseline",
+        target,
+        // Only the wall clock is finite here; the cumulative budgets stay unlimited.
+        budget: { maxProviderRequests: null, maxToolSteps: null, maxOutputTokens: null },
+        streamSimpleOverride: createScriptedStreamSimple(driver),
+      });
+      try {
+        await instance.runPrompt("Read data.txt several times, then finish.");
+        const snapshot = instance.getBudgetSnapshot();
+        expect(snapshot.taskLimitReason).toBeNull();
+        // Cumulative output exceeds the former 8000 default because it is unlimited.
+        expect(snapshot.outputTokens!).toBeGreaterThan(8000);
+      } finally {
+        instance.dispose();
+      }
+    });
+  });
+
+  describe("independent per-session budget counters", () => {
+    const localUsage = (output: number) => ({
+      input: 1, output, cacheRead: 0, cacheWrite: 0, totalTokens: 1 + output,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    });
+
+    it("keeps provider-request, tool-step, and output counters independent across sessions/repetitions", async () => {
+      const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
+      const wsA = makeTempDir("pi-independent-a");
+      const wsB = makeTempDir("pi-independent-b");
+
+      // Session A: two tool steps then a final text — three provider requests, 30 output.
+      let turnA = 0;
+      const sessionA = await createPiSdkSession({
+        cwd: wsA,
+        arm: "baseline",
+        target,
+        budget: { maxOutputTokens: null, maxToolSteps: null, maxProviderRequests: null },
+        streamSimpleOverride: createScriptedStreamSimple(() => {
+          turnA += 1;
+          if (turnA <= 2) {
+            return { type: "toolCall" as const, toolCalls: [{ name: "write", arguments: { path: `f${turnA}.txt`, content: "x" } }], usage: localUsage(10) };
+          }
+          return { type: "text" as const, text: "done", usage: localUsage(10) };
+        }),
+      });
+
+      // Session B: a single text response — one provider request, 5 output, no tool steps.
+      const sessionB = await createPiSdkSession({
+        cwd: wsB,
+        arm: "baseline",
+        target,
+        budget: { maxOutputTokens: null, maxToolSteps: null, maxProviderRequests: null },
+        streamSimpleOverride: createScriptedStreamSimple([{ type: "text", text: "one", usage: localUsage(5) }]),
+      });
+
+      // Interleave the runs so any accidental shared state would be observable.
+      await sessionA.runPrompt("do more work");
+      await sessionB.runPrompt("do less work");
+
+      const snapA = sessionA.getBudgetSnapshot();
+      const snapB = sessionB.getBudgetSnapshot();
+
+      // Each session's counters reflect ONLY its own activity: no cross-session bleed.
+      expect(snapA.toolSteps).toBe(2);
+      expect(snapA.providerRequests).toBe(3);
+      expect(snapA.outputTokens).toBe(30);
+      expect(snapB.toolSteps).toBe(0);
+      expect(snapB.providerRequests).toBe(1);
+      expect(snapB.outputTokens).toBe(5);
+
+      sessionA.dispose();
+      sessionB.dispose();
+    });
+  });
+});
+
+describe("finite output-clamp attribution (pure)", () => {
+  it("forwards the SHRUNKEN remainder as the binding cap on a later turn", () => {
+    const clamp = computeOutputClamp({ maxOutputTokens: 8000, priorOutput: 7900, existingMaxTokens: undefined });
+    expect(clamp.forwardedMaxTokens).toBe(100);
+    expect(clamp.harnessRemainderBinding).toBe(true);
+    expect(clamp.forwardedClamp).toBe(100);
+  });
+
+  it("treats the full budget as the binding cap on the FIRST turn (no first-turn exclusion)", () => {
+    const clamp = computeOutputClamp({ maxOutputTokens: 8000, priorOutput: 0, existingMaxTokens: undefined });
+    expect(clamp.forwardedMaxTokens).toBe(8000);
+    expect(clamp.harnessRemainderBinding).toBe(true);
+    expect(clamp.forwardedClamp).toBe(8000);
+  });
+
+  it("lets a SMALLER native per-response cap win the min and is not the harness binding", () => {
+    // Native/SDK per-response maxTokens (4096) is below the 7900 remainder, so the native
+    // cap is what actually bounds the request — not the harness remainder.
+    const clamp = computeOutputClamp({ maxOutputTokens: 8000, priorOutput: 100, existingMaxTokens: 4096 });
+    expect(clamp.forwardedMaxTokens).toBe(4096);
+    expect(clamp.harnessRemainderBinding).toBe(false);
+    expect(clamp.forwardedClamp).toBeNull();
+  });
+
+  it("never clamps an UNLIMITED output budget and forwards any native cap unchanged", () => {
+    expect(computeOutputClamp({ maxOutputTokens: null, priorOutput: 5000, existingMaxTokens: undefined })).toEqual({
+      forwardedMaxTokens: undefined,
+      harnessRemainderBinding: false,
+      forwardedClamp: null,
+    });
+    expect(computeOutputClamp({ maxOutputTokens: null, priorOutput: 5000, existingMaxTokens: 4096 })).toEqual({
+      forwardedMaxTokens: 4096,
+      harnessRemainderBinding: false,
+      forwardedClamp: null,
+    });
+  });
+
+  it("attributes a `length` stop to cumulative exhaustion ONLY when the response reached the forwarded clamp", () => {
+    // First-turn harness bound and reached (7996 of an 8000 clamp, within tolerance).
+    expect(lengthStopExhaustedOutputBudget({ maxOutputTokens: 8000, harnessRemainderBinding: true, forwardedClamp: 8000, responseOutput: 7996 })).toBe(true);
+    // Later shrunken remainder reached (96 of a 100 clamp).
+    expect(lengthStopExhaustedOutputBudget({ maxOutputTokens: 8000, harnessRemainderBinding: true, forwardedClamp: 100, responseOutput: 96 })).toBe(true);
+  });
+
+  it("does NOT attribute a native truncation far below the forwarded clamp", () => {
+    // The reviewer's example: 100 used, cap 8000, remainder 7900 forwarded, but the model
+    // truncated natively at 4096. That is 3804 short of the clamp — provider-native, not
+    // cumulative exhaustion.
+    expect(lengthStopExhaustedOutputBudget({ maxOutputTokens: 8000, harnessRemainderBinding: true, forwardedClamp: 7900, responseOutput: 4096 })).toBe(false);
+  });
+
+  it("does NOT attribute when a smaller native cap won the min (later native shorter truncation)", () => {
+    // Native per-response cap (2000) truncated the response; the harness remainder was not
+    // the binding forwarded cap, so even reaching 2000 is provider-native.
+    expect(lengthStopExhaustedOutputBudget({ maxOutputTokens: 8000, harnessRemainderBinding: false, forwardedClamp: null, responseOutput: 2000 })).toBe(false);
+  });
+
+  it("is conservative: unlimited budget and unavailable output usage are never exhaustion", () => {
+    expect(lengthStopExhaustedOutputBudget({ maxOutputTokens: null, harnessRemainderBinding: false, forwardedClamp: null, responseOutput: 9999 })).toBe(false);
+    expect(lengthStopExhaustedOutputBudget({ maxOutputTokens: 8000, harnessRemainderBinding: true, forwardedClamp: 8000, responseOutput: null })).toBe(false);
+  });
+
+  it("keeps the reach tolerance small relative to the clamp", () => {
+    expect(outputClampReachTolerance(8000)).toBe(80);
+    expect(outputClampReachTolerance(100)).toBe(16);
+    // The tolerance can never bridge a genuine native-limit gap like 7900 -> 4096.
+    expect(7900 - outputClampReachTolerance(7900)).toBeGreaterThan(4096);
   });
 });

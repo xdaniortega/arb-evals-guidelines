@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EvalError } from "../core/types.ts";
-import { canonicalJson, sha256Hex } from "../core/experiment.ts";
+import { canonicalJson, resourceNameFor, sha256Hex } from "../core/experiment.ts";
 import {
   createEvidenceStore,
   createRunJournal,
@@ -37,6 +37,21 @@ async function tempRoot(): Promise<string> {
 }
 
 describe("run journal", () => {
+  it("reads generated resource names beyond the three-digit repetition padding", async () => {
+    const stateDir = join(await tempRoot(), ".state");
+    const runId = "19700101T000000Z-abcdef12";
+    const nonce = "0a1b2c3d";
+    const journal = await createRunJournal({ stateDir, runId, nonce });
+    const identities = [
+      { kind: "guest" as const, conditionId: "baseline" as const, name: resourceNameFor("guest", { runId, resourceNonce: nonce }, 1000, "baseline") },
+      { kind: "network" as const, conditionId: "treatment" as const, name: resourceNameFor("net", { runId, resourceNonce: nonce }, 1000, "treatment") },
+    ];
+    for (const identity of identities) {
+      await journal.record({ ...identity, event: "intent", action: "create", status: null });
+    }
+    expect(journaledIdentities(await readRunJournal(stateDir, runId))).toEqual(identities);
+  });
+
   it("appends intent before observation and reads back exact identities", async () => {
     const root = await tempRoot();
     const stateDir = join(root, ".state");

@@ -214,6 +214,63 @@ describe("resolveLimits", () => {
       "limit-invalid",
     );
   });
+
+  it("resolves all four task budgets to unlimited (null) for a fresh default plan", () => {
+    const resolved = resolveLimits({ cli: {}, caseLimits: {}, suiteLimits: {}, runtimeProfileId: "default" });
+    for (const key of ["wallClockMs", "maxOutputTokens", "maxToolSteps", "maxProviderRequests"] as const) {
+      expect(resolved.limits[key]).toBeNull();
+      expect(resolved.provenance[key]).toBe("default");
+    }
+  });
+
+  it("supports a finite wall clock with unlimited tokens/tools/requests", () => {
+    const resolved = resolveLimits({
+      cli: { wallClockMs: 300_000, maxOutputTokens: null, maxToolSteps: null, maxProviderRequests: null },
+      caseLimits: {},
+      suiteLimits: {},
+      runtimeProfileId: "default",
+    });
+    expect(resolved.limits.wallClockMs).toBe(300_000);
+    expect(resolved.limits.maxOutputTokens).toBeNull();
+    expect(resolved.limits.maxToolSteps).toBeNull();
+    expect(resolved.limits.maxProviderRequests).toBeNull();
+  });
+
+  it("lets an explicit unlimited (null) task budget override a finite case/suite value", () => {
+    const resolved = resolveLimits({
+      cli: { maxOutputTokens: null },
+      caseLimits: { maxOutputTokens: 8_000 },
+      suiteLimits: { maxOutputTokens: 4_000, maxToolSteps: 50 },
+      runtimeProfileId: "default",
+    });
+    // Explicit null at the highest tier wins and is never replaced by a lower finite tier.
+    expect(resolved.limits.maxOutputTokens).toBeNull();
+    expect(resolved.provenance.maxOutputTokens).toBe("cli");
+    // A finite suite value still resolves when no higher tier overrides it.
+    expect(resolved.limits.maxToolSteps).toBe(50);
+    expect(resolved.provenance.maxToolSteps).toBe("suite");
+  });
+
+  it("lets an authored finite case budget override the unlimited default", () => {
+    const resolved = resolveLimits({
+      cli: {},
+      caseLimits: { maxProviderRequests: 25 },
+      suiteLimits: {},
+      runtimeProfileId: "default",
+    });
+    expect(resolved.limits.maxProviderRequests).toBe(25);
+    expect(resolved.provenance.maxProviderRequests).toBe("case");
+  });
+
+  it.each(["cpus", "memoryMiB", "pids", "diskMiB"] as const)(
+    "refuses to disable resource bound %s through a null override",
+    (key) => {
+      expectEvalError(
+        () => resolveLimits({ cli: { [key]: null }, caseLimits: {}, suiteLimits: {}, runtimeProfileId: "default" }),
+        "limit-invalid",
+      );
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -169,10 +169,24 @@ describe("locked guest SDK artifact", () => {
 
     // A deny-by-default .dockerignore silently drops any locked artifact that is not
     // re-included, producing an image that is missing modules the guest agent imports.
+    // Explicit per-file COPY instructions replace a blanket directory copy, so the image can
+    // no longer inherit an artifact implicitly: each locked path must be named by a COPY source.
+    const copiedSources = new Set(
+      containerfile
+        .split("\n")
+        .filter((line) => line.startsWith("COPY "))
+        .flatMap((line) => line.slice("COPY ".length).trim().split(/\s+/).slice(0, -1)),
+    );
     for (const path of [...Object.keys(artifactLock.artifacts), "guest-runtime/artifact-lock.json"]) {
       expect(dockerignore, `${path} must be re-included in the build context`).toContain(`!${path}`);
-      expect(containerfile).toMatch(/^COPY guest-runtime \/opt\/eval\/guest-runtime$/m);
+      expect(copiedSources, `${path} must be copied into the image`).toContain(path);
     }
+
+    // The build must fail before the image is cached if a copied artifact drifts from the lock
+    // or the guest agent entry point is missing.
+    expect(containerfile).toMatch(/^RUN node --input-type=module -e .*artifact-lock\.json/m);
+    expect(containerfile).toContain("Guest artifact mismatch: ");
+    expect(containerfile).toContain("Missing guest agent entry point");
 
     // The static context files are digest-pinned by hand, so bind them to their real bytes.
     for (const name of ["Containerfile", ".dockerignore", "configure-egress.sh", "run-measured.mjs"]) {
@@ -241,8 +255,8 @@ describe("framed guest SDK process", () => {
     ]));
     const ready = await fx.waitFor("ready");
     expect(ready.attestation.loadedSkills).toEqual([]);
-    expect(ready.attestation.activeTools).toEqual(["read", "write", "edit", "bash"]);
-    expect(ready.attestation.mcpClientId).toBeNull();
+    expect(ready.attestation.activeTools).toEqual(["read", "write", "edit", "bash", "mcp"]);
+    expect(ready.attestation.mcpClientId).toBe("shared-mcp-client-v1");
     expect(ready.attestation.seededMcpServers).toEqual([]);
     expect(ready.process.platform).toBe(process.platform);
     expect(ready.process.uid).toBe(process.getuid?.() ?? null);
@@ -269,13 +283,13 @@ describe("framed guest SDK process", () => {
       arm: "treatment",
       skillPath: skillDir,
       // A treatment arm always carries a bundle object; a skill declaring no MCP
-      // resolves to the empty bundle, so nothing is provisioned and no call is made.
+      // resolves to the empty bundle: the shared client exists but connects to no server.
       skillToolBundle: { schemaVersion: 1, source: null, sourceSha256: null, servers: [] },
     });
     const ready = await fx.waitFor("ready");
     expect(ready.attestation.loadedSkills).toHaveLength(1);
-    expect(ready.attestation.activeTools).toEqual(["read", "write", "edit", "bash"]);
-    expect(ready.attestation.mcpClientId).toBeNull();
+    expect(ready.attestation.activeTools).toEqual(["read", "write", "edit", "bash", "mcp"]);
+    expect(ready.attestation.mcpClientId).toBe("shared-mcp-client-v1");
     expect(ready.attestation.seededMcpServers).toEqual([]);
     expect(ready.attestation.loadedSkills[0].path).toContain("SKILL.md");
     fx.send({ type: "prompt", prompt: "finish" });
@@ -367,6 +381,14 @@ describe("framed guest SDK process", () => {
     expect(await lengthFx.exit).toBe(0);
     expect(lengthResult.outcome).toBe("task-limit");
     expect(lengthResult.terminal.classification).toBe("task-limit");
+    // A FIRST-turn `length` stop under a finite (4096) output budget: the clamp still
+    // equals the full budget and has not shrunk across turns, so the provider truncated on
+    // its own per-response limit within the allowance. That is provider-native truncation,
+    // NOT cumulative-output exhaustion. Only a SHRUNKEN remainder after prior turns
+    // reclassifies a `length` stop as a harness cumulative cap (see the multi-turn
+    // near-boundary cases in adapter.test.ts / sdk-session.test.ts).
+    expect(lengthResult.terminal.stopCause).toBe("provider-response-length");
+    expect(lengthResult.terminal.stopReason).toBe("length");
 
     const errorFx = await fixture();
     errorFx.send(initFrame([{ type: "error", errorMessage: "arbitrary execution failure", stopReason: "aborted" }]));
@@ -377,6 +399,85 @@ describe("framed guest SDK process", () => {
     expect(await errorFx.exit).toBe(0);
     expect(errorResult.outcome).toBe("infrastructure-failure");
     expect(errorResult.terminal.classification).toBe("execution-failure");
+    expect(errorResult.terminal.stopCause).toBe("infrastructure-error");
+  });
+
+  it("reports provider-native length as provider-response-length under an UNLIMITED output budget, not cumulative exhaustion", async () => {
+    const fx = await fixture();
+    // Unlimited across all cumulative budgets: a native `length` stop can only be the
+    // provider's own per-response truncation, never a harness cumulative-output cap.
+    fx.send({
+      ...initFrame([{ type: "stop", stopReason: "length", text: "partial" }]),
+      limits: { maxProviderRequests: null, maxToolSteps: null, maxOutputTokens: null },
+    });
+    await fx.waitFor("ready");
+    fx.send({ type: "prompt", prompt: "run to native length while unlimited" });
+    fx.child.stdin.end();
+    const result = await fx.waitFor("result");
+    expect(await fx.exit, fx.stderr).toBe(0);
+    expect(result.outcome).toBe("task-limit");
+    expect(result.terminal.stopCause).toBe("provider-response-length");
+    expect(result.usage.taskLimitReason).toBeNull();
+  });
+
+  it.each([
+    ["This operation was aborted", "task-limit", "aborted"],
+    ["quota exceeded", "infrastructure-failure", "error"],
+    ["This operation was aborted: upstream failure", "infrastructure-failure", "error"],
+  ])("classifies provider error after a harness deadline: %s", async (errorMessage, outcome, stopReason) => {
+    const wrapperDir = mkdtempSync(join(tmpdir(), "pi-provider-abort-"));
+    const wrapper = join(wrapperDir, "abort.mjs");
+    const guestModule = pathToFileURL(join(process.cwd(), "evals/container/guest-runtime/src/harnesses/pi/guest-agent.mjs")).href;
+    writeFileSync(wrapper, `
+import { AgentSession } from ${JSON.stringify(pathToFileURL(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href)};
+import { runGuestAgent } from ${JSON.stringify(guestModule)};
+const descriptor = Object.getOwnPropertyDescriptor(AgentSession.prototype, "messages");
+if (typeof descriptor?.get !== "function") throw new Error("SDK messages accessor changed");
+Object.defineProperty(AgentSession.prototype, "messages", { ...descriptor, get() {
+  const messages = descriptor.get.call(this);
+  const last = messages.filter(message => message.role === "assistant").at(-1);
+  if (last?.stopReason === "aborted") {
+    last.stopReason = "error";
+    last.errorMessage = ${JSON.stringify(errorMessage)};
+  }
+  return messages;
+} });
+runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error => {
+  process.stderr.write(String(error)); process.exitCode = 1;
+});
+`);
+    try {
+      const fx = await fixture("synthetic-abort-key", 0, { entry: wrapper });
+      fx.send({ ...initFrame([
+        { type: "toolCall", toolCalls: [{ id: "slow", name: "bash", arguments: { command: "sleep 10" } }] },
+        { type: "text", text: "never reached" },
+      ]), armWallClockMs: 1_000 });
+      await fx.waitFor("ready");
+      fx.send({ type: "prompt", prompt: "exhaust task budget" });
+      fx.child.stdin.end();
+      const result = await fx.waitFor("result");
+      expect(await fx.exit, fx.stderr).toBe(0);
+      expect(result.terminal.semanticAbortCause).toBe("arm-budget");
+      // A missing assistant message must not let the deadline-only path pass vacuously.
+      expect(result.terminal.stopReason).toBe(stopReason);
+      expect(result.outcome).toBe(outcome);
+      // A harness wall-clock abort resolves to the wall-clock stop cause when it is a
+      // task-limit; a decorated provider failure remains an infrastructure error.
+      expect(result.terminal.stopCause).toBe(outcome === "task-limit" ? "wall-clock" : "infrastructure-error");
+    } finally { rmSync(wrapperDir, { recursive: true, force: true }); }
+  });
+
+  it("does not normalize an unsolicited provider abort error", async () => {
+    const fx = await fixture();
+    fx.send(initFrame([{ type: "error", errorMessage: "This operation was aborted", stopReason: "error" }]));
+    await fx.waitFor("ready");
+    fx.send({ type: "prompt", prompt: "fail without a deadline" });
+    fx.child.stdin.end();
+    const result = await fx.waitFor("result");
+    expect(await fx.exit).toBe(0);
+    expect(result.terminal.semanticAbortCause).toBeNull();
+    expect(result.terminal.stopReason).toBe("error");
+    expect(result.outcome).toBe("infrastructure-failure");
   });
 
   it("bounds queued frames while credentials are delayed and skips frames after a fatal parse error", async () => {
@@ -405,12 +506,33 @@ describe("framed guest SDK process", () => {
   });
 
   describe("parseInit validation", () => {
-    it("accepts the maximum ten-minute prompt allowance", () => {
-      expect(parseInit({ ...initFrame([{ type: "text", text: "done" }]), armWallClockMs: 600_000 }).armWallClockMs).toBe(600_000);
+    it("accepts a finite prompt allowance above the former fixed maximum (no arm cap)", () => {
+      expect(parseInit({ ...initFrame([{ type: "text", text: "done" }]), armWallClockMs: 600_001 }).armWallClockMs).toBe(600_001);
     });
 
-    it.each([600_001, 0, -1, 1.5, Number.MAX_SAFE_INTEGER])("rejects an invalid prompt allowance %s", (armWallClockMs) => {
+    it("accepts null as an unlimited prompt allowance", () => {
+      expect(parseInit({ ...initFrame([{ type: "text", text: "done" }]), armWallClockMs: null }).armWallClockMs).toBeNull();
+    });
+
+    it.each([0, -1, 1.5, Number.NaN])("rejects an invalid finite prompt allowance %s", (armWallClockMs) => {
       expect(() => parseInit({ ...initFrame([{ type: "text", text: "done" }]), armWallClockMs })).toThrow("init.armWallClockMs");
+    });
+
+    it.each(["maxProviderRequests", "maxToolSteps", "maxOutputTokens"] as const)(
+      "accepts a null (unlimited) cumulative task budget %s at the transport boundary",
+      (key) => {
+        const parsed = parseInit({
+          ...initFrame([{ type: "text", text: "done" }]),
+          limits: { ...limits, [key]: null },
+        });
+        expect(parsed.limits[key]).toBeNull();
+      },
+    );
+
+    it.each([0, -1, 1.5])("rejects an invalid finite cumulative task budget %s", (bad) => {
+      expect(() =>
+        parseInit({ ...initFrame([{ type: "text", text: "done" }]), limits: { ...limits, maxOutputTokens: bad } }),
+      ).toThrow("init.limits.maxOutputTokens");
     });
     it("refuses an ambientTools entry that is not in allowedTools", () => {
       expect(() =>

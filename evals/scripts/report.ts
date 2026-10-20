@@ -1,5 +1,5 @@
 /**
- * `pnpm eval:report` — verify a sealed run and print its summary or opted-in per-pair details.
+ * `pnpm eval:report` — verify sealed runs and print pair outcomes and separate averages.
  *
  * Thin composition entrypoint only: parse argv, call the read model, print, exit. The
  * chain verification, the gradeability rules, and the refusal to print a delta for an
@@ -13,17 +13,18 @@ import { EvalError, toStructuredFailure } from "../src/core/types.ts";
 import { buildRunReport, formatRunReport } from "../src/artifacts/queries.ts";
 
 const USAGE =
-  "usage: eval:report --receipt <path to receipt.json> [--format table|markdown|json] [--details]\n" +
-  "  --details adds original per-pair scores to human table/Markdown output; JSON is unchanged.";
+  "usage: eval:report --receipt <path to receipt.json> [--receipt <another receipt>] [--format table|markdown|json] [--details]\n" +
+  "  Each run keeps its own averages. Multiple JSON receipts produce an array.\n" +
+  "  --details adds operational per-arm metadata to human output; JSON is unchanged.";
 
 interface Args {
-  readonly receiptPath: string;
+  readonly receiptPaths: readonly string[];
   readonly format: "table" | "markdown" | "json";
   readonly details: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Args {
-  let receiptPath: string | null = null;
+  const receiptPaths: string[] = [];
   let format: "table" | "markdown" | "json" = "table";
   let details = false;
 
@@ -42,7 +43,7 @@ function parseArgs(argv: readonly string[]): Args {
       if (value === undefined || value.startsWith("--")) {
         throw new EvalError("input-invalid", `--receipt requires a value. ${USAGE}`, { at: "--receipt" });
       }
-      receiptPath = value;
+      receiptPaths.push(resolve(value));
       index += 1;
     } else if (flag === "--format") {
       if (value === undefined || value.startsWith("--")) {
@@ -58,18 +59,24 @@ function parseArgs(argv: readonly string[]): Args {
     }
   }
 
-  if (receiptPath === null) {
+  if (receiptPaths.length === 0) {
     throw new EvalError("input-invalid", `--receipt is required. ${USAGE}`, { at: "--receipt" });
   }
 
-  return { receiptPath: resolve(receiptPath), format, details };
+  return { receiptPaths, format, details };
 }
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
-  const report = await buildRunReport(args.receiptPath);
-  process.stdout.write(`${formatRunReport(report, { format: args.format, details: args.details })}\n`);
-  return report.verification.ok ? 0 : 1;
+  const reports = await Promise.all(args.receiptPaths.map(buildRunReport));
+  const rendered = reports.map((report, index) => formatRunReport(report, {
+    format: args.format, details: args.details, runNumber: index + 1,
+  }));
+  const output = args.format === "json" && rendered.length > 1
+    ? JSON.stringify(rendered.map((item) => JSON.parse(item)), null, 2)
+    : rendered.join("\n\n");
+  process.stdout.write(`${output}\n`);
+  return reports.every((report) => report.verification.ok) ? 0 : 1;
 }
 
 main().then(

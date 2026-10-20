@@ -3,10 +3,29 @@
  *
  * This module owns identifiers, schemas, limits, and structured errors. It must stay
  * free of filesystem, process, container, provider, harness, and suite-specific
- * concerns (see evals/ARCHITECTURE.md sections 1-2).
+ * concerns (see evals/docs/ARCHITECTURE.md sections 1-2).
  */
 
 export const INPUT_SCHEMA_VERSION = 1;
+/**
+ * Sealed-evidence schema version.
+ *
+ * v2 is an ADDITIVE evolution of v1: it introduces optional per-condition fields
+ * (`stopCause`, `providerStopReason`) alongside the pre-existing usage counters. The
+ * compatibility contract is deliberately one-directional and non-reinterpreting:
+ *
+ * - Historical v1 evidence sealed before these fields existed simply omits them. Readers
+ *   MUST treat an absent/invalid `stopCause` as `unknown` and an absent/non-string
+ *   `providerStopReason` as `null`. No default cause is fabricated, and a finite output
+ *   limit recorded in an older plan is never retro-reinterpreted as a stop cause.
+ * - The hash chain (receipt -> manifest -> pair -> condition) is unchanged, so v1 runs
+ *   keep verifying byte-for-byte; only the read model gained new nullable columns.
+ * - `providerStopReason` persists the RAW provider reason (e.g. MAX_TOKENS/STOP), which is
+ *   independent of the normalized `stopReason`/`stopCause` used for classification.
+ *
+ * Because every new field is optional and defaulted to an explicitly "unavailable" value,
+ * bumping to v2 required no migration and cannot silently upgrade the meaning of old data.
+ */
 export const EVIDENCE_SCHEMA_VERSION = 2;
 export const SCHEMA_VERSION = INPUT_SCHEMA_VERSION;
 
@@ -41,45 +60,14 @@ export type RuntimeProfileId = string;
  *   byte budgets so a guest cannot enlarge the graded surface without limit. This is
  *   the collection contract of every NEW evaluation run, for every case.
  * - `file` grades exactly the requested output path. It is retained only to read and
- *   reproduce historical evidence sealed before workspace collection became universal;
+ *   inspect historical evidence sealed before workspace collection became universal;
  *   a fresh case source may no longer request it.
  */
 export const CANDIDATE_MODES = ["file", "workspace"] as const;
 export type CandidateMode = (typeof CANDIDATE_MODES)[number];
 
-/**
- * Where a case configuration was read from. The caller states this at an explicit
- * boundary, so the fresh-run default can never leak into retained evidence and a
- * historical recorded mode is never re-interpreted with today's default.
- *
- * - `fresh`: authored source for a new run. No mode is authored, and the effective
- *   policy resolves to `workspace` before freezing, policy hashing, and dispatch.
- * - `retained`: bytes read back from sealed evidence (`--from`, reproduction, frozen
- *   snapshots). The recorded mode is preserved verbatim.
- */
-export const CASE_CONFIG_SOURCES = ["fresh", "retained"] as const;
-export type CaseConfigSource = (typeof CASE_CONFIG_SOURCES)[number];
-
 /** Collection policy every fresh evaluation run resolves to, with no authored field. */
 export const FRESH_RUN_CANDIDATE_MODE: CandidateMode = "workspace";
-
-/**
- * Documented historical-format default: a case configuration sealed before workspace
- * collection became universal graded exactly the requested output path. Applied only to
- * retained evidence whose execution policy records no mode.
- */
-export const HISTORICAL_CANDIDATE_MODE: CandidateMode = "file";
-
-/** Explicit decoder context for one case configuration. */
-export interface CaseConfigDecoder {
-  readonly source: CaseConfigSource;
-  /**
-   * Retained inputs only: the mode recorded by that run's verified execution policy.
-   * A recorded mode contradicting the retained case configuration is rejected rather
-   * than reconciled.
-   */
-  readonly recordedCandidateMode?: CandidateMode | null;
-}
 
 /**
  * In workspace mode, outputPath may use this marker when the task deliverable is the
@@ -105,23 +93,64 @@ export const LIMIT_KEYS = [
   "diskMiB",
 ] as const;
 export type LimitKey = (typeof LIMIT_KEYS)[number];
-export type Limits = Readonly<Record<LimitKey, number>>;
-export type PartialLimits = Readonly<Partial<Record<LimitKey, number>>>;
 
-/** Maximum execution time from prompt receipt, independently for each Pi child. */
-export const MAX_ARM_WALL_CLOCK_MS = 600_000;
+/**
+ * The four TASK budgets bound a single arm's own execution. Each accepts a positive
+ * safe integer (a finite cumulative cap) or `null`, which means UNLIMITED: no
+ * harness-imposed cumulative cap for that dimension is enforced anywhere. Every other
+ * limit key names a RESOURCE or isolation bound and is always a positive integer that
+ * can never be disabled.
+ *
+ * `wallClockMs`         - per-arm prompt deadline in ms.
+ * `maxOutputTokens`     - cumulative output tokens across the arm's provider responses.
+ * `maxToolSteps`        - cumulative tool invocations for the arm.
+ * `maxProviderRequests` - cumulative provider requests for the arm.
+ */
+export const TASK_LIMIT_KEYS = [
+  "wallClockMs",
+  "maxOutputTokens",
+  "maxToolSteps",
+  "maxProviderRequests",
+] as const satisfies readonly LimitKey[];
+export type TaskLimitKey = (typeof TASK_LIMIT_KEYS)[number];
+
+const TASK_LIMIT_KEY_SET: ReadonlySet<string> = new Set<string>(TASK_LIMIT_KEYS);
+
+/** @notice Distinguishes nullable task budgets from mandatory resource bounds. */
+export function isTaskLimitKey(key: string): key is TaskLimitKey {
+  return TASK_LIMIT_KEY_SET.has(key);
+}
+
+/**
+ * A task budget is a positive integer (a finite cumulative cap) or `null` (UNLIMITED).
+ * Unlimited is represented explicitly as `null` and must never be smuggled as a huge
+ * finite number or `Infinity`, because a finite value silently caps a legitimately
+ * unlimited arm. Resource/isolation budgets are always positive integers.
+ */
+export type TaskLimit = number | null;
+/** @deprecated Use {@link TaskLimit}; retained for import compatibility. */
+export type WallClockLimit = TaskLimit;
+export type Limits = Readonly<{ [K in LimitKey]: K extends TaskLimitKey ? TaskLimit : number }>;
+export type PartialLimits = Readonly<Partial<{ [K in LimitKey]: K extends TaskLimitKey ? TaskLimit : number }>>;
+
 /** Existing five-minute operation bound, also used to reserve non-prompt work. */
 export const CONDITION_OPERATION_ALLOWANCE_MS = 300_000;
 /** Existing bounded resource cleanup allowance, separate from prompt execution. */
 export const CONDITION_CLEANUP_ALLOWANCE_MS = 20_000;
 
-/** Lowest-precedence limit values. Every field must resolve to a positive integer. */
+/**
+ * Lowest-precedence values. The four TASK budgets default to `null` (UNLIMITED): a
+ * fresh standard run imposes no harness cumulative wall-clock, output-token, tool-step,
+ * or provider-request cap. A finite cap is only ever an explicit opt-in through CLI,
+ * case, suite, or profile configuration. Every RESOURCE/isolation budget defaults to a
+ * positive integer that can never be disabled.
+ */
 export const SAFE_DEFAULT_LIMITS: Limits = {
-  // Starts at each condition's prompt; preparation and sibling execution use separate time.
-  wallClockMs: 300_000,
-  maxOutputTokens: 8_000,
-  maxToolSteps: 120,
-  maxProviderRequests: 200,
+  // Unlimited by default; an explicit finite value starts at each condition's prompt.
+  wallClockMs: null,
+  maxOutputTokens: null,
+  maxToolSteps: null,
+  maxProviderRequests: null,
   maxExportedFiles: 64,
   maxExportedFileBytes: 262_144,
   maxWorkspaceBytes: 2_097_152,
@@ -130,6 +159,28 @@ export const SAFE_DEFAULT_LIMITS: Limits = {
   pids: 256,
   diskMiB: 2_048,
 };
+
+/**
+ * @notice Derives nested guest and host lifetimes without consuming either arm's prompt allowance.
+ * @param wallClockMs Per-arm prompt allowance, or `null` for an unlimited arm.
+ * @returns Readiness, supervisor, and host-stream timeouts in milliseconds, or `null` fields when the arm is unlimited.
+ * @dev Serial execution reserves sibling setup, execution, capture, and cleanup; the host closes last. Unlimited execution relies on cancellation and separate bounded infrastructure operations, with no guest-lifetime cap.
+ */
+export function resolveGuestTimeouts(wallClockMs: WallClockLimit): {
+  readonly prePromptMs: number | null;
+  readonly supervisorMs: number | null;
+  readonly streamMs: number | null;
+} {
+  if (wallClockMs === null) {
+    return { prePromptMs: null, supervisorMs: null, streamMs: null };
+  }
+  if (!Number.isSafeInteger(wallClockMs) || wallClockMs <= 0) {
+    throw new EvalError("limit-invalid", "wallClockMs must be a positive integer or null (unlimited)", { at: "limits.wallClockMs" });
+  }
+  const prePromptMs = 2 * CONDITION_OPERATION_ALLOWANCE_MS + wallClockMs + CONDITION_CLEANUP_ALLOWANCE_MS;
+  const lifetimeMs = CONDITION_OPERATION_ALLOWANCE_MS + prePromptMs + Math.max(wallClockMs, 180_000);
+  return { prePromptMs, supervisorMs: lifetimeMs + 10_000, streamMs: lifetimeMs + 30_000 };
+}
 
 export interface RuntimeProfile {
   readonly id: RuntimeProfileId;
@@ -152,6 +203,93 @@ export const RUNTIME_PROFILES: Readonly<Record<RuntimeProfileId, RuntimeProfile>
 
 export const LIMIT_SOURCES = ["cli", "case", "suite", "profile", "default"] as const;
 export type LimitSource = (typeof LIMIT_SOURCES)[number];
+
+// ---------------------------------------------------------------------------
+// Structured stop causes
+// ---------------------------------------------------------------------------
+
+/**
+ * The precise reason an arm stopped, distinct from the coarse outcome vocabulary. This
+ * disambiguates a harness-imposed cumulative-budget exhaustion from a provider-native
+ * response truncation without redefining the historical `completed`/`task-limit`/
+ * `infrastructure-failure` outcome set.
+ *
+ * - `completed`                 - the arm finished on its own.
+ * - `wall-clock`                - a finite per-arm wall-clock budget elapsed.
+ * - `cumulative-output-tokens`  - a finite cumulative output-token budget was exhausted.
+ * - `tool-steps`                - a finite cumulative tool-step budget was exhausted.
+ * - `provider-requests`         - a finite cumulative provider-request budget was exhausted.
+ * - `provider-response-length`  - the PROVIDER natively truncated a response (its own
+ *                                 per-response/context limit), NOT a harness cumulative
+ *                                 cap. An unlimited arm can only ever report this, never
+ *                                 a cumulative-* cause.
+ * - `external-cancellation`     - the run or a user cancelled the arm.
+ * - `infrastructure-error`      - an infrastructure/provider/protocol failure.
+ * - `unexpected-abort`          - an abort with no attributable cause.
+ * - `unknown`                   - unavailable in historical evidence, or unclassifiable.
+ */
+export const STOP_CAUSES = [
+  "completed",
+  "wall-clock",
+  "cumulative-output-tokens",
+  "tool-steps",
+  "provider-requests",
+  "provider-response-length",
+  "external-cancellation",
+  "infrastructure-error",
+  "unexpected-abort",
+  "unknown",
+] as const;
+export type StopCause = (typeof STOP_CAUSES)[number];
+
+/** The terminal classes the harness computes before mapping to an outcome/stop cause. */
+export type TerminalClass =
+  | "completed"
+  | "task-limit"
+  | "interrupted"
+  | "execution-failure"
+  | "unexpected-abort";
+
+/**
+ * @notice Derives a precise, machine-readable stop cause from terminal signals.
+ * @dev Pure and side-effect free so both the in-guest agent and the host adapter classify
+ * identically. A finite cumulative budget names itself through `taskLimitReason`; a
+ * provider-native `length` truncation with NO harness reason is reported distinctly and is
+ * never relabeled as cumulative output-token exhaustion.
+ */
+export function deriveStopCause(input: {
+  readonly terminalClass: TerminalClass;
+  readonly semanticAbortCause: "external" | "arm-budget" | null;
+  readonly taskLimitReason: string | null;
+  readonly stopReason: string | null;
+}): StopCause {
+  switch (input.terminalClass) {
+    case "completed":
+      return "completed";
+    case "interrupted":
+      return "external-cancellation";
+    case "execution-failure":
+      return "infrastructure-error";
+    case "unexpected-abort":
+      return "unexpected-abort";
+    case "task-limit": {
+      const reason = input.taskLimitReason;
+      if (reason !== null) {
+        if (reason.includes("output token")) return "cumulative-output-tokens";
+        if (reason.includes("tool steps")) return "tool-steps";
+        if (reason.includes("provider requests")) return "provider-requests";
+        if (reason.includes("wall-clock")) return "wall-clock";
+      }
+      // A harness-initiated arm wall-clock abort carries no cumulative reason string.
+      if (input.semanticAbortCause === "arm-budget") return "wall-clock";
+      // Provider-native truncation with no harness cap: report it as its own cause.
+      if (input.stopReason === "length") return "provider-response-length";
+      return "unknown";
+    }
+    default:
+      return "unknown";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Readiness probes
@@ -395,19 +533,40 @@ export function requireEnum<T extends string>(value: unknown, allowed: readonly 
   return value as T;
 }
 
-/** Decodes a partial limit override, rejecting unknown limit keys and invalid values. */
+/**
+ * @notice Validates limit overrides and normalizes unlimited task budgets.
+ * @param value Untrusted partial configuration; omitted values inherit.
+ * @param at Configuration path used in validation errors.
+ * @returns Typed overrides with unlimited task budgets represented as null.
+ */
 export function decodePartialLimits(value: unknown, at: string): PartialLimits {
   if (value === undefined) return {};
   const record = requireKeys(value, { required: [], optional: LIMIT_KEYS }, at);
-  const limits: Partial<Record<LimitKey, number>> = {};
+  const limits: Partial<Record<LimitKey, number | null>> = {};
   for (const key of LIMIT_KEYS) {
     if (record[key] === undefined) continue;
-    if (!Number.isSafeInteger(record[key]) || (record[key] as number) <= 0) {
+    const raw = record[key];
+    if (isTaskLimitKey(key)) {
+      // `0` or `null` mean UNLIMITED: no harness cumulative cap for this task dimension.
+      // Any other value must be a positive safe integer. Unlimited is stored explicitly
+      // as `null`; a huge sentinel or `Infinity` is never accepted.
+      if (raw === null || raw === 0) {
+        limits[key] = null;
+        continue;
+      }
+      if (!Number.isSafeInteger(raw) || (raw as number) < 0) {
+        throw new EvalError("limit-invalid", `${at}.${key} must be a positive integer, 0, or null (unlimited)`, { at: `${at}.${key}` });
+      }
+      limits[key] = raw as number;
+      continue;
+    }
+    // Resource/isolation bounds can never be disabled: null/0 are rejected here.
+    if (!Number.isSafeInteger(raw) || (raw as number) <= 0) {
       throw new EvalError("limit-invalid", `${at}.${key} must be a positive safe integer`, { at: `${at}.${key}` });
     }
-    limits[key] = record[key] as number;
+    limits[key] = raw as number;
   }
-  return limits;
+  return limits as PartialLimits;
 }
 
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_-]*$/;
@@ -441,52 +600,30 @@ export function decodeSuiteConfig(value: unknown, at: string, options?: DecodeCo
   };
 }
 
-/**
- * Resolves the effective collection policy for one decoded configuration.
- *
- * Fresh and retained inputs deliberately do NOT share a default: a fresh source with no
- * mode is a new run that collects the bounded final workspace, while retained bytes with
- * no mode are old evidence that must keep meaning what they meant when sealed.
- */
-function resolveCandidateMode(raw: unknown, decoder: CaseConfigDecoder, at: string): CandidateMode {
+/** Resolves bounded workspace collection for a fresh authored case. */
+function resolveCandidateMode(raw: unknown, at: string): CandidateMode {
   const authored = raw === undefined ? null : requireEnum(raw, CANDIDATE_MODES, `${at}.candidateMode`);
-  if (decoder.source === "fresh") {
-    if (authored === "file") {
-      throw new EvalError(
-        "input-invalid",
-        `${at}.candidateMode: "file" is obsolete for a new run. Every fresh evaluation grades the bounded final workspace, so remove the candidateMode field from this configuration. Historical receipts keep their recorded mode and stay reproducible with --from.`,
-        { at: `${at}.candidateMode` },
-      );
-    }
-    // An explicit `workspace` stays accepted for compatibility: it already agrees.
-    return authored ?? FRESH_RUN_CANDIDATE_MODE;
+  if (authored === "file") {
+    throw new EvalError(
+      "input-invalid",
+      `${at}.candidateMode: "file" is obsolete for a new run. Every fresh evaluation grades the bounded final workspace, so remove the candidateMode field from this configuration. Historical receipts keep their recorded mode for inspection.`,
+      { at: `${at}.candidateMode` },
+    );
   }
-  const recorded = decoder.recordedCandidateMode ?? null;
-  if (authored !== null) {
-    if (recorded !== null && recorded !== authored) {
-      throw new EvalError(
-        "evidence-invalid",
-        `${at}.candidateMode is ${authored} but the retained execution policy recorded ${recorded}`,
-        { at: `${at}.candidateMode` },
-      );
-    }
-    return authored;
-  }
-  // A supported older format omits the field: recover it from the verified execution
-  // policy, otherwise from the documented historical-format default. Never from today's.
-  return recorded ?? HISTORICAL_CANDIDATE_MODE;
+  // An explicit `workspace` stays accepted for compatibility: it already agrees.
+  return authored ?? FRESH_RUN_CANDIDATE_MODE;
 }
 
 /**
- * Decodes a case configuration for an explicitly stated source.
- *
- * Prefer the `decodeFreshCaseConfig` / `decodeRetainedCaseConfig` boundary helpers so
- * every call site names which contract it is reading.
+ * @notice Validates a newly authored case with workspace-wide output collection.
+ * @param value Untrusted case configuration.
+ * @param at Configuration path used in validation errors.
+ * @param options Allowed runtime profiles for this configuration.
+ * @returns A validated case for a fresh run, not historical evidence.
  */
-export function decodeCaseConfig(
+export function decodeFreshCaseConfig(
   value: unknown,
   at: string,
-  decoder: CaseConfigDecoder,
   options?: DecodeConfigOptions,
 ): CaseConfig {
   const record = requireKeys(
@@ -503,15 +640,8 @@ export function decodeCaseConfig(
       throw new EvalError("input-invalid", `${at}.allowedTools[${index}] is not a valid tool name`, { at });
     }
   }
-  const candidateMode = resolveCandidateMode(record.candidateMode, decoder, at);
+  const candidateMode = resolveCandidateMode(record.candidateMode, at);
   const outputPath = requireString(record.outputPath, `${at}.outputPath`);
-  if (candidateMode === "file" && outputPath === WORKSPACE_OUTPUT_MARKER) {
-    throw new EvalError(
-      "input-invalid",
-      `${at}.outputPath cannot be ${WORKSPACE_OUTPUT_MARKER} in file candidateMode`,
-      { at: `${at}.outputPath` },
-    );
-  }
   const allowedProfiles =
     options?.allowedProfileIds ??
     (options?.profileCatalog !== undefined ? Object.keys(options.profileCatalog) : RUNTIME_PROFILE_IDS);
@@ -530,26 +660,6 @@ export function decodeCaseConfig(
     oracle: record.oracle === undefined ? "oracle.json" : requireString(record.oracle, `${at}.oracle`),
     candidateMode,
   };
-}
-
-/** Fresh authored source for a NEW run: no authored mode, effective policy `workspace`. */
-export function decodeFreshCaseConfig(value: unknown, at: string, options?: DecodeConfigOptions): CaseConfig {
-  return decodeCaseConfig(value, at, { source: "fresh" }, options);
-}
-
-/** Retained sealed evidence: keeps its recorded collection policy, never today's default. */
-export function decodeRetainedCaseConfig(
-  value: unknown,
-  at: string,
-  context: { readonly recordedCandidateMode?: CandidateMode | null } = {},
-  options?: DecodeConfigOptions,
-): CaseConfig {
-  return decodeCaseConfig(
-    value,
-    at,
-    { source: "retained", recordedCandidateMode: context.recordedCandidateMode ?? null },
-    options,
-  );
 }
 
 /**

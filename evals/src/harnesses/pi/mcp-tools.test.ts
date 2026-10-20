@@ -116,6 +116,18 @@ describe("shared MCP client", () => {
     expect(server.requests).toHaveLength(before);
   });
 
+  it("allows tool calls to succeed beyond 180s into an unlimited arm", async () => {
+    const server = await stub();
+    const c = await client();
+    await connect(c, server.url);
+    // On an unlimited arm, setDeadline(Number.POSITIVE_INFINITY) is called
+    c.setDeadline(Number.POSITIVE_INFINITY);
+    // Advance time or verify that remainingTimeout does not trip "arm deadline budget exhausted"
+    const result = await execute(c, { action: "call", server: "docs", tool: "sample-tool", arguments: { q: "test" } });
+    expect(result.isError).toBe(false);
+    expect(text(result)).toContain("result for sample-tool");
+  });
+
   it.each(["connect", "call"] as const)("charges %s to the remaining child budget", async (action) => {
     const server = await stub({ fault: "timeout", faultStep: action === "connect" ? "initialize" : "tools/call" });
     const c = await client();

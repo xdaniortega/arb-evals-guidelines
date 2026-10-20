@@ -1,7 +1,7 @@
 /**
  * Native session sanitization and pinned HTML export.
  *
- * Implements the evidence and native-session contract (see current-implementation.md):
+ * Implements the evidence and native-session contract:
  * - Sanitization changes COPIES ONLY, never the live messages used for the next model turn.
  * - Injected reasoning, thinking blocks and signatures are stripped from the copy.
  * - Secret markers/canaries are redacted from the copy using core secret-scan rules.

@@ -20,12 +20,13 @@ import { runIdFor } from "../src/core/experiment.ts";
 import type { Target } from "../src/core/experiment.ts";
 import {
   EvalError,
+  isTaskLimitKey,
   LIMIT_KEYS,
   PROVIDER_CREDENTIAL_VARIABLES,
   RUN_MODES,
   toStructuredFailure,
 } from "../src/core/types.ts";
-import type { CasePreparer, LimitKey, PartialLimits, RunMode } from "../src/core/types.ts";
+import type { CasePreparer, LimitKey, PartialLimits, RunMode, TaskLimit, TaskLimitKey } from "../src/core/types.ts";
 import type { GuardedSecret } from "../src/core/secret-scan.ts";
 import { createFakeHarness } from "../src/harnesses/fake.ts";
 import { createPiHarness } from "../src/harnesses/pi/adapter.ts";
@@ -40,20 +41,15 @@ import { getProviderCredential, loadGuardedCredentials } from "../src/runner/cre
 import { resolveTargetConfiguration, validateTargetConfiguration, validateTargetThinking } from "../src/runner/models.ts";
 import {
   FAKE_TARGET,
-  computeRunnerCeilingMs,
   disposeRunWorkDir,
   preflightForRun,
   resolveEvaluatorBuild,
   resolveSourceIdentity,
   runPairedEvaluation,
-  MAX_INVOCATION_MS,
+  STARTUP_ALLOWANCE_MS,
   type RunProgressEvent,
-  type SelectedRunInputs,
 } from "../src/runner/run.ts";
-import { findRegisteredCasePreparer } from "./case-preparers.ts";
 import { buildRunReport, formatRunReport } from "../src/artifacts/queries.ts";
-import { resolveRetainedRunInputs } from "../src/runner/reproduction.ts";
-import type { RetainedRunInputs } from "../src/runner/reproduction.ts";
 
 /** Invocation clock begins at CLI module entry, before credentials, probes and source hashing. */
 const CLI_STARTED_AT_MS = Date.now();
@@ -80,17 +76,26 @@ const USAGE =
   `usage: eval --case <id> --skill <path> --model <id> [--mode ${RUN_MODES.join("|")}] [--repetitions <n>] ` +
   `[--harness ${HARNESS_IDS.join("|")}] [--sandbox ${SANDBOX_IDS.join("|")}] [--validator-runner ${VALIDATOR_RUNNER_IDS.join("|")}] ` +
   `[--provider <google|anthropic>] [--thinking <level>] [--serial] [--scheduling ${SCHEDULING_IDS.join("|")}] ` +
-  `[--format ${FORMAT_IDS.join("|")}] [--details] [--quiet] OR --from <canonical-receipt> [--dry-run] [--authorize-paid] ` +
+  `[--format ${FORMAT_IDS.join("|")}] [--details] [--quiet] ` +
   `[--limit <key>=<value> ...] (limit keys: ${LIMIT_KEYS.join(", ")})\n` +
   `  Defaults: measured mode, Pi, Apple Container, isolated validator, and low thinking.\n` +
   `  Provider is inferred from the exact model; --provider asserts or disambiguates it.\n` +
   `  --mode fake explicitly selects zero-paid-call test doubles and does not require a model.\n` +
-  `  --details adds original per-pair scores to human table/Markdown output; JSON is unchanged.\n` +
+  `  --details adds operational metadata to human table/Markdown output; JSON is unchanged.\n` +
   `  Scheduling defaults to overlap after both-ready; --serial retains the same readiness barrier.\n` +
   `  --skill selects one complete treatment skill relative to the repository; baseline receives none.\n` +
   `  --suite <id> remains available only for existing legacy eval.json suites; it conflicts with --skill.\n` +
-  `  wallClockMs is PER CHILD (default 300000, max 600000), starting at that child's prompt.\n` +
-  `  Invocation watchdog is budgeted automatically from condition count and child wallClockMs.`;
+  `  The four task budgets (wallClockMs, maxOutputTokens, maxToolSteps, maxProviderRequests)\n` +
+  `  are UNLIMITED by default: a fresh run imposes no harness cumulative cap on time,\n` +
+  `  output tokens, tool steps, or provider requests. Set any of them to an explicit\n` +
+  `  positive integer to opt into a finite per-arm cap, or to none (or 0) to keep it\n` +
+  `  unlimited. wallClockMs is PER CHILD, starting at that child's prompt. There is no\n` +
+  `  fixed maximum arm duration and no overall run-time ceiling.\n` +
+  `  Authored case/suite/profile configuration can still declare a finite cap that a\n` +
+  `  fresh run inherits; --limit <key> overrides it, including back to none (unlimited).\n` +
+  `  Resource/isolation bounds (cpus, memoryMiB, pids, diskMiB, export/workspace bytes)\n` +
+  `  are always finite and cannot be disabled. Startup, capture and cleanup retain\n` +
+  `  independent infrastructure deadlines. An unlimited arm still observes cancellation.`;
 
 export interface TestOnlyRunComposition {
   /** Test-only boundary: accepted only under the mandatory zero-paid-call preload. */
@@ -122,7 +127,6 @@ interface Args {
   readonly mode: RunMode;
   readonly repetitions: number;
   readonly cliLimits: PartialLimits;
-  readonly overallCeilingMs: number | undefined;
   readonly harnessId: HarnessId;
   readonly sandboxId: SandboxId;
   readonly validatorRunnerId: ValidatorRunnerId;
@@ -133,11 +137,13 @@ interface Args {
   readonly format: FormatId;
   readonly details: boolean;
   readonly quiet: boolean;
-  readonly fromReceipt: string | null;
-  readonly dryRun: boolean;
-  readonly authorizePaid: boolean;
 }
 
+/**
+ * @notice Validates CLI options and normalizes explicit unlimited task budgets.
+ * @param argv Options after the executable name.
+ * @returns Parsed evaluation settings and limit overrides.
+ */
 export function parseArgs(argv: readonly string[]): Args {
   let suiteId: string | null = null;
   let skillPath: string | undefined;
@@ -147,8 +153,7 @@ export function parseArgs(argv: readonly string[]): Args {
   let harnessId: HarnessId | undefined;
   let sandboxId: SandboxId | undefined;
   let validatorRunnerId: ValidatorRunnerId | undefined;
-  const cliLimits: Partial<Record<LimitKey, number>> = {};
-  let overallCeilingMs: number | undefined;
+  const cliLimits: { -readonly [K in LimitKey]?: K extends TaskLimitKey ? TaskLimit : number } = {};
   let provider: string | null = null;
   let model: string | null = null;
   let thinking: string | null = null;
@@ -156,9 +161,6 @@ export function parseArgs(argv: readonly string[]): Args {
   let format: FormatId = "table";
   let details = false;
   let quiet = false;
-  let fromReceipt: string | null = null;
-  let dryRun = false;
-  let authorizePaid = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -178,8 +180,6 @@ export function parseArgs(argv: readonly string[]): Args {
       details = true;
       continue;
     }
-    if (flag === "--dry-run") { dryRun = true; continue; }
-    if (flag === "--authorize-paid") { authorizePaid = true; continue; }
 
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) {
@@ -187,8 +187,7 @@ export function parseArgs(argv: readonly string[]): Args {
     }
     index += 1;
 
-    if (flag === "--from") fromReceipt = resolve(value);
-    else if (flag === "--suite") suiteId = value;
+    if (flag === "--suite") suiteId = value;
     else if (flag === "--skill") {
       if (skillPath !== undefined) throw new EvalError("input-invalid", "--skill accepts exactly one treatment skill; multiple skills are not supported yet", { at: "--skill" });
       skillPath = value;
@@ -240,12 +239,6 @@ export function parseArgs(argv: readonly string[]): Args {
         throw new EvalError("input-invalid", "--repetitions must be a positive integer", { at: "--repetitions" });
       }
       repetitions = parsed;
-    } else if (flag === "--max-total-ms") {
-      throw new EvalError(
-        "limit-invalid",
-        "--max-total-ms is no longer supported; configure per-child execution time with --limit wallClockMs=<ms> instead",
-        { at: "--max-total-ms" },
-      );
     } else if (flag === "--limit") {
       const separator = value.indexOf("=");
       const key = separator === -1 ? "" : value.slice(0, separator);
@@ -253,6 +246,21 @@ export function parseArgs(argv: readonly string[]): Args {
       if (!(LIMIT_KEYS as readonly string[]).includes(key)) {
         throw new EvalError("limit-invalid", `--limit key must be one of: ${LIMIT_KEYS.join(", ")}`, { at: "--limit" });
       }
+      if (isTaskLimitKey(key)) {
+        // `none` or `0` means UNLIMITED: no harness cumulative cap for this task budget.
+        // Stored explicitly as null; never a huge sentinel.
+        if (raw === "none" || raw === "0") {
+          cliLimits[key] = null;
+          continue;
+        }
+        const parsedTask = Number(raw);
+        if (!Number.isSafeInteger(parsedTask) || parsedTask <= 0) {
+          throw new EvalError("limit-invalid", `--limit ${key} must be a positive integer, 0, or none (unlimited)`, { at: "--limit" });
+        }
+        cliLimits[key] = parsedTask;
+        continue;
+      }
+      // Resource/isolation bounds cannot be disabled through none/0/null.
       const parsed = Number(raw);
       if (!Number.isSafeInteger(parsed) || parsed <= 0) {
         throw new EvalError("limit-invalid", `--limit ${key} must be a positive integer`, { at: "--limit" });
@@ -263,12 +271,7 @@ export function parseArgs(argv: readonly string[]): Args {
     }
   }
 
-  if (fromReceipt === null && (dryRun || authorizePaid)) throw new EvalError("input-invalid", "--dry-run and --authorize-paid require --from", { at: "argv" });
-  if (fromReceipt !== null) {
-    const allowed = new Set(["--from", "--format", "--details", "--quiet", "--dry-run", "--authorize-paid"]);
-    for (const token of argv) if (token.startsWith("--") && !allowed.has(token)) throw new EvalError("input-invalid", `${token} conflicts with --from; retained settings cannot be overridden`, { at: token });
-    suiteId = ""; caseSelector = ""; mode = "fake";
-  } else if (caseSelector === null || (suiteId === null && skillPath === undefined)) {
+  if (caseSelector === null || (suiteId === null && skillPath === undefined)) {
     throw new EvalError("input-invalid", `--case and --skill are required (legacy suites may use --suite instead of --skill). ${USAGE}`, { at: "argv" });
   }
   harnessId ??= mode === "measured" ? "pi" : "fake";
@@ -305,7 +308,6 @@ export function parseArgs(argv: readonly string[]): Args {
     mode,
     repetitions,
     cliLimits,
-    overallCeilingMs,
     harnessId,
     sandboxId,
     validatorRunnerId,
@@ -316,40 +318,15 @@ export function parseArgs(argv: readonly string[]): Args {
     format,
     details,
     quiet,
-    fromReceipt,
-    dryRun,
-    authorizePaid,
   };
 }
 
 /**
- * @notice Chooses the single trusted preparation callback for this invocation.
- * @param input Resolved mode, retained-input presence, evals root, preflight selection
- *              and the guarded scripted callback, when a test composition supplied one.
- * @returns One callback, or `undefined` when this invocation prepares nothing.
- * @dev Composition policy lives here, not in the registration table:
- * - the guarded scripted seam wins, so preparation tests inject deterministic responses;
- * - `--from` reuses verified retained fixture/oracle/provenance and never re-prepares
- *   (the runner additionally refuses a retained run that was handed a preparer);
- * - `--mode fake` reuses the checked-in inputs with no discovery, RPC, or credentials;
- * - an unregistered case keeps its existing behaviour.
- * The callback itself is passed through to the runner, which invokes it exactly once
- * before freezing and before any guest or agent dispatch.
+ * @notice Formats a run lifecycle event with elapsed time for CLI progress.
+ * @param event Lifecycle event emitted by the runner.
+ * @param startMs Invocation start time in epoch milliseconds.
+ * @returns A single human-readable progress line.
  */
-export function selectRunPreparer(input: {
-  readonly mode: RunMode;
-  readonly retained: boolean;
-  readonly evalsRoot: string;
-  readonly preflight: SelectedRunInputs | undefined;
-  readonly injected?: CasePreparer;
-}): CasePreparer | undefined {
-  if (input.injected !== undefined) return input.injected;
-  if (input.retained) return undefined;
-  if (input.mode !== "measured") return undefined;
-  if (input.preflight === undefined) return undefined;
-  return findRegisteredCasePreparer(input.evalsRoot, input.preflight);
-}
-
 export function formatProgressEvent(event: RunProgressEvent, startMs: number): string {
   const elapsedSec = ((event.timestampMs - startMs) / 1000).toFixed(1);
   const prefix = `[+${elapsedSec}s]`;
@@ -388,8 +365,6 @@ export function formatProgressEvent(event: RunProgressEvent, startMs: number): s
       return event.verified
         ? `${prefix} pair ${event.pairIndex ?? 1} cleanup verified`
         : `${prefix} pair ${event.pairIndex ?? 1} cleanup FAILED${event.failureClass ? ` failure=${event.failureClass}` : ""}`;
-    case "run-timeout":
-      return `${prefix} TIMEOUT: overall run ceiling of ${(event.ceilingMs / 1000).toFixed(1)}s reached; aborting and sealing partial evidence`;
     case "sealing-started":
       return `${prefix} evidence sealing started`;
     case "finalization-completed":
@@ -419,44 +394,28 @@ export async function runCli(
   const now = new Date();
   const runId = runIdFor(now, randomBytes(4).toString("hex"));
   let workDir = "";
-  let boundaryTimer: ReturnType<typeof setTimeout> | undefined;
-  // Bound retained-input loading and preflight before their final run budget is known.
-  let backstopTimer: ReturnType<typeof setTimeout> | undefined = installHardBackstop(MAX_INVOCATION_MS);
+  // Startup-only hard backstop: bounds pre-dispatch liveness (preflight, credentials,
+  // probes, image build). It is NOT a whole-run ceiling and is NOT a function of the
+  // per-arm wall clock; it is cleared once the run is underway so an unlimited arm has no
+  // finite total timer. A finite arm is bounded by its own wall clock + infra allowances;
+  // setup, capture and cleanup retain their separate operation deadlines.
+  let startupBackstopTimer: ReturnType<typeof setTimeout> | undefined = installHardBackstop(STARTUP_ALLOWANCE_MS);
   try {
-    let retained: RetainedRunInputs | undefined;
-    if (args.fromReceipt !== null) {
-      workDir = await mkdtemp(join(tmpdir(), `eval-work-${runId}-`));
-      retained = await resolveRetainedRunInputs(args.fromReceipt, join(workDir, "skill-snapshot"));
-    }
-    const mode = retained?.mode ?? args.mode;
-    const suiteId = retained?.frozen.suite.id ?? args.suiteId;
-    const caseSelector = retained?.frozen.selector ?? args.caseSelector;
-    const repetitions = retained?.repetitions ?? args.repetitions;
-    const harnessId = (retained?.harnessId ?? args.harnessId) as HarnessId;
-    const sandboxId = (retained?.sandboxId ?? args.sandboxId) as SandboxId;
-    const validatorRunnerId = (retained?.validatorRunnerId ?? args.validatorRunnerId) as ValidatorRunnerId;
-    const schedulingPolicy = retained?.schedulingPolicy ?? args.schedulingPolicy;
-
-    if (args.dryRun) {
-      process.stdout.write(`${JSON.stringify({ schemaVersion: 1, kind: "reproduction-plan", dispatches: 0, sourceReceipt: retained?.sourceReceiptPath ?? null, supported: retained !== undefined, mode, suiteId, caseSelector, repetitions, harnessId, sandboxId, validatorRunnerId, schedulingPolicy, image: retained?.image ?? null, authorizationRequired: mode === "measured" }, null, 2)}\n`);
-      return { code: retained === undefined ? 1 : 0, receiptPath: null, runDir: null };
-    }
-    if (retained !== undefined && mode === "measured" && !args.authorizePaid) {
-      throw new EvalError("input-invalid", "measured reproduction requires explicit --authorize-paid; use --dry-run for zero-dispatch inspection", { at: "--authorize-paid" });
-    }
-    if (retained !== undefined && harnessId === "pi" && testComposition === undefined && retained.testDouble) {
-      throw new EvalError("not-implemented", "scripted Pi transport can only be reproduced through the guarded zero-paid-call test composition", { at: "--from" });
-    }
+    const mode = args.mode;
+    const suiteId = args.suiteId;
+    const caseSelector = args.caseSelector;
+    const repetitions = args.repetitions;
+    const harnessId = args.harnessId as HarnessId;
+    const sandboxId = args.sandboxId as SandboxId;
+    const validatorRunnerId = args.validatorRunnerId as ValidatorRunnerId;
+    const schedulingPolicy = args.schedulingPolicy;
 
     if (mode === "fake" && harnessId === "pi" && testComposition === undefined) {
       throw new EvalError("not-implemented", "--mode fake with --harness pi requires the guarded scripted test composition; public fake runs cannot call real providers", { at: "--harness" });
     }
 
     let target: Target;
-    if (retained !== undefined) {
-      target = retained.target;
-      if (harnessId === "pi" || mode === "measured") validateTargetConfiguration(target);
-    } else if (args.model !== null) {
+    if (args.model !== null) {
       target = resolveTargetConfiguration({ model: args.model, provider: args.provider, thinking: args.thinking });
     } else {
       // An omitted model is permitted only for the explicit deterministic fake harness.
@@ -468,34 +427,11 @@ export async function runCli(
     }
 
     // Resolve case/profile/CLI limits before credentials and pass this exact selection
-    // to the runner. Reproduction uses its verified retained values instead of defaults.
-    const preflightInputs = retained === undefined ? await preflightForRun({
+    // to the runner.
+    const preflightInputs = await preflightForRun({
       evalsRoot, repoRoot, suiteId: suiteId ?? undefined, caseSelector,
       skillPath: args.skillPath, cliLimits: args.cliLimits,
-    }) : undefined;
-    // Explicit production composition: the registered case-owned preparer, if any, is
-    // selected from the already validated canonical selection and passed through the
-    // existing runner option. Preparation failure therefore happens before the run
-    // directory and sealed receipt exist, and starts zero agents; its bounded diagnostic
-    // is reported by this CLI's structured failure path.
-    const preparer = selectRunPreparer({
-      mode,
-      retained: retained !== undefined,
-      evalsRoot,
-      preflight: preflightInputs,
-      injected: testComposition?.preparer,
     });
-    const wallClockMs = retained?.limits.wallClockMs ?? preflightInputs!.resolved.limits.wallClockMs;
-    const scheduledConditions = repetitions * 2;
-    const boundaryBudgetMs = computeBoundaryBudgetMs(scheduledConditions, wallClockMs);
-    const backstopBudgetMs = computeBackstopBudgetMs(scheduledConditions, wallClockMs);
-    boundaryTimer = setTimeout(() => {
-      boundaryController.abort(new EvalError("interrupted", `CLI invocation deadline of ${boundaryBudgetMs}ms elapsed`, { at: "eval CLI" }));
-    }, Math.max(0, CLI_STARTED_AT_MS + boundaryBudgetMs - Date.now()));
-    boundaryTimer.unref?.();
-    clearTimeout(backstopTimer);
-    backstopTimer = installHardBackstop(backstopBudgetMs);
-
     let guardedSecrets: readonly GuardedSecret[] = [];
     let credentials: readonly CredentialDeliveryRequest[] = [];
 
@@ -565,6 +501,12 @@ export async function runCli(
           testComposition?.onProgress?.(event);
         };
 
+    // The run is underway: pre-dispatch liveness is complete. Clear the startup backstop
+    // without arming any total-run timer. From here a finite arm is bounded by its own
+    // wall clock and infra allowances; an unlimited arm has no finite total timer.
+    clearTimeout(startupBackstopTimer);
+    startupBackstopTimer = undefined;
+
     const result = await runPairedEvaluation({
       evalsRoot,
       repoRoot,
@@ -574,7 +516,6 @@ export async function runCli(
       mode,
       repetitions,
       cliLimits: args.cliLimits,
-      overallCeilingMs: args.overallCeilingMs,
       invocationStartedAtMs: CLI_STARTED_AT_MS,
       target,
       runId,
@@ -587,7 +528,7 @@ export async function runCli(
       validatorRunner,
       workDir,
       stateDir: testComposition?.stateDir,
-      preparer,
+      preparer: testComposition?.preparer,
       faults: testComposition?.faults,
       guardedSecrets,
       credentials,
@@ -595,7 +536,6 @@ export async function runCli(
       signal: boundaryController.signal,
       schedulingPolicy,
       onProgress,
-      retainedInputs: retained,
       preflightInputs,
     });
 
@@ -609,39 +549,23 @@ export async function runCli(
       runDir: result.runDir,
     };
   } finally {
-    clearTimeout(boundaryTimer);
-    clearTimeout(backstopTimer);
+    clearTimeout(startupBackstopTimer);
     if (workDir !== "") await disposeRunWorkDir(workDir);
   }
 }
 
-function addWatchdogReserve(runnerBudgetMs: number, reserveMs: number): number {
-  const result = runnerBudgetMs + reserveMs;
-  if (!Number.isSafeInteger(result) || result > 2_147_483_647) {
-    throw new EvalError("limit-invalid", "resolved repetitions and child limits exceed the supported invocation timer range", { at: "--repetitions" });
-  }
-  return result;
-}
-
-export function computeBoundaryBudgetMs(scheduledConditions: number, wallClockMs: number): number {
-  return addWatchdogReserve(computeRunnerCeilingMs(scheduledConditions, wallClockMs), 30_000);
-}
-
-export function computeBackstopBudgetMs(scheduledConditions: number, wallClockMs: number): number {
-  return addWatchdogReserve(computeRunnerCeilingMs(scheduledConditions, wallClockMs), 120_000);
-}
-
 /**
- * Absolute process-level backstop.
+ * Startup-only process-level hard backstop.
  *
- * WHY this exists in addition to the runner's cooperative overall ceiling: that ceiling
- * aborts an AbortController, which only works if something is actually awaiting it. A run
- * wedged inside an unbounded external wait (a stuck `container exec`, a guest that never
- * answers) will ignore it and hang indefinitely — which is exactly what happened once and
- * burned an hour. This timer cannot be starved by a pending await: when it fires the run
- * has already had its full budget plus a grace period to seal and clean up, so the only
- * correct remaining action is to say so loudly and exit non-zero.
+ * WHY it exists: cooperative cancellation aborts an AbortController, which only works if
+ * something is actually awaiting it. Pre-dispatch liveness work (preflight, credentials,
+ * probes, image build) can wedge inside an unbounded external wait (a stuck CLI, a guest
+ * that never answers) and ignore the signal. This timer cannot be starved by a pending
+ * await: if it fires, startup has exceeded its bounded budget and the only correct action
+ * is to say so loudly and exit non-zero.
  *
+ * It bounds STARTUP ONLY and is cleared once the run is underway, so there is no overall
+ * run-time ceiling and an unlimited arm is never capped by a hidden finite total timer.
  * It is unref'd, so it never keeps an otherwise-finished process alive.
  */
 function installHardBackstop(resolvedBudgetMs: number): ReturnType<typeof setTimeout> {
@@ -655,7 +579,7 @@ function installHardBackstop(resolvedBudgetMs: number): ReturnType<typeof setTim
     );
     process.exit(1);
   }, remainingMs);
-  if (typeof timer.unref === "function") timer.unref();
+  timer.unref();
   return timer;
 }
 

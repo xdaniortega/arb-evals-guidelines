@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The bounded guest supervisor and the guest side of every host interaction.
+ * The guest supervisor and the guest side of every host interaction.
  *
  * WHY it exists: the host must never execute guest-authored code and must never trust a
  * fact it did not observe inside the guest. Both requirements are met by putting one
@@ -9,8 +9,8 @@
  *
  * Modes:
  * - `supervise`        PID 1 after the privilege drop. Holds the guest open and owns the
- *                      in-memory credential control socket. Bounded by a maximum
- *                      lifetime so a forgotten guest cannot outlive its run.
+ *                      in-memory credential control socket. A configured finite arm
+ *                      has a lifetime guard; unlimited arms use cancellation/teardown.
  * - `attest`           Reports OBSERVED privilege, mount, and egress facts, including
  *                      the facts of PID 1 itself read from /proc/1/status. Nothing here
  *                      is asserted from configuration.
@@ -22,11 +22,13 @@
  * - `agent`            Runs the locked, image-resident framed Pi SDK process. Runtime
  *                      configuration, prompt, and abort are separate stdin frames.
  *
- * Every mode is bounded, fails closed on an unknown field, and prints exactly one JSON
- * object on stdout.
+ * Control operations are bounded and fail closed on unknown fields. The agent mode
+ * uses a framed stream; other command modes print one JSON object on stdout.
  */
 
+import { scheduleTimeout } from "./guest-runtime/src/core/timing.mjs";
 import { connect as netConnect, createServer } from "node:net";
+import { createSocket } from "node:dgram";
 import { createHash } from "node:crypto";
 import { promises as dns } from "node:dns";
 import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from "node:fs";
@@ -55,7 +57,7 @@ const PRIVATE_PROBES = [
   { label: "metadata", host: "169.254.169.254", port: 80 },
   { label: "private-10", host: "10.0.0.1", port: 80 },
   { label: "private-192", host: "192.168.64.1", port: 53 },
-  { label: "loopback-host", host: "127.0.0.1", port: 22 },
+  { label: "guest-loopback", host: "127.0.0.1", port: 22 },
 ];
 const PROBE_TIMEOUT_MS = 1_500;
 
@@ -241,6 +243,107 @@ function probeTcp(host, port) {
   });
 }
 
+/**
+ * @notice Probes UDP egress without treating routing or socket errors as firewall enforcement.
+ * @param host Destination IPv4 address.
+ * @param port Destination UDP port.
+ * @param dependencies Socket factory overrides for deterministic tests.
+ * @returns A blocked, connected, or inconclusive observation.
+ * @dev Only send-time EPERM proves rejection; EACCES and route failures are inconclusive.
+ */
+export function probeUdpSend(host, port, dependencies = {}) {
+  const socket = (dependencies.createSocket ?? createSocket)("udp4");
+  const started = Date.now();
+  return new Promise((resolve) => {
+    let settled = false;
+    let sending = false;
+    const timer = setTimeout(() => done("inconclusive", "UDP probe did not complete"), PROBE_TIMEOUT_MS);
+    const done = (outcome, detail) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch { /* Binding may have failed. */ }
+      resolve({ host, port, outcome, detail, ms: Date.now() - started });
+    };
+    const failed = (error) => {
+      const code = String(error?.code ?? error);
+      // Only the synchronous netfilter OUTPUT verdict (EPERM) is evidence of the firewall.
+      // EACCES (socket-option/permission, e.g. SO_BROADCAST) and route failures are not.
+      done(sending && code === "EPERM" ? "blocked" : "inconclusive", code);
+    };
+    socket.once("error", failed);
+    try {
+      socket.bind(0, "0.0.0.0", () => {
+        try {
+          // Otherwise broadcast itself fails with EACCES even without a firewall.
+          socket.setBroadcast(true);
+          sending = true;
+          socket.send(Buffer.from("eval-egress-probe"), port, host, (error) => {
+            if (error) failed(error);
+            else done("connected", "UDP datagram accepted for transmission");
+          });
+        } catch (error) { failed(error); }
+      });
+    } catch (error) { failed(error); }
+  });
+}
+
+/**
+ * @notice Tests IPv6 loopback filtering against a live listener rather than a closed port.
+ * @param dependencies Socket factories and probe timeout overrides for tests.
+ * @returns Whether a loopback datagram was blocked or delivered.
+ */
+export function probeIpv6Loopback(dependencies = {}) {
+  const makeSocket = dependencies.createSocket ?? createSocket;
+  const receiver = makeSocket("udp6");
+  const sender = makeSocket("udp6");
+  const started = Date.now();
+  const payload = Buffer.from("eval-ipv6-egress-probe");
+  return new Promise((resolve) => {
+    let settled = false;
+    let port = 0;
+    let timer = setTimeout(() => done("inconclusive", "IPv6 loopback probe setup did not complete"), PROBE_TIMEOUT_MS);
+    const done = (outcome, detail) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const socket of [sender, receiver]) {
+        try { socket.close(); } catch { /* Binding may have failed. */ }
+      }
+      resolve({ host: "::1", port, outcome, detail, ms: Date.now() - started });
+    };
+    const failed = (error) => done("inconclusive", `IPv6 loopback unavailable: ${String(error?.code ?? error)}`);
+    receiver.once("error", failed);
+    sender.once("error", failed);
+    receiver.on("message", (message) => {
+      if (message.equals(payload)) done("connected", "UDP6 datagram reached the listening ::1 endpoint");
+    });
+    try {
+      receiver.bind(0, "::1", () => {
+        try {
+          port = receiver.address().port;
+          sender.bind(0, "::1", () => {
+            try {
+              sender.send(payload, port, "::1", (error) => {
+                if (error) {
+                  // Only the synchronous netfilter verdict (EPERM) proves enforcement; EACCES
+                  // and route errors are socket/routing failures, not the ip6tables OUTPUT rule.
+                  if (error.code === "EPERM") done("blocked", `IPv6 output refused UDP6 datagram: ${error.code}`);
+                  else failed(error);
+                  return;
+                }
+                if (settled) return;
+                clearTimeout(timer);
+                timer = setTimeout(() => done("blocked", "UDP6 datagram was not delivered to the listening ::1 endpoint"), dependencies.timeoutMs ?? PROBE_TIMEOUT_MS);
+              });
+            } catch (error) { failed(error); }
+          });
+        } catch (error) { failed(error); }
+      });
+    } catch (error) { failed(error); }
+  });
+}
+
 async function probeDns() {
   const started = Date.now();
   try {
@@ -279,6 +382,11 @@ function allowedTcpPorts() {
     .sort((left, right) => left - right);
 }
 
+/**
+ * @notice Observes guest isolation rather than trusting the requested container settings.
+ * @param declaredWritable Paths expected to remain writable by policy.
+ * @returns Runtime, filesystem, credential, and network observations for host verification.
+ */
 async function attest(declaredWritable) {
   const init = readProcStatus(1);
   const self = {
@@ -289,13 +397,13 @@ async function attest(declaredWritable) {
   const rootFs = probeReadOnlyRoot();
   const mounts = readMounts(declaredWritable);
   const resolvers = readResolvers();
-  // Probed concurrently: a denied range answers by timing out rather than refusing, so
-  // running six sequential probes would add seconds to every attestation.
+  // Run independent probes concurrently so a silent IPv6 drop costs one timeout.
   const ports = allowedTcpPorts();
   const plan = [
     ...PRIVATE_PROBES.map((probe) => ({
       label: probe.label,
       category: "private",
+      protocol: "tcp",
       host: probe.host,
       port: probe.port,
       expectation: "blocked",
@@ -303,21 +411,28 @@ async function attest(declaredWritable) {
     ...PUBLIC_PROBE_PORTS.map((port) => ({
       label: `public-${String(port)}`,
       category: "public",
+      protocol: "tcp",
       host: PUBLIC_PROBE_HOST,
       port,
       // Derived from the declared policy, never from a literal in this file.
       expectation: ports === "all" || (Array.isArray(ports) && ports.includes(port)) ? "connected" : "blocked",
     })),
+    { label: "ipv4-multicast", category: "multicast", protocol: "udp", host: "239.255.42.99", port: 9, expectation: "blocked" },
+    { label: "ipv4-broadcast", category: "broadcast", protocol: "udp", host: "255.255.255.255", port: 9, expectation: "blocked" },
+    { label: "ipv6-loopback", category: "ipv6", protocol: "udp", host: "::1", port: 0, expectation: "blocked" },
   ];
   const [probes, dnsProbe] = await Promise.all([
     Promise.all(
       plan.map(async (entry) => {
-        const result = await probeTcp(entry.host, entry.port);
+        const result = entry.category === "ipv6" ? await probeIpv6Loopback()
+          : entry.protocol === "udp" ? await probeUdpSend(entry.host, entry.port)
+          : await probeTcp(entry.host, entry.port);
         return {
           label: entry.label,
           category: entry.category,
+          protocol: entry.protocol,
           host: entry.host,
-          port: entry.port,
+          port: result.port,
           expectation: entry.expectation,
           outcome: result.outcome,
           detail: result.detail,
@@ -431,9 +546,14 @@ function declaredWritablePaths() {
   return raw.split(":").filter((entry) => entry.startsWith("/"));
 }
 
+/**
+ * @notice Supervises the agent's authenticated control channel and process lifecycle.
+ * @dev An explicit zero supervisor lifetime leaves task duration to cancellation.
+ */
 async function modeSupervise() {
   mkdirSync(CONTROL_DIR, { recursive: true });
   const maxLifetimeMs = Number(process.env.EVAL_SUPERVISOR_MAX_MS ?? "3600000");
+  if (!Number.isSafeInteger(maxLifetimeMs) || maxLifetimeMs < 0) throw new Error("invalid supervisor lifetime");
   /** Credential values live here and nowhere else: never argv, never env, never disk. */
   const credentials = new Map();
   const taskProcesses = createTaskProcessQuiescer();
@@ -496,9 +616,9 @@ async function modeSupervise() {
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
-  // Bounded lifetime: a guest that outlives its run is an isolation defect, not a
-  // convenience.
-  setTimeout(shutdown, Number.isFinite(maxLifetimeMs) && maxLifetimeMs > 0 ? maxLifetimeMs : 3_600_000);
+  // Unlimited arms rely on cancellation and journaled teardown. Finite arms also
+  // have a lifetime guard covering setup, execution and evidence capture.
+  if (maxLifetimeMs > 0) scheduleTimeout(shutdown, maxLifetimeMs);
 }
 
 async function modeAttest() {

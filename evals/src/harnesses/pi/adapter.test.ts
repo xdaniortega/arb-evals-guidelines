@@ -69,7 +69,8 @@ function createMockRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequ
 }
 
 function remoteGuestForFrames(mutate: (type: "ready" | "result", frame: any) => any = (_type, frame) => frame, terminalExit = 0,
-  afterResult?: (streams: { output: PassThrough; stderr: PassThrough; close(code: number): void }) => void): Guest {
+  afterResult?: (streams: { output: PassThrough; stderr: PassThrough; close(code: number): void }) => void,
+  terminationReason: "confirmed" | "forced" = "confirmed"): Guest {
   const input = new PassThrough();
   const output = new PassThrough();
   const stderr = new PassThrough();
@@ -84,11 +85,11 @@ function remoteGuestForFrames(mutate: (type: "ready" | "result", frame: any) => 
       buffer = buffer.slice(newline + 1);
       const header = { type: "session", version: 3, id: "session-1", timestamp: new Date().toISOString(), cwd: "/workspace" };
       if (request.type === "init") {
-        const ready = { type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash"], ambientCustomTools: [], mcpClientId: null, seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } };
+        const ready = { type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash", "mcp"], ambientCustomTools: [], mcpClientId: "shared-mcp-client-v1", seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } };
         output.write(`${JSON.stringify(mutate("ready", ready))}\n`);
         output.write(`${JSON.stringify({ type: "record", protocolVersion: 1, sequence: 1, record: header, redactions: { count: 0, entries: [] } })}\n`);
       } else if (request.type === "prompt") {
-        const result = { type: "result", protocolVersion: 1, sessionId: "session-1", outcome: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: null, cacheWriteTokens: null, providerRequests: 1, toolSteps: 0, taskLimitReason: null }, timing: { startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), durationMs: 1 }, terminal: { stopReason: null, classification: "completed", semanticAbortCause: null, error: null, streamingStopped: true }, redactions: { count: 0, entries: [] } };
+        const result = { type: "result", protocolVersion: 1, sessionId: "session-1", outcome: "completed", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: null, cacheWriteTokens: null, providerRequests: 1, toolSteps: 0, taskLimitReason: null }, timing: { startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), durationMs: 1 }, terminal: { stopReason: null, rawStopReason: null, classification: "completed", stopCause: "completed", semanticAbortCause: null, error: null, streamingStopped: true }, redactions: { count: 0, entries: [] } };
         output.write(`${JSON.stringify(mutate("result", result))}\n`);
         queueMicrotask(() => {
           if (afterResult) afterResult({ output, stderr, close: (code) => { output.end(); stderr.end(); resolveExit(code); } });
@@ -99,7 +100,7 @@ function remoteGuestForFrames(mutate: (type: "ready" | "result", frame: any) => 
   });
   return { name: "remote", networkName: "net", imageDigest: "sha256:remote", stage: async () => undefined,
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "", truncated: false, timedOut: false }),
-    execStream: async () => ({ stdin: input, stdout: output, stderr, kill: () => resolveExit(1), exitCode }),
+    execStream: async () => ({ stdin: input, stdout: output, stderr, kill: () => resolveExit(1), exitCode, termination: Promise.resolve(terminationReason) }),
     exportFiles: async () => ({ files: [], truncated: false, skipped: [] }), attest: async () => { throw new Error("unused"); },
     deliverCredential: async () => undefined, destroy: async () => ({ status: "destroyed", verified: true, failure: null }) };
 }
@@ -158,6 +159,14 @@ describe("Pi SDK harness adapter", () => {
     rmSync(ws, { recursive: true, force: true });
   });
 
+  it("rejects forced stream settlement as cleanup-failed without confirmed closure", async () => {
+    const guest = remoteGuestForFrames((_type, frame) => frame, 0, undefined, "forced");
+    const request = createMockRequest();
+    const harness = createPiHarness({ scriptedSteps: [{ type: "text", text: "remote" }] });
+    await expect(harness.attest(guest, request)).resolves.toBeDefined();
+    await expect(harness.run(guest, request)).rejects.toMatchObject({ code: "cleanup-failed" });
+  });
+
   it("drives the image-resident framed session for a remote guest without host fallback", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
@@ -174,11 +183,11 @@ describe("Pi SDK harness adapter", () => {
         sent.push(frame);
         if (frame.type === "init") {
           const header = { type: "session", version: 3, id: "session-1", timestamp: new Date().toISOString(), cwd: "/work" };
-          output.write(JSON.stringify({ type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash"], ambientCustomTools: [], mcpClientId: null, seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } }) + "\n");
+          output.write(JSON.stringify({ type: "ready", protocolVersion: 1, sessionId: "session-1", header, attestation: { arm: "baseline", target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" }, modelId: "gemini-3.8-flash", providerId: "google", thinkingLevel: "low", activeTools: ["read", "write", "edit", "bash", "mcp"], ambientCustomTools: [], mcpClientId: "shared-mcp-client-v1", seededMcpServers: [], skillToolBundleSha256: null, loadedSkills: [], agentsFilesCount: 0, extensionsCount: 0, promptsCount: 0, themesCount: 0, retryEnabled: false, compactionEnabled: false }, process: { platform: "linux", pid: 42, uid: 10001, gid: 10001, cwd: "/workspace" } }) + "\n");
           output.write(JSON.stringify({ type: "record", protocolVersion: 1, sequence: 1, record: header, redactions: { count: 0, entries: [] } }) + "\n");
         } else if (frame.type === "prompt") {
           output.write(JSON.stringify({ type: "record", protocolVersion: 1, sequence: 2, record: { type: "message", id: "m1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: frame.prompt } }, redactions: { count: 0, entries: [] } }) + "\n");
-          output.write(JSON.stringify({ type: "result", protocolVersion: 1, sessionId: "session-1", outcome: "completed", usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, providerRequests: 1, toolSteps: 0, taskLimitReason: null }, timing: { startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), durationMs: 3 }, terminal: { stopReason: null, classification: "completed", semanticAbortCause: null, error: null, streamingStopped: true }, redactions: { count: 0, entries: [] } }) + "\n");
+          output.write(JSON.stringify({ type: "result", protocolVersion: 1, sessionId: "session-1", outcome: "completed", usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, providerRequests: 1, toolSteps: 0, taskLimitReason: null }, timing: { startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), durationMs: 3 }, terminal: { stopReason: null, rawStopReason: null, classification: "completed", stopCause: "completed", semanticAbortCause: null, error: null, streamingStopped: true }, redactions: { count: 0, entries: [] } }) + "\n");
           queueMicrotask(() => { output.end(); resolveExit(0); });
         }
       }
@@ -187,7 +196,7 @@ describe("Pi SDK harness adapter", () => {
       name: "remote", networkName: "net", imageDigest: "sha256:remote",
       stage: async () => undefined,
       exec: async () => ({ exitCode: 0, stdout: "", stderr: "", truncated: false, timedOut: false }),
-      execStream: async () => ({ stdin: input, stdout: output, kill: () => undefined, exitCode }),
+      execStream: async () => ({ stdin: input, stdout: output, kill: () => undefined, exitCode, termination: Promise.resolve("confirmed" as const) }),
       exportFiles: async () => ({ files: [], truncated: false, skipped: [] }),
       attest: async () => { throw new Error("unused"); }, deliverCredential: async () => undefined,
       destroy: async () => ({ status: "destroyed", verified: true, failure: null }),
@@ -219,6 +228,8 @@ describe("Pi SDK harness adapter", () => {
     ["stream not stopped", (frame: any) => ({ ...frame, terminal: { ...frame.terminal, streamingStopped: false } })],
     ["negative telemetry", (frame: any) => ({ ...frame, usage: { ...frame.usage, outputTokens: -1 } })],
     ["unknown result field", (frame: any) => ({ ...frame, extra: true })],
+    ["missing raw stop reason field", (frame: any) => { const t = { ...frame.terminal }; delete t.rawStopReason; return { ...frame, terminal: t }; }],
+    ["non-string raw stop reason", (frame: any) => ({ ...frame, terminal: { ...frame.terminal, rawStopReason: 42 } })],
   ])("rejects remote terminal protocol: %s", async (_name, mutateResult) => {
     const harness = createPiHarness({ scriptedSteps: [{ type: "text", text: "remote" }] });
     const guest = remoteGuestForFrames((type, frame) => type === "result" ? mutateResult(frame) : frame);
@@ -246,6 +257,38 @@ describe("Pi SDK harness adapter", () => {
     const request = createMockRequest();
     await harness.attest(guest, request);
     await expect(harness.run(guest, request)).rejects.toMatchObject({ code: "protocol-drift" });
+  });
+
+  it("preserves the RAW provider stop reason from the guest terminal frame (remote path)", async () => {
+    const harness = createPiHarness({ scriptedSteps: [{ type: "text", text: "remote" }] });
+    const guest = remoteGuestForFrames((type, frame) => type === "result"
+      ? {
+          ...frame,
+          outcome: "task-limit",
+          terminal: { ...frame.terminal, stopReason: "length", rawStopReason: "MAX_TOKENS", classification: "task-limit", stopCause: "provider-response-length" },
+        }
+      : frame);
+    const request = createMockRequest();
+    await harness.attest(guest, request);
+    const result = await harness.run(guest, request);
+    expect(result.outcome).toBe("task-limit");
+    expect(result.providerStopReason).toBe("MAX_TOKENS");
+    expect(result.stopCause).toBe("provider-response-length");
+  });
+
+  it("falls back to the normalized guest stop reason when the raw reason is null (remote path)", async () => {
+    const harness = createPiHarness({ scriptedSteps: [{ type: "text", text: "remote" }] });
+    const guest = remoteGuestForFrames((type, frame) => type === "result"
+      ? {
+          ...frame,
+          outcome: "task-limit",
+          terminal: { ...frame.terminal, stopReason: "length", rawStopReason: null, classification: "task-limit", stopCause: "provider-response-length" },
+        }
+      : frame);
+    const request = createMockRequest();
+    await harness.attest(guest, request);
+    const result = await harness.run(guest, request);
+    expect(result.providerStopReason).toBe("length");
   });
 
   it.each([
@@ -342,7 +385,7 @@ describe("Pi SDK harness adapter", () => {
     rmSync(tempSkills, { recursive: true, force: true });
   });
 
-  it("maps stopReason length to task-limit outcome", async () => {
+  it("maps stopReason length to task-limit outcome and preserves the RAW provider stop reason (local path)", async () => {
     const ws = makeTempDir("pi-length");
     const guest = createMockGuest(ws);
     const request = createMockRequest();
@@ -351,6 +394,7 @@ describe("Pi SDK harness adapter", () => {
       {
         type: "stop",
         stopReason: "length",
+        rawStopReason: "MAX_TOKENS",
         text: "truncated text...",
       },
     ]);
@@ -359,6 +403,29 @@ describe("Pi SDK harness adapter", () => {
     const result = await harness.run(guest, request);
 
     expect(result.outcome).toBe("task-limit");
+    // providerStopReason persists the RAW reason, not the normalized `length`.
+    expect(result.providerStopReason).toBe("MAX_TOKENS");
+    // Unlimited output budget: a native `length` truncation is provider-response-length,
+    // and classification still uses the NORMALIZED reason despite the raw one persisting.
+    expect(result.stopCause).toBe("provider-response-length");
+    rmSync(ws, { recursive: true, force: true });
+  });
+
+  it("falls back to the normalized stop reason when no RAW provider reason was captured (local path)", async () => {
+    const ws = makeTempDir("pi-length-fallback");
+    const guest = createMockGuest(ws);
+    const request = createMockRequest();
+
+    const streamSimpleOverride = createScriptedStreamSimple([
+      { type: "stop", stopReason: "length", text: "truncated text..." },
+    ]);
+
+    const harness = createPiHarness({ streamSimpleOverride });
+    const result = await harness.run(guest, request);
+
+    expect(result.outcome).toBe("task-limit");
+    // No rawStopReason on the message, so the normalized reason is preserved instead.
+    expect(result.providerStopReason).toBe("length");
     rmSync(ws, { recursive: true, force: true });
   });
 
@@ -631,6 +698,56 @@ describe("Pi SDK harness adapter", () => {
     const result = await harness.run(guest, request);
 
     expect(result.outcome).toBe("task-limit");
+    rmSync(ws, { recursive: true, force: true });
+  });
+
+  it("classifies an UNLIMITED arm's native `length` truncation as provider-response-length", async () => {
+    const ws = makeTempDir("pi-native-length");
+    // Default task budgets are unlimited (maxOutputTokens === null): no cumulative clamp is
+    // ever injected, so a provider `length` stop is the provider's own per-response limit.
+    const harness = createPiHarness({
+      streamSimpleOverride: createScriptedStreamSimple([
+        {
+          type: "stop",
+          stopReason: "length",
+          text: "Truncated by the provider's native per-response limit",
+          usage: { input: 100, output: 9001, cacheRead: 0, cacheWrite: 0, totalTokens: 9101, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        },
+      ]),
+    });
+    const result = await harness.run(createMockGuest(ws), createMockRequest({ limits: { ...SAFE_DEFAULT_LIMITS } }));
+    expect(result.outcome).toBe("task-limit");
+    expect(result.providerStopReason).toBe("length");
+    expect(result.stopCause).toBe("provider-response-length");
+    rmSync(ws, { recursive: true, force: true });
+  });
+
+  it("classifies a clamped near-boundary `length` stop (7996/8000) as cumulative-output-tokens, not provider-native", async () => {
+    const ws = makeTempDir("pi-clamp-length");
+    // Multi-turn cumulative consumption under a finite 8000-token budget: turn 1 consumes
+    // 7992 output tokens via a tool call, then turn 2's request is clamped to the SHRUNKEN
+    // remainder (8) and the provider stops at `length` at cumulative 7996 — four short of
+    // the cap. This is the injected clamp on a shrunken remainder, so it must report
+    // cumulative-output-tokens, NOT provider-native truncation merely because 7996 != 8000.
+    const harness = createPiHarness({
+      streamSimpleOverride: createScriptedStreamSimple([
+        {
+          type: "toolCall",
+          toolCalls: [{ name: "write", arguments: { path: "draft.txt", content: "partial draft" } }],
+          usage: { input: 100, output: 7992, cacheRead: 0, cacheWrite: 0, totalTokens: 8092, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        },
+        {
+          type: "stop",
+          stopReason: "length",
+          text: "Truncated at the clamped remaining allowance",
+          usage: { input: 100, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 104, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        },
+      ]),
+    });
+    const result = await harness.run(createMockGuest(ws), createMockRequest({ limits: { ...SAFE_DEFAULT_LIMITS, maxOutputTokens: 8000 } }));
+    expect(result.outcome).toBe("task-limit");
+    expect(result.providerStopReason).toBe("length");
+    expect(result.stopCause).toBe("cumulative-output-tokens");
     rmSync(ws, { recursive: true, force: true });
   });
 

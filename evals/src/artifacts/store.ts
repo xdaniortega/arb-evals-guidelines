@@ -186,7 +186,12 @@ function decodeJournalEntry(value: unknown, at: string): JournalEntry {
   };
 }
 
-/** Every journaled line for one exact run id. Missing journal is an evidence defect. */
+/**
+ * @notice Loads an exact run's journal, rejecting missing or invalid evidence.
+ * @param stateDir Root directory for resource journals.
+ * @param runId Exact run identity to read.
+ * @returns Validated entries in journal order.
+ */
 export async function readRunJournal(stateDir: string, runId: string): Promise<readonly JournalEntry[]> {
   const path = journalPathFor(stateDir, runId);
   const raw = await readFile(path, "utf8").catch((cause: unknown) => {
@@ -213,10 +218,10 @@ export async function readRunJournal(stateDir: string, runId: string): Promise<r
     if (entry.conditionId !== null && entry.conditionId !== "baseline" && entry.conditionId !== "treatment") throw new EvalError("evidence-invalid", `journal line ${index + 1} has invalid condition ownership`, { at: "journal" });
     if (entry.action === "create" && (entry.kind === "guest" || entry.kind === "network")) {
       if (entry.conditionId === null) {
-        const validatorPattern = entry.kind === "guest" ? /^eval-vguest-[0-9a-f]{8}$/ : /^eval-vnet-[0-9a-f]{8}$/;
-        if (!validatorPattern.test(entry.name)) throw new EvalError("evidence-invalid", `journal line ${index + 1} has a non-derivable component resource name`, { at: "journal" });
+        const componentPattern = entry.kind === "guest" ? /^eval-[vd]guest-[0-9a-f]{8}$/ : /^eval-[vd]net-[0-9a-f]{8}$/;
+        if (!componentPattern.test(entry.name)) throw new EvalError("evidence-invalid", `journal line ${index + 1} has a non-derivable component resource name`, { at: "journal" });
       } else {
-        const match = /-r([0-9]{3})-(?:baseline|treatment)-[0-9a-f]{4,12}$/.exec(entry.name);
+        const match = /-r([0-9]{3,})-(?:baseline|treatment)-[0-9a-f]{4,12}$/.exec(entry.name);
         const repetition = match === null ? 0 : Number(match[1]);
         const expected = repetition > 0 ? resourceNameFor(entry.kind === "guest" ? "guest" : "net", { runId, resourceNonce: entry.nonce }, repetition, entry.conditionId) : null;
         if (entry.name !== expected) throw new EvalError("evidence-invalid", `journal line ${index + 1} has a resource name not derived from its run, nonce, and condition`, { at: "journal" });

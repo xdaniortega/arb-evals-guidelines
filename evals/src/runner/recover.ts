@@ -18,6 +18,7 @@
 import { lstat, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { assertSafeRelativePath, buildManifestTree, canonicalJson, sha256Hex } from "../core/experiment.ts";
+import { assertRealDirectory } from "./case-loader.ts";
 import type { ManifestEntry } from "../core/experiment.ts";
 import { EvalError, SCHEMA_VERSION, toStructuredFailure } from "../core/types.ts";
 import type { StructuredFailure } from "../core/types.ts";
@@ -53,15 +54,21 @@ export interface RecoveryResult {
  */
 export async function findRunDirectory(evalsRoot: string, runId: string): Promise<string> {
   const safeRunId = assertSafeRelativePath(runId, "--run");
-  const roots = [join(evalsRoot, "cases"), evalsRoot];
+  const canonicalRoot = join(evalsRoot, "cases");
+  const roots = [canonicalRoot, evalsRoot];
   const matches: string[] = [];
   for (const root of roots) {
-    const entries = await readdir(root, { withFileTypes: true }).catch(async (cause: unknown) => {
-      const rootStat = await lstat(evalsRoot).catch(() => null);
-      if (rootStat === null || !rootStat.isDirectory()) {
-        throw new EvalError("input-invalid", `evals root is not readable: ${evalsRoot}`, { at: "--run", cause });
+    if (root === canonicalRoot) {
+      try {
+        if (!(await assertRealDirectory(root, "--run", { allowMissing: true }))) continue;
+      } catch (error) {
+        if (error instanceof EvalError && error.code === "path-unsafe") throw error;
+        throw new EvalError("input-invalid", `evidence namespace root is not readable: ${root}`, { at: "--run", cause: error });
       }
-      return [];
+    }
+    const entries = await readdir(root, { withFileTypes: true }).catch((cause: NodeJS.ErrnoException) => {
+      if (root !== evalsRoot && cause.code === "ENOENT") return [];
+      throw new EvalError("input-invalid", `evidence namespace root is not readable: ${root}`, { at: "--run", cause });
     });
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".") || (root === evalsRoot && entry.name === "cases")) continue;

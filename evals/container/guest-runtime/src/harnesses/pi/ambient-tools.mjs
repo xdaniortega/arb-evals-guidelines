@@ -1,9 +1,8 @@
 /**
  * Ambient custom tools provided by the evaluator.
  *
- * Implements Amendment 9 Slice S2:
  * - Ambient tools are evaluator-provided, registered identically in BOTH arms.
- * - S2 provides the ambient `glob` tool. Pi 0.85.0 has no built-in glob; it is
+ * - Provides the ambient `glob` tool. Pi 0.85.0 has no built-in glob; it is
  *   supplied via createAgentSession({ customTools: [...] }).
  * - Order is governed by EVAL_AMBIENT_TOOL_NAMES, not caller order.
  */

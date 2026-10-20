@@ -33,6 +33,52 @@ function isPinnedPostRunUsageError(error) {
         /^at AgentSession\._handlePostAgentRun \(file:\/\/.+\/@earendil-works\/pi-coding-agent\/(dist\/core\/agent-session\.js|src\/core\/agent-session\.ts):\d+:\d+\)$/.test(frames[2] ?? "");
 }
 /**
+ * @notice Allows near-cap usage when attributing provider truncation to a task budget.
+ * @param clamp Output-token allowance actually forwarded to the provider.
+ * @returns A tolerance of at least 16 tokens or one percent of the allowance.
+ * @dev Attribution is heuristic; native truncation inside this window is indistinguishable.
+ */
+export function outputClampReachTolerance(clamp) {
+    return Math.max(16, Math.ceil(clamp * 0.01));
+}
+/**
+ * @notice Applies a finite cumulative output budget without overriding a smaller native cap.
+ * @param input Arm allowance, previously consumed output, and SDK response-token setting.
+ * @returns Forwarded response allowance and whether the harness remainder binds it.
+ * @dev An unlimited allowance forwards the existing SDK setting unchanged.
+ */
+export function computeOutputClamp(input) {
+    const { maxOutputTokens, priorOutput, existingMaxTokens } = input;
+    const remainingOutput = maxOutputTokens !== null ? maxOutputTokens - priorOutput : undefined;
+    const forwardedMaxTokens = remainingOutput === undefined
+        ? existingMaxTokens
+        : Math.min(existingMaxTokens ?? remainingOutput, remainingOutput);
+    const harnessRemainderBinding = maxOutputTokens !== null &&
+        remainingOutput !== undefined &&
+        (existingMaxTokens === undefined || remainingOutput <= existingMaxTokens);
+    return {
+        forwardedMaxTokens,
+        harnessRemainderBinding,
+        forwardedClamp: harnessRemainderBinding ? remainingOutput : null,
+    };
+}
+/**
+ * @notice Attributes a length stop to a finite harness budget only with near-cap usage evidence.
+ * @param input Budget, binding request constraint, and observed response output.
+ * @returns Whether the response reached the harness clamp within accounting tolerance.
+ * @dev Missing usage or a nonbinding clamp cannot establish cumulative exhaustion.
+ */
+export function lengthStopExhaustedOutputBudget(input) {
+    const { maxOutputTokens, harnessRemainderBinding, forwardedClamp, responseOutput } = input;
+    if (maxOutputTokens === null)
+        return false;
+    if (!harnessRemainderBinding || forwardedClamp === null)
+        return false;
+    if (responseOutput === null)
+        return false;
+    return responseOutput >= forwardedClamp - outputClampReachTolerance(forwardedClamp);
+}
+/**
  * @notice Initializes an isolated Pi SDK agent session configured with explicit model runtime settings and in-memory credential delivery.
  * @param options Session options controlling model configuration, working directories, skills, tools, and credentials.
  * @returns Managed Pi SDK session instance providing attestation, prompt dispatch, budget tracking, and disposal hooks.
@@ -72,6 +118,17 @@ export async function createPiSdkSession(options) {
     let providerRequests = 0;
     let toolSteps = 0;
     let taskLimitReason = null;
+    // Whether the MOST RECENT provider request forwarded the harness cumulative-output
+    // remainder as its binding per-response `maxTokens` (the remainder was the minimum we
+    // actually sent, no smaller native per-response cap won). This is structural: it can be
+    // true on the FIRST request too, where the remainder still equals the full budget.
+    // Whether a `length` stop actually REACHED that clamp (and is therefore cumulative-output
+    // exhaustion) is decided from observed output usage in the message_end handler, never
+    // from turn position alone.
+    let lastRequestOutputClampBound = false;
+    // The exact clamp value forwarded on the most recent request when the harness remainder
+    // was binding; null otherwise (unlimited output, or a smaller native cap won the min).
+    let lastForwardedOutputClamp = null;
     const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     const usageAvailable = { input: true, output: true, cacheRead: true, cacheWrite: true };
     let finalizedAssistantMessages = 0;
@@ -99,22 +156,36 @@ export async function createPiSdkSession(options) {
         return stream;
     };
     modelRuntime.streamSimple = ((requestModel, context, streamOptions) => {
-        if (budget && providerRequests >= budget.maxProviderRequests) {
+        // Each budget is enforced ONLY when it is a finite opt-in (not null/unlimited).
+        if (budget && budget.maxProviderRequests !== null && providerRequests >= budget.maxProviderRequests) {
             const reason = `provider requests budget of ${budget.maxProviderRequests} exhausted`;
             setTaskLimit(reason);
             return terminalBudgetStream(reason);
         }
-        if (budget && usageTotals.output >= budget.maxOutputTokens) {
+        if (budget && budget.maxOutputTokens !== null && usageTotals.output >= budget.maxOutputTokens) {
             const reason = `output token budget of ${budget.maxOutputTokens} exhausted`;
             setTaskLimit(reason);
             return terminalBudgetStream(reason);
         }
         providerRequests += 1;
-        const remainingOutput = budget ? budget.maxOutputTokens - usageTotals.output : undefined;
+        // Only clamp the per-request maxTokens to a shrinking cumulative remainder when a
+        // FINITE output-token budget is configured. When output is unlimited (null), we
+        // forward any legitimate SDK/provider per-response maxTokens unchanged and never
+        // inject a cumulative clamp, so a request is never shrunk toward a harness cap.
         const existingMaxTokens = streamOptions?.maxTokens;
-        const maxTokens = remainingOutput === undefined
-            ? existingMaxTokens
-            : Math.min(existingMaxTokens ?? remainingOutput, remainingOutput);
+        const clamp = computeOutputClamp({
+            maxOutputTokens: budget?.maxOutputTokens ?? null,
+            priorOutput: usageTotals.output,
+            existingMaxTokens,
+        });
+        const maxTokens = clamp.forwardedMaxTokens;
+        // Record whether the harness remainder was the binding forwarded cap and, if so, its
+        // exact value. Attribution of a later `length` stop to cumulative-output exhaustion is
+        // then decided from observed output usage (see the message_end handler), so a
+        // provider-native truncation below the clamp is never mislabeled and a genuine
+        // first-turn or shrunken-remainder clamp that IS reached is not missed.
+        lastRequestOutputClampBound = clamp.harnessRemainderBinding;
+        lastForwardedOutputClamp = clamp.forwardedClamp;
         return streamDelegate(requestModel, context, {
             ...streamOptions,
             ...(maxTokens === undefined ? {} : { maxTokens }),
@@ -194,22 +265,21 @@ export async function createPiSdkSession(options) {
             throw new EvalError("parity-violation", "baseline session cannot receive treatment MCP server configuration", { at: "pi.sdk.arm" });
         }
     }
-    const hasDeclaredMcp = options.arm === "treatment" && (options.skillToolBundle?.servers.length ?? 0) > 0;
-    const mcpClient = hasDeclaredMcp ? await createMcpClient({
+    const mcpClient = await createMcpClient({
         conditionId: options.arm,
-        bundle: options.skillToolBundle,
+        bundle: options.arm === "treatment" ? (options.skillToolBundle ?? null) : null,
         guardedSecrets: options.guardedSecrets ?? (options.apiKey ? [{ label: "api-key", value: options.apiKey }] : []),
         deadlineAtMs: options.deadlineAtMs ?? (Date.now() + 180_000),
         signal: options.signal,
-    }) : null;
+    });
     const baseAllowedTools = options.allowedTools ? [...options.allowedTools] : ["read", "bash", "edit", "write"];
     if (baseAllowedTools.includes(MCP_CLIENT_TOOL_NAME) || options.ambientTools?.some((tool) => tool.name === MCP_CLIENT_TOOL_NAME)) {
-        mcpClient?.dispose();
+        mcpClient.dispose();
         throw new EvalError("parity-violation", "mcp is reserved for the shared client integration", { at: "pi.sdk.tools" });
     }
-    const activeTools = hasDeclaredMcp ? [...baseAllowedTools, MCP_CLIENT_TOOL_NAME] : baseAllowedTools;
+    const activeTools = [...baseAllowedTools, MCP_CLIENT_TOOL_NAME];
     const ambientDefs = options.ambientTools ? [...options.ambientTools] : [];
-    const allCustomTools = mcpClient === null ? ambientDefs : [...ambientDefs, mcpClient.definition];
+    const allCustomTools = [...ambientDefs, mcpClient.definition];
     const customTools = allCustomTools.length > 0 ? allCustomTools : undefined;
     const { session } = await createAgentSession({
         cwd: options.cwd,
@@ -223,7 +293,7 @@ export async function createPiSdkSession(options) {
         settingsManager,
         sessionManager,
     }).catch((error) => {
-        mcpClient?.dispose();
+        mcpClient.dispose();
         for (const restore of restoredAppendMethods)
             restore();
         if (createdTempAgentDir)
@@ -239,7 +309,9 @@ export async function createPiSdkSession(options) {
         const previous = await previousBeforeToolCall?.(context, signal);
         if (previous?.block)
             return previous;
-        if (budget && toolSteps >= budget.maxToolSteps) {
+        // Enforce the tool-step budget only when it is a finite opt-in; the counter below
+        // always advances so telemetry is retained even when the budget is unlimited.
+        if (budget && budget.maxToolSteps !== null && toolSteps >= budget.maxToolSteps) {
             const reason = `tool steps budget of ${budget.maxToolSteps} exhausted`;
             setTaskLimit(reason);
             return { block: true, terminate: true, reason };
@@ -252,7 +324,7 @@ export async function createPiSdkSession(options) {
     const previousAfterToolCall = session.agent.afterToolCall;
     session.agent.afterToolCall = async (context, signal) => {
         const previous = await previousAfterToolCall?.(context, signal);
-        if (mcpClient !== null && context.toolCall.name === MCP_CLIENT_TOOL_NAME && context.result.details?.isError === true) {
+        if (context.toolCall.name === MCP_CLIENT_TOOL_NAME && context.result.details?.isError === true) {
             return { ...previous, isError: true };
         }
         return previous;
@@ -266,12 +338,13 @@ export async function createPiSdkSession(options) {
         if (taskLimitReason !== null)
             return true;
         const needsContinuation = context.message.content.some((block) => block.type === "toolCall");
-        if (providerRequests >= budget.maxProviderRequests && needsContinuation) {
+        if (budget.maxProviderRequests !== null && providerRequests >= budget.maxProviderRequests && needsContinuation) {
             setTaskLimit(`provider requests budget of ${budget.maxProviderRequests} exhausted`);
             return true;
         }
-        if (usageTotals.output > budget.maxOutputTokens ||
-            (usageTotals.output === budget.maxOutputTokens && needsContinuation)) {
+        if (budget.maxOutputTokens !== null &&
+            (usageTotals.output > budget.maxOutputTokens ||
+                (usageTotals.output === budget.maxOutputTokens && needsContinuation))) {
             setTaskLimit(`output token budget of ${budget.maxOutputTokens} exhausted`);
             return true;
         }
@@ -286,12 +359,32 @@ export async function createPiSdkSession(options) {
         observedMessages.add(message);
         finalizedAssistantMessages += 1;
         const usage = message.usage;
+        const responseOutput = typeof usage?.output === "number" ? usage.output : null;
         for (const component of ["input", "output", "cacheRead", "cacheWrite"]) {
             const value = usage?.[component];
             if (typeof value === "number")
                 usageTotals[component] += value;
             else
                 usageAvailable[component] = false;
+        }
+        // A provider `length` truncation is harness cumulative-output-token exhaustion ONLY
+        // when the harness clamp was the binding forwarded cap AND the response actually
+        // reached it (proven from this response's output usage). This uses the actual
+        // forwarded request cap and observed output rather than turn position, so a genuine
+        // first-turn clamp that is reached counts, while a provider-native truncation below
+        // the clamp (or an unlimited budget) stays provider-native. Naming it here at the
+        // source keeps host adapter and in-guest agent classifications identical and prevents
+        // the fallback "length limit reached" reason from mislabeling an injected clamp.
+        if (message.stopReason === "length" &&
+            budget &&
+            budget.maxOutputTokens !== null &&
+            lengthStopExhaustedOutputBudget({
+                maxOutputTokens: budget.maxOutputTokens,
+                harnessRemainderBinding: lastRequestOutputClampBound,
+                forwardedClamp: lastForwardedOutputClamp,
+                responseOutput,
+            })) {
+            setTaskLimit(`output token budget of ${budget.maxOutputTokens} exhausted (provider truncated at clamped remaining allowance)`);
         }
     });
     // 9. Attestation on THAT SAME session instance
@@ -345,8 +438,8 @@ export async function createPiSdkSession(options) {
             thinkingLevel: session.thinkingLevel,
             activeTools: currentTools,
             ambientCustomTools: options.ambientTools ? options.ambientTools.map((t) => t.name).sort() : [],
-            mcpClientId: mcpClient === null ? null : MCP_CLIENT_POLICY.id,
-            seededMcpServers: mcpClient?.seededServers ?? [],
+            mcpClientId: MCP_CLIENT_POLICY.id,
+            seededMcpServers: mcpClient.seededServers,
             skillToolBundleSha256: options.arm === "treatment" ? (options.skillToolBundleSha256 ?? null) : null,
             loadedSkills: skills.map((s) => ({ name: s.name, path: s.filePath })),
             agentsFilesCount: agentsFiles.length,
@@ -390,6 +483,7 @@ export async function createPiSdkSession(options) {
             cacheReadTokens: observed && usageAvailable.cacheRead ? usageTotals.cacheRead : null,
             cacheWriteTokens: observed && usageAvailable.cacheWrite ? usageTotals.cacheWrite : null,
             taskLimitReason,
+            outputClampBoundLastRequest: lastRequestOutputClampBound,
         };
     }
     function getNativeSessionEntries() {
@@ -403,7 +497,7 @@ export async function createPiSdkSession(options) {
             : [header, ...entries];
     }
     function dispose() {
-        mcpClient?.dispose();
+        mcpClient.dispose();
         unsubscribeBudgetObserver();
         for (const restore of restoredAppendMethods)
             restore();
@@ -428,7 +522,7 @@ export async function createPiSdkSession(options) {
         getBudgetSnapshot,
         getNativeSessionEntries,
         setDeadline: (atMs) => {
-            mcpClient?.setDeadline(atMs);
+            mcpClient.setDeadline(atMs);
         },
         dispose,
     };

@@ -1,7 +1,7 @@
 /**
  * Pure parser and snapshot reader for evaluated-skill MCP tool manifests.
  *
- * Amendment 9 treats declared tool dependencies as part of skill presence.
+ * Declared tool dependencies are part of skill presence.
  * Only the treatment arm provisions declared MCP servers.
  *
  * Note: The repository-root `.claude-plugin/plugin.json` mirrors this declaration
