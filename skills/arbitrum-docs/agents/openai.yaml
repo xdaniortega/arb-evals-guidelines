@@ -1,0 +1,12 @@
+interface:
+  display_name: "Arbitrum Docs"
+  short_description: "Verify answers against official Arbitrum docs"
+  default_prompt: "Use $arbitrum-docs to answer this question from official Arbitrum documentation."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "arbitrumDocs"
+      description: "Official Arbitrum documentation search and question answering"
+      transport: "streamable_http"
+      url: "https://mcp.inkeep.com/offchainlabs/mcp"
