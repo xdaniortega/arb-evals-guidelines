@@ -3,7 +3,7 @@
  *
  * Thin composition entrypoint only: parse argv, call the read model, print, exit. The
  * view vocabulary, the file mapping, and the chain verification live in
- * evals/src/artifacts/queries.ts.
+ * src/artifacts/queries.ts.
  *
  * It is strictly read-only.
  */

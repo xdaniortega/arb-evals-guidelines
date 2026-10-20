@@ -3,7 +3,7 @@
  *
  * Thin composition entrypoint only: parse argv, call the read model, print, exit. The
  * chain verification, the gradeability rules, and the refusal to print a delta for an
- * invalid pair all live in evals/src/artifacts/queries.ts.
+ * invalid pair all live in src/artifacts/queries.ts.
  *
  * It is strictly read-only. Nothing here writes, repairs, or regenerates evidence.
  */

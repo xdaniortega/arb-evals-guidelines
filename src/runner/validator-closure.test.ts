@@ -132,7 +132,7 @@ async function expectNoDispatch(root: string, caseId: string, code: string) {
 async function runSupervisorValidate(
   payload: unknown,
 ): Promise<{ code: number | null; stdout: string; stderr: string; json: Record<string, unknown> | null; materialized: boolean }> {
-  const supervisorPath = join(process.cwd(), "evals", "container", "run-measured.mjs");
+  const supervisorPath = join(process.cwd(), "container", "run-measured.mjs");
   const tempDir = await makeTempDir("sup-validate-");
   const child = spawn(process.execPath, [supervisorPath, "validate"], {
     env: buildAllowlistedEnv(tempDir, { EVAL_CONTROL_DIR: tempDir }),

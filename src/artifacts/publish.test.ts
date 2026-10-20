@@ -27,8 +27,8 @@ import { createSkillSnapshot } from "../runner/skill-snapshot.ts";
 import { EvalError } from "../core/types.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
-const evalsRoot = join(repoRoot, "evals");
+const repoRoot = resolve(here, "..", "..");
+const evalsRoot = repoRoot;
 
 const tempRoots: string[] = [];
 const workDirs: string[] = [];
@@ -319,11 +319,11 @@ Middle
 });
 
 describe("default repo root and pure target resolver (Blocker 1)", () => {
-  it("resolveDefaultRepoRoot resolves the actual repository root (three parent traversals)", () => {
+  it("resolveDefaultRepoRoot resolves the actual repository root (two parent traversals)", () => {
     const root = resolveDefaultRepoRoot();
     expect(root).toBe(repoRoot);
     expect(existsSync(join(root, "package.json"))).toBe(true);
-    expect(existsSync(join(root, "evals"))).toBe(true);
+    expect(existsSync(join(root, "eval-cases"))).toBe(true);
     expect(existsSync(join(root, "skills"))).toBe(true);
   });
 
@@ -1049,7 +1049,7 @@ Some historical notes.
   });
 
   describe("eval:publish CLI subprocess execution", () => {
-    const publishScript = resolve(repoRoot, "evals/scripts/publish.ts");
+    const publishScript = resolve(repoRoot, "scripts/publish.ts");
 
     it("publishes via CLI subprocess and honors --checks", async () => {
       const runResult = await sealRun();

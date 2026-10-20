@@ -3,8 +3,8 @@
  * `pnpm eval:doctor` — no-request readiness verification.
  *
  * Thin composition entrypoint only: parses argv and routes to either:
- * 1. Exact-ID recovery in evals/src/runner/recover.ts
- * 2. Readiness doctor in evals/src/runner/doctor.ts
+ * 1. Exact-ID recovery in src/runner/recover.ts
+ * 2. Readiness doctor in src/runner/doctor.ts
  */
 
 import { randomBytes } from "node:crypto";
@@ -68,7 +68,7 @@ export function parseDoctorArgs(argv: readonly string[]): DoctorCommand {
 async function main(): Promise<number> {
   const command = parseDoctorArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
   const evalsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const repoRoot = resolve(evalsRoot, "..");
+  const repoRoot = evalsRoot;
 
   if (command.mode === "recover") {
     const now = new Date();

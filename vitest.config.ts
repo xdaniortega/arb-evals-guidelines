@@ -2,17 +2,17 @@ import { configDefaults, defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    include: ['evals/src/**/*.test.ts'],
+    include: ['src/**/*.test.ts'],
     // Owner-authored case validator and preparation tests use node:test, which vitest
     // would collect as zero tests. They run under `pnpm test:eval-cases` instead.
     exclude: [
       ...configDefaults.exclude,
-      'evals/cases/*/validator.test.ts',
-      'evals/cases/*/oracle-aux.test.ts',
-      'evals/cases/*/prepare.test.ts',
+      'eval-cases/*/*/validator.test.ts',
+      'eval-cases/*/*/oracle-aux.test.ts',
+      'eval-cases/*/*/prepare.test.ts',
     ],
     environment: 'node',
-    // Much of evals/src is integration-level: it spawns real CLI entry points as
+    // Much of src is integration-level: it spawns real CLI entry points as
     // subprocesses, and a few boot and destroy an actual guest container (~4s each).
     // Vitest's 5s default is not a meaningful bound for that work. This ceiling still
     // catches genuine hangs.
@@ -22,6 +22,6 @@ export default defineConfig({
     // between files depending on which test loses the race. Capping workers keeps the
     // suite deterministic; it is a resource bound, not a weakened assertion.
     maxWorkers: 4,
-    setupFiles: ['evals/src/test-guards.ts'],
+    setupFiles: ['src/test-guards.ts'],
   },
 })

@@ -865,7 +865,7 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
 
   it("proves pending deadline in a child process produces diagnostic error and non-zero exit rather than silent code 0", () => {
     const childScript = `
-      import { executeTrustedPreparer } from "./evals/src/runner/run.ts";
+      import { executeTrustedPreparer } from "./src/runner/run.ts";
       async function main() {
         await executeTrustedPreparer({
           preparer: () => new Promise(() => {}), // never settles

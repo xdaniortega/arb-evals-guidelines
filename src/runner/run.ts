@@ -1,7 +1,7 @@
 /**
  * Paired run orchestration: preflight -> freeze -> execute -> validate -> clean up -> seal.
  *
- * The stage order is the contract (evals/docs/ARCHITECTURE.md section 6) and is not an
+ * The stage order is the contract (docs/ARCHITECTURE.md section 6) and is not an
  * implementation detail. Each stage exists to make one specific dishonest outcome
  * impossible:
  *
@@ -393,7 +393,7 @@ export interface RunOptions {
   readonly workDir: string;
   /** `<suite>/runs` by default; tests point this at a temp root. */
   readonly runsRoot?: string;
-  /** `evals/.state` by default. */
+  /** `.state` by default. */
   readonly stateDir?: string;
   readonly guardedSecrets?: readonly GuardedSecret[];
   readonly credentials?: readonly CredentialDeliveryRequest[];

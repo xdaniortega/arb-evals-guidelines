@@ -156,14 +156,14 @@ export interface LoadedCredentials {
  */
 export async function loadGuardedCredentials(envPath: string, repoRoot: string): Promise<LoadedCredentials> {
   const absEnvPath = resolve(repoRoot, envPath);
-  const realRepoEnvPath = resolve(repoRoot, "evals", ".env");
+  const realRepoEnvPath = resolve(repoRoot, ".env");
   if (
     (process.env.VITEST === "true" || process.env.NODE_ENV === "test" || process.env.EVAL_TEST_GUARD === "1") &&
     absEnvPath === realRepoEnvPath
   ) {
     throw new EvalError(
       "secret-quarantine",
-      `Tests must NEVER load the real evals/.env file: ${envPath}. Use synthetic test fixtures.`,
+      `Tests must NEVER load the real .env file: ${envPath}. Use synthetic test fixtures.`,
       { at: envPath },
     );
   }

@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildAllowlistedEnv, startSocketServer } from "../../test-guards.ts";
 import { parseInit } from "./guest-agent.ts";
 
-const supervisor = join(process.cwd(), "evals/container/run-measured.mjs");
+const supervisor = join(process.cwd(), "container/run-measured.mjs");
 const children = new Set<ChildProcessWithoutNullStreams>();
 const cleanups: Array<() => Promise<void>> = [];
 const target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
@@ -135,41 +135,41 @@ afterEach(async () => {
 
 describe("locked guest SDK artifact", () => {
   it("is reproducibly compiled from the explicit TypeScript 5.9.3 source closure and image-locked", () => {
-    const artifactLockPath = join(process.cwd(), "evals/container/guest-runtime/artifact-lock.json");
+    const artifactLockPath = join(process.cwd(), "container/guest-runtime/artifact-lock.json");
     const beforeLock = readFileSync(artifactLockPath);
     const beforeManifest = JSON.parse(beforeLock.toString("utf8"));
-    const beforeArtifacts = Object.fromEntries(Object.keys(beforeManifest.artifacts).map((path) => [path, readFileSync(join(process.cwd(), "evals/container", path))]));
+    const beforeArtifacts = Object.fromEntries(Object.keys(beforeManifest.artifacts).map((path) => [path, readFileSync(join(process.cwd(), "container", path))]));
     const generatedRoot = mkdtempSync(join(tmpdir(), "pi-guest-build-"));
     try {
-      execFileSync(process.execPath, [join(process.cwd(), "evals/scripts/build-guest-runtime.mjs"), "--output-dir", generatedRoot], { stdio: "pipe" });
+      execFileSync(process.execPath, [join(process.cwd(), "scripts/build-guest-runtime.mjs"), "--output-dir", generatedRoot], { stdio: "pipe" });
       expect(readFileSync(join(generatedRoot, "artifact-lock.json"))).toEqual(beforeLock);
       for (const [path, bytes] of Object.entries(beforeArtifacts)) {
         expect(readFileSync(join(generatedRoot, path.replace(/^guest-runtime\//, "")))).toEqual(bytes);
       }
       expect(readFileSync(artifactLockPath)).toEqual(beforeLock);
-      for (const [path, bytes] of Object.entries(beforeArtifacts)) expect(readFileSync(join(process.cwd(), "evals/container", path))).toEqual(bytes);
+      for (const [path, bytes] of Object.entries(beforeArtifacts)) expect(readFileSync(join(process.cwd(), "container", path))).toEqual(bytes);
     } finally {
       rmSync(generatedRoot, { recursive: true, force: true });
     }
     const artifactLock = JSON.parse(readFileSync(artifactLockPath, "utf8"));
-    const imageLock = JSON.parse(readFileSync(join(process.cwd(), "evals/container/image-lock.json"), "utf8"));
+    const imageLock = JSON.parse(readFileSync(join(process.cwd(), "container/image-lock.json"), "utf8"));
     expect(ts.version).toBe("5.9.3");
     expect(artifactLock.compiler).toEqual({ package: "typescript", version: "5.9.3" });
     for (const [path, digest] of Object.entries(artifactLock.sources)) {
       expect(sha256(readFileSync(join(process.cwd(), path)))).toBe(digest);
     }
     for (const [path, digest] of Object.entries(artifactLock.artifacts)) {
-      expect(sha256(readFileSync(join(process.cwd(), "evals/container", path)))).toBe(digest);
+      expect(sha256(readFileSync(join(process.cwd(), "container", path)))).toBe(digest);
       expect(imageLock.profiles.default.buildContextFiles[path]).toBe(digest);
     }
     expect(imageLock.profiles.default.buildContextFiles["guest-runtime/artifact-lock.json"]).toBe(sha256(readFileSync(artifactLockPath)));
   });
 
   it("ships every locked guest artifact in the build context and pins the static context files", () => {
-    const artifactLock = JSON.parse(readFileSync(join(process.cwd(), "evals/container/guest-runtime/artifact-lock.json"), "utf8"));
-    const imageLock = JSON.parse(readFileSync(join(process.cwd(), "evals/container/image-lock.json"), "utf8"));
-    const dockerignore = readFileSync(join(process.cwd(), "evals/container/.dockerignore"), "utf8").split("\n").map((line) => line.trim());
-    const containerfile = readFileSync(join(process.cwd(), "evals/container/Containerfile"), "utf8");
+    const artifactLock = JSON.parse(readFileSync(join(process.cwd(), "container/guest-runtime/artifact-lock.json"), "utf8"));
+    const imageLock = JSON.parse(readFileSync(join(process.cwd(), "container/image-lock.json"), "utf8"));
+    const dockerignore = readFileSync(join(process.cwd(), "container/.dockerignore"), "utf8").split("\n").map((line) => line.trim());
+    const containerfile = readFileSync(join(process.cwd(), "container/Containerfile"), "utf8");
 
     // A deny-by-default .dockerignore silently drops any locked artifact that is not
     // re-included, producing an image that is missing modules the guest agent imports.
@@ -195,7 +195,7 @@ describe("locked guest SDK artifact", () => {
     // The static context files are digest-pinned by hand, so bind them to their real bytes.
     for (const name of ["Containerfile", ".dockerignore", "configure-egress.sh", "run-measured.mjs"]) {
       expect(imageLock.profiles.default.buildContextFiles[name], `${name} digest must be pinned`)
-        .toBe(sha256(readFileSync(join(process.cwd(), "evals/container", name))));
+        .toBe(sha256(readFileSync(join(process.cwd(), "container", name))));
     }
   });
 
@@ -204,7 +204,7 @@ describe("locked guest SDK artifact", () => {
     const sentinel = join(outputRoot, "caller-sentinel.txt");
     writeFileSync(sentinel, "preserve me");
     try {
-      expect(() => execFileSync(process.execPath, [join(process.cwd(), "evals/scripts/build-guest-runtime.mjs"), "--output-dir", outputRoot], { stdio: "pipe" })).toThrow();
+      expect(() => execFileSync(process.execPath, [join(process.cwd(), "scripts/build-guest-runtime.mjs"), "--output-dir", outputRoot], { stdio: "pipe" })).toThrow();
       expect(existsSync(outputRoot)).toBe(true);
       expect(readFileSync(sentinel, "utf8")).toBe("preserve me");
     } finally {
@@ -448,7 +448,7 @@ describe("framed guest SDK process", () => {
   ])("classifies provider error after a harness deadline: %s", async (errorMessage, outcome, stopReason) => {
     const wrapperDir = mkdtempSync(join(tmpdir(), "pi-provider-abort-"));
     const wrapper = join(wrapperDir, "abort.mjs");
-    const guestModule = pathToFileURL(join(process.cwd(), "evals/container/guest-runtime/src/harnesses/pi/guest-agent.mjs")).href;
+    const guestModule = pathToFileURL(join(process.cwd(), "container/guest-runtime/src/harnesses/pi/guest-agent.mjs")).href;
     writeFileSync(wrapper, `
 import { AgentSession } from ${JSON.stringify(pathToFileURL(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href)};
 import { runGuestAgent } from ${JSON.stringify(guestModule)};
@@ -691,7 +691,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch(error =>
   it("self-installs the scripted completion guard in the compiled guest without host preload", async () => {
     const wrapperDir = mkdtempSync(join(tmpdir(), "pi-guest-self-guard-"));
     const wrapper = join(wrapperDir, "self-guard-proof.mjs");
-    const guestModule = pathToFileURL(join(process.cwd(), "evals/container/guest-runtime/src/harnesses/pi/guest-agent.mjs")).href;
+    const guestModule = pathToFileURL(join(process.cwd(), "container/guest-runtime/src/harnesses/pi/guest-agent.mjs")).href;
     writeFileSync(wrapper, `
 import net from "node:net";
 import https from "node:https";
@@ -778,7 +778,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch((error) 
   it("proves a child waiting at readiness barrier receives its full execution allowance", async () => {
     const wrapperDir = mkdtempSync(join(tmpdir(), "pi-guest-barrier-proof-"));
     const wrapper = join(wrapperDir, "barrier-proof.mjs");
-    const guestModule = pathToFileURL(join(process.cwd(), "evals/src/harnesses/pi/guest-agent.ts")).href;
+    const guestModule = pathToFileURL(join(process.cwd(), "src/harnesses/pi/guest-agent.ts")).href;
     writeFileSync(wrapper, `
 import { runGuestAgent } from ${JSON.stringify(guestModule)};
 
@@ -822,7 +822,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch((error) 
   it("bounds a never-prompted guest with pre-prompt lifetime", async () => {
     const wrapperDir = mkdtempSync(join(tmpdir(), "pi-guest-preprompt-proof-"));
     const wrapper = join(wrapperDir, "preprompt-proof.mjs");
-    const guestModule = pathToFileURL(join(process.cwd(), "evals/src/harnesses/pi/guest-agent.ts")).href;
+    const guestModule = pathToFileURL(join(process.cwd(), "src/harnesses/pi/guest-agent.ts")).href;
     writeFileSync(wrapper, `
 import { runGuestAgent } from ${JSON.stringify(guestModule)};
 runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch((error) => {
@@ -844,7 +844,7 @@ runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch((error) 
   it("classifies timer tie between arm budget and process lifetime as task-limit (P1-B)", async () => {
     const wrapperDir = mkdtempSync(join(tmpdir(), "pi-guest-timer-tie-"));
     const wrapper = join(wrapperDir, "timer-tie-proof.mjs");
-    const guestModule = pathToFileURL(join(process.cwd(), "evals/src/harnesses/pi/guest-agent.ts")).href;
+    const guestModule = pathToFileURL(join(process.cwd(), "src/harnesses/pi/guest-agent.ts")).href;
     writeFileSync(wrapper, `
 import { runGuestAgent } from ${JSON.stringify(guestModule)};
 runGuestAgent({ controlSocket: process.env.EVAL_CONTROL_SOCKET }).catch((error) => {

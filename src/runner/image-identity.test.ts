@@ -18,8 +18,8 @@ import { EVAL_GUEST_POLICY } from "./run.ts";
 
 describe("Image Identity and Pinning", () => {
   it("Containerfile enforces the locked base digest", async () => {
-    const containerfilePath = join(process.cwd(), "evals", "container", "Containerfile");
-    const lockPath = join(process.cwd(), "evals", "container", "image-lock.json");
+    const containerfilePath = join(process.cwd(), "container", "Containerfile");
+    const lockPath = join(process.cwd(), "container", "image-lock.json");
 
     const containerfile = await readFile(containerfilePath, "utf8");
     const lock = JSON.parse(await readFile(lockPath, "utf8")) as {
@@ -35,7 +35,7 @@ describe("Image Identity and Pinning", () => {
   });
 
   it("locks the Pi dependency installation with exact version pin", async () => {
-    const containerfilePath = join(process.cwd(), "evals", "container", "Containerfile");
+    const containerfilePath = join(process.cwd(), "container", "Containerfile");
     const containerfile = await readFile(containerfilePath, "utf8");
 
     expect(containerfile).toContain("@earendil-works/pi-coding-agent@0.85.0");
@@ -50,13 +50,13 @@ describe("Image Caching, Recipe Identity, and Cleanup Separation", () => {
     // Build first time
     const first = await sandbox.buildImage({
       runtimeProfileId: "default",
-      contextDir: join(process.cwd(), "evals", "container"),
+      contextDir: join(process.cwd(), "container"),
     });
 
     // Build second time with same spec
     const second = await sandbox.buildImage({
       runtimeProfileId: "default",
-      contextDir: join(process.cwd(), "evals", "container"),
+      contextDir: join(process.cwd(), "container"),
     });
 
     // Both identities and digests are identical
@@ -71,13 +71,13 @@ describe("Image Caching, Recipe Identity, and Cleanup Separation", () => {
 
     const imageA = await sandbox.buildImage({
       runtimeProfileId: "default",
-      contextDir: join(process.cwd(), "evals", "container"),
+      contextDir: join(process.cwd(), "container"),
     });
 
     // Specifying a different profile creates a different recipe identity
     const imageB = await sandbox.buildImage({
       runtimeProfileId: "other-profile",
-      contextDir: join(process.cwd(), "evals", "container"),
+      contextDir: join(process.cwd(), "container"),
     });
 
     expect(imageB.digest).not.toBe(imageA.digest);
@@ -112,7 +112,7 @@ describe("Image Caching, Recipe Identity, and Cleanup Separation", () => {
 
     const image = await sandbox.buildImage({
       runtimeProfileId: "default",
-      contextDir: join(process.cwd(), "evals", "container"),
+      contextDir: join(process.cwd(), "container"),
     });
 
     const net = await sandbox.createNetwork("eval-net-cleanup", {

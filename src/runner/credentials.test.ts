@@ -102,7 +102,7 @@ EMPTY_VAR=
     ["short OpenAI credential", "OPENAI_API_KEY", "sk-12"],
   ])("rejects a short %s during credential loading", async (_kind, key, value) => {
     const repoRoot = process.cwd();
-    const testEnvPath = join(repoRoot, "evals", `.env.test-${randomBytes(4).toString("hex")}`);
+    const testEnvPath = join(repoRoot, `.env.test-${randomBytes(4).toString("hex")}`);
     await writeFile(testEnvPath, `GEMINI_API_KEY=synthetic-valid-provider-key\n${key}="${value}"\n`);
     try {
       const error = await loadGuardedCredentials(testEnvPath, repoRoot).catch((caught: unknown) => caught);
@@ -121,7 +121,7 @@ EMPTY_VAR=
     ["short Unicode config value", "EXTRA_TOKEN", "密钥🔑"],
   ])("loads successfully when a short non-credential %s coexists with a valid provider key", async (_kind, key, value) => {
     const repoRoot = process.cwd();
-    const testEnvPath = join(repoRoot, "evals", `.env.test-${randomBytes(4).toString("hex")}`);
+    const testEnvPath = join(repoRoot, `.env.test-${randomBytes(4).toString("hex")}`);
     await writeFile(testEnvPath, `GEMINI_API_KEY=synthetic-valid-provider-key\n${key}="${value}"\n`);
     try {
       const loaded = await loadGuardedCredentials(testEnvPath, repoRoot);
@@ -185,7 +185,7 @@ EMPTY_VAR=
 
   it("throws credential-missing if credential file does not exist", async () => {
     // Under a git-ignored path (.env.*), but non-existent file
-    const fakePath = join(process.cwd(), "evals", ".env.nonexistent");
+    const fakePath = join(process.cwd(), ".env.nonexistent");
     await expect(loadGuardedCredentials(fakePath, process.cwd())).rejects.toMatchObject({
       code: "credential-missing",
     });
@@ -207,8 +207,8 @@ EMPTY_VAR=
 
   it("rejects symlinked and nonregular credential paths", async () => {
     const repoRoot = process.cwd();
-    const fixture = join(repoRoot, "evals", `.env.symlink-${randomBytes(4).toString("hex")}`);
-    const directory = join(repoRoot, "evals", `.env.directory-${randomBytes(4).toString("hex")}`);
+    const fixture = join(repoRoot, `.env.symlink-${randomBytes(4).toString("hex")}`);
+    const directory = join(repoRoot, `.env.directory-${randomBytes(4).toString("hex")}`);
     const target = join(tmpdir(), `eval-cred-target-${randomBytes(4).toString("hex")}`);
     await writeFile(target, "GEMINI_API_KEY=should-not-read\n", "utf8");
     await symlink(target, fixture);
@@ -226,7 +226,7 @@ EMPTY_VAR=
   it("accepts confirmed git-ignored test .env and registers guarded secrets", async () => {
     const repoRoot = process.cwd();
     // Use an ignored test fixture path (matches .env.* in .gitignore)
-    const testEnvPath = join(repoRoot, "evals", `.env.test-${randomBytes(4).toString("hex")}`);
+    const testEnvPath = join(repoRoot, `.env.test-${randomBytes(4).toString("hex")}`);
     await writeFile(testEnvPath, "GEMINI_API_KEY=test-fixture-key-xyz123\n", "utf8");
     try {
       const loaded = await loadGuardedCredentials(testEnvPath, repoRoot);
@@ -246,7 +246,7 @@ EMPTY_VAR=
 
   it("registers the trimmed auth value through loadGuardedCredentials for a quoted-whitespace credential", async () => {
     const repoRoot = process.cwd();
-    const testEnvPath = join(repoRoot, "evals", `.env.test-${randomBytes(4).toString("hex")}`);
+    const testEnvPath = join(repoRoot, `.env.test-${randomBytes(4).toString("hex")}`);
     await writeFile(testEnvPath, 'GEMINI_API_KEY="  synthetic-key-123  "\n', "utf8");
     try {
       const loaded = await loadGuardedCredentials(testEnvPath, repoRoot);
@@ -259,11 +259,11 @@ EMPTY_VAR=
     }
   });
 
-  it("strictly forbids loading real evals/.env during tests", async () => {
+  it("strictly forbids loading real .env during tests", async () => {
     const repoRoot = process.cwd();
-    const realEnvPath = join(repoRoot, "evals", ".env");
+    const realEnvPath = join(repoRoot, ".env");
     await expect(loadGuardedCredentials(realEnvPath, repoRoot)).rejects.toThrow(
-      /Tests must NEVER load the real evals\/\.env file/,
+      /Tests must NEVER load the real \.env file/,
     );
   });
 });

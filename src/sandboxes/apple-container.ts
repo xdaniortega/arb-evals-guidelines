@@ -7,7 +7,7 @@
  *   `container list` has no label filter and a pattern sweep would be able to destroy a
  *   resource this run never created, so nothing here ever enumerates.
  * - **The image lock is load-bearing.** A tag is mutable, so `buildImage` verifies the
- *   allowlisted build context against evals/container/image-lock.json, builds, and then
+ *   allowlisted build context against container/image-lock.json, builds, and then
  *   resolves a real content-addressed digest with `container image inspect`. Both arms
  *   of a pair run from that one digest, and `createGuest` re-reads the digest the
  *   runtime actually started so "same image" is observed rather than assumed.
@@ -428,7 +428,7 @@ async function loadLockedProfile(contextDir: string, runtimeProfileId: string): 
     if (actual !== digest) {
       throw new EvalError(
         "evidence-invalid",
-        `build-context file ${name} does not match evals/container/image-lock.json (locked ${digest}, found ${actual}); update the lock deliberately`,
+        `build-context file ${name} does not match container/image-lock.json (locked ${digest}, found ${actual}); update the lock deliberately`,
         { at: name },
       );
     }
@@ -504,7 +504,7 @@ async function loadLockedProfile(contextDir: string, runtimeProfileId: string): 
     throw new EvalError("evidence-invalid", "image lock guest runtime file set is not exactly the artifact lock closure", { at: guestRuntime.artifactLock });
   }
 
-  const repositoryRoot = join(contextDir, "..", "..");
+  const repositoryRoot = join(contextDir, "..");
   const compilerPackage = parseJson(
     "node_modules/typescript/package.json",
     await readFile(join(repositoryRoot, "node_modules", "typescript", "package.json"), "utf8"),
@@ -513,7 +513,7 @@ async function loadLockedProfile(contextDir: string, runtimeProfileId: string): 
     throw new EvalError("evidence-invalid", `locked guest compiler ${String(guestRuntime.compiler.version)} is not installed`, { at: "typescript" });
   }
   for (const [sourcePath, digest] of Object.entries(guestRuntime.sources)) {
-    if (!/^evals\/src\/[A-Za-z0-9_./-]+\.ts$/.test(sourcePath) || typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+    if (!/^src\/[A-Za-z0-9_./-]+\.ts$/.test(sourcePath) || typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
       throw new EvalError("evidence-invalid", `guest runtime has an invalid source lock for ${sourcePath}`, { at: sourcePath });
     }
     const sourceBytes = await readFile(join(repositoryRoot, sourcePath)).catch(() => null);

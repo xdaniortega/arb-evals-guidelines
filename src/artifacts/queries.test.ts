@@ -44,8 +44,8 @@ import {
 } from "./queries.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
-const evalsRoot = join(repoRoot, "evals");
+const repoRoot = resolve(here, "..", "..");
+const evalsRoot = repoRoot;
 
 const workDirs: string[] = [];
 const tempRoots: string[] = [];
@@ -682,7 +682,7 @@ describe("inspect", () => {
 
   it("executes --view condition through the real inspect CLI", async () => {
     const result = await sealRun();
-    const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
+    const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
     const stdout = execFileSync(
       process.execPath,
       ["--experimental-strip-types", inspectScript, "--receipt", result.receiptPath, "--condition", "baseline", "--view", "condition"],
@@ -782,7 +782,7 @@ describe("inspect", () => {
       "candidate",
     ];
 
-    const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
+    const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
     const stdout = execFileSync(
       process.execPath,
       ["--experimental-strip-types", inspectScript, ...cmdArgs],
@@ -826,7 +826,7 @@ describe("inspect", () => {
       "candidate",
     ];
 
-    const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
+    const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
     const stdout = execFileSync(
       process.execPath,
       ["--experimental-strip-types", inspectScript, ...cmdArgs],
@@ -867,7 +867,7 @@ describe("inspect", () => {
       "candidate",
     ];
 
-    const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
+    const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
     const stdout = execFileSync(
       process.execPath,
       ["--experimental-strip-types", inspectScript, ...cmdArgs],
@@ -944,7 +944,7 @@ describe("inspect", () => {
     const pair1Id = report.pairs[0]!.pairId;
     const pair2Id = report.pairs[1]!.pairId;
 
-    const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
+    const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
 
     // Inspect pair-1 explicitly
     const stdoutPair1 = execFileSync(
@@ -998,7 +998,7 @@ async function sealCustomRun(options: {
 }): Promise<RunResult> {
   const workDir = await mkdtemp(join(tmpdir(), "eval-query-work-"));
   workDirs.push(workDir);
-  const runsRoot = join(options.runsBaseDir, "cases", options.namespace, "runs");
+  const runsRoot = join(options.runsBaseDir, "eval-cases", "skill-a", options.namespace, "runs");
   return runPairedEvaluation({
     evalsRoot,
     repoRoot,
@@ -1064,13 +1064,13 @@ describe("latest run resolver", () => {
 
     // Alphabetical enumeration visits "alpha-ns" first:
     const history = await listRunHistory(fakeEvalsRoot);
-    expect(history[0]!.namespace).toBe("alpha-ns");
+    expect(history[0]!.namespace).toBe("skill-a/alpha-ns");
     expect(history[0]!.runId).toBe(runA.runId);
 
     // resolveLatestRun MUST pick run B because 12:00:00 > 10:00:00
     const latest1 = await resolveLatestRun(fakeEvalsRoot);
     expect(latest1.runId).toBe(runB.runId);
-    expect(latest1.namespace).toBe("zeta-ns");
+    expect(latest1.namespace).toBe("skill-a/zeta-ns");
 
     // Add Run C in "alpha-ns" created at 14:00:00 (even later)
     const runC = await sealCustomRun({
@@ -1082,7 +1082,7 @@ describe("latest run resolver", () => {
 
     const latest2 = await resolveLatestRun(fakeEvalsRoot);
     expect(latest2.runId).toBe(runC.runId);
-    expect(latest2.namespace).toBe("alpha-ns");
+    expect(latest2.namespace).toBe("skill-a/alpha-ns");
   });
 
   it("rejects an ambiguous newest run retained at canonical and historical paths", async () => {
@@ -1180,7 +1180,7 @@ describe("latest run resolver", () => {
 
     // Newer incomplete run (directory exists with timestamp 12:00:00 but no receipt.json)
     const incompleteRunId = "20260907T120000Z-incomplete";
-    const incompleteRunDir = join(fakeEvalsRoot, "cases", "ns-1", "runs", incompleteRunId);
+    const incompleteRunDir = join(fakeEvalsRoot, "eval-cases", "skill-a", "ns-1", "runs", incompleteRunId);
     await mkdir(incompleteRunDir, { recursive: true });
 
     // resolveLatestRun MUST surface the incomplete run rather than falling back to olderRun
@@ -1264,8 +1264,8 @@ describe("latest run resolver", () => {
   });
 
   it("rejects --latest combined with --receipt in inspect and history CLIs", () => {
-    const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
-    const historyScript = resolve(repoRoot, "evals/scripts/history.ts");
+    const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
+    const historyScript = resolve(repoRoot, "scripts/history.ts");
 
     expect(() =>
       execFileSync(
@@ -1303,7 +1303,7 @@ describe("latest run resolver", () => {
   describe("isolated synthetic case CLI execution", () => {
     const nonce = randomBytes(4).toString("hex");
     const syntheticCase = `query-latest-${nonce}`;
-    const syntheticDir = join(evalsRoot, "cases", syntheticCase);
+    const syntheticDir = join(evalsRoot, "eval-cases", "arbitrum-docs", syntheticCase);
     const syntheticStateDir = join(tmpdir(), `eval-latest-state-${nonce}`);
     const cleanupExit = (): void => {
       rmSync(syntheticDir, { recursive: true, force: true });
@@ -1314,10 +1314,10 @@ describe("latest run resolver", () => {
       process.once("exit", cleanupExit);
       try {
         await mkdir(syntheticDir, { recursive: true });
-        await cp(join(evalsRoot, "cases", "network-config-01", "fixture"), join(syntheticDir, "fixture"), { recursive: true });
-        await cp(join(evalsRoot, "cases", "network-config-01", "oracle.json"), join(syntheticDir, "oracle.json"));
-        await cp(join(evalsRoot, "cases", "network-config-01", "validator.ts"), join(syntheticDir, "validator.ts"));
-        const caseConfig = JSON.parse(await readFile(join(evalsRoot, "cases", "network-config-01", "case.json"), "utf8")) as Record<string, unknown>;
+        await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "fixture"), join(syntheticDir, "fixture"), { recursive: true });
+        await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "oracle.json"), join(syntheticDir, "oracle.json"));
+        await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "validator.ts"), join(syntheticDir, "validator.ts"));
+        const caseConfig = JSON.parse(await readFile(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "case.json"), "utf8")) as Record<string, unknown>;
         caseConfig.id = syntheticCase;
         await writeFile(join(syntheticDir, "case.json"), JSON.stringify(caseConfig, null, 2), "utf8");
 
@@ -1359,7 +1359,7 @@ describe("latest run resolver", () => {
     });
 
     it("inspects latest run with first-pair default and visible run and pair IDs in output", () => {
-      const inspectScript = resolve(repoRoot, "evals/scripts/inspect.ts");
+      const inspectScript = resolve(repoRoot, "scripts/inspect.ts");
 
       // Inspect with --latest, omitting --pair (defaults to first pair)
       const stdout = execFileSync(
@@ -1381,7 +1381,7 @@ describe("latest run resolver", () => {
     });
 
     it("executes eval:history --latest against retained runs", () => {
-      const historyScript = resolve(repoRoot, "evals/scripts/history.ts");
+      const historyScript = resolve(repoRoot, "scripts/history.ts");
 
       const stdoutTable = execFileSync(
         process.execPath,

@@ -88,7 +88,7 @@ export interface RunJournalOptions {
   readonly nonce: string;
 }
 
-/** `evals/.state` is generated, git-ignored, and owner-only. */
+/** `.state` is generated, git-ignored, and owner-only. */
 export async function ensureStateDir(stateDir: string): Promise<string> {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   return stateDir;

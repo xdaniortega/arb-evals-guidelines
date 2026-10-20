@@ -45,7 +45,7 @@ import { createInProcessValidatorRunner } from "./validation.ts";
 import { installTestGuards } from "../test-guards.ts";
 
 const repoRoot = process.cwd();
-const evalsRoot = join(repoRoot, "evals");
+const evalsRoot = repoRoot;
 
 describe("Native session provenance, redaction, and retention regression (L1)", () => {
   let tempDirs: string[] = [];

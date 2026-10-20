@@ -359,7 +359,7 @@ describe("deterministic cleanup-failure injection", () => {
 
 /**
  * The double must satisfy exactly the same behavioural suite as the real Apple Container
- * sandbox (evals/src/sandboxes/apple-container.test.ts). If it ever stops doing so, it
+ * sandbox (src/sandboxes/apple-container.test.ts). If it ever stops doing so, it
  * has stopped standing in for anything.
  */
 defineSandboxConformance({

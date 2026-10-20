@@ -3,10 +3,10 @@
  *
  * Thin composition entrypoint only: it parses argv at the process boundary, calls the
  * runner preflight, prints its report, and sets the exit code. All policy lives in
- * evals/src/runner/preflight.ts.
+ * src/runner/preflight.ts.
  *
  * It makes no network request, creates no guest, reads no credential, and never opens
- * evals/.env.
+ * .env.
  */
 
 import { dirname, resolve } from "node:path";
@@ -49,6 +49,7 @@ async function main(): Promise<number> {
   const evalsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const report = await preflightInputs({
     evalsRoot,
+    repoRoot: evalsRoot,
     suiteId: args.suiteId,
     caseSelector: args.caseSelector,
     skillPath: args.skillPath,

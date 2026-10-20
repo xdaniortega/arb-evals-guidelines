@@ -27,8 +27,8 @@ import type { RunResult } from "./run.ts";
 import { findRunDirectory, formatRecoveryResult, recoverRun } from "./recover.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
-const evalsRoot = join(repoRoot, "evals");
+const repoRoot = resolve(here, "..", "..");
+const evalsRoot = repoRoot;
 
 const workDirs: string[] = [];
 const tempRoots: string[] = [];
@@ -256,11 +256,11 @@ describe("exact-ID recovery", () => {
   it("discovers historical runs and rejects ambiguous identifiers", async () => {
     const root = await mkdtemp(join(tmpdir(), "eval-recover-layouts-"));
     tempRoots.push(root);
-    await mkdir(join(root, "cases", "new-case", "runs", "new-run"), { recursive: true });
+    await mkdir(join(root, "eval-cases", "skill-a", "new-case", "runs", "new-run"), { recursive: true });
     await mkdir(join(root, "old-case", "runs", "old-run"), { recursive: true });
-    await mkdir(join(root, "cases", "new-case", "runs", "same-run"), { recursive: true });
+    await mkdir(join(root, "eval-cases", "skill-a", "new-case", "runs", "same-run"), { recursive: true });
     await mkdir(join(root, "old-case", "runs", "same-run"), { recursive: true });
-    await expect(findRunDirectory(root, "new-run")).resolves.toBe(join(root, "cases", "new-case", "runs", "new-run"));
+    await expect(findRunDirectory(root, "new-run")).resolves.toBe(join(root, "eval-cases", "skill-a", "new-case", "runs", "new-run"));
     await expect(findRunDirectory(root, "old-run")).resolves.toBe(join(root, "old-case", "runs", "old-run"));
     await expect(findRunDirectory(root, "same-run")).rejects.toThrow(/ambiguous/);
   });

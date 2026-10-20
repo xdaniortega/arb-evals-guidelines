@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import ts from "typescript";
 
-const root = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "");
-const canonicalOutputRoot = join(root, "evals/container/guest-runtime");
+const root = fileURLToPath(new URL("../", import.meta.url)).replace(/\/$/, "");
+const canonicalOutputRoot = join(root, "container/guest-runtime");
 const args = process.argv.slice(2);
 const check = args[0] === "--check";
 const outputArgs = check ? args.slice(1) : args;
@@ -19,27 +19,27 @@ const outputRoot = outputArgs.length === 0 ? canonicalOutputRoot : resolve(outpu
 // An explicit output directory is a standalone build: never change the repository's lock.
 const maintainImageLock = outputArgs.length === 0;
 const sources = [
-  "evals/src/core/types.ts",
-  "evals/src/core/timing.ts",
-  "evals/src/core/experiment.ts",
-  "evals/src/core/secret-scan.ts",
-  "evals/src/transport-blocker.ts",
-  "evals/src/runner/models.ts",
-  "evals/src/artifacts/native-prefix.ts",
-  "evals/src/harnesses/pi/export-viewer.ts",
-  "evals/src/harnesses/pi/scripted-stream.ts",
-  "evals/src/harnesses/pi/mcp-http-client.ts",
-  "evals/src/harnesses/pi/mcp-tools.ts",
-  "evals/src/harnesses/pi/sdk-session.ts",
-  "evals/src/harnesses/pi/terminal-classification.ts",
-  "evals/src/harnesses/pi/guest-agent.ts",
+  "src/core/types.ts",
+  "src/core/timing.ts",
+  "src/core/experiment.ts",
+  "src/core/secret-scan.ts",
+  "src/transport-blocker.ts",
+  "src/runner/models.ts",
+  "src/artifacts/native-prefix.ts",
+  "src/harnesses/pi/export-viewer.ts",
+  "src/harnesses/pi/scripted-stream.ts",
+  "src/harnesses/pi/mcp-http-client.ts",
+  "src/harnesses/pi/mcp-tools.ts",
+  "src/harnesses/pi/sdk-session.ts",
+  "src/harnesses/pi/terminal-classification.ts",
+  "src/harnesses/pi/guest-agent.ts",
 ];
 const expectedCompiler = "5.9.3";
 if (ts.version !== expectedCompiler) throw new Error(`guest runtime requires TypeScript ${expectedCompiler}, found ${ts.version}`);
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const generatedFiles = new Set([
   "artifact-lock.json",
-  ...sources.map((sourcePath) => relative("evals", sourcePath).replace(/\.ts$/, ".mjs")),
+  ...sources.map((sourcePath) => sourcePath.replace(/\.ts$/, ".mjs")),
 ]);
 const generatedDirectories = new Set();
 for (const file of generatedFiles) {
@@ -96,7 +96,7 @@ for (const sourcePath of sources) {
   });
   const errors = (result.diagnostics ?? []).filter((item) => item.category === ts.DiagnosticCategory.Error);
   if (errors.length > 0) throw new Error(ts.formatDiagnostics(errors, { getCanonicalFileName: (v) => v, getCurrentDirectory: () => root, getNewLine: () => "\n" }));
-  const relativeSource = relative("evals", sourcePath);
+  const relativeSource = sourcePath;
   const outputPath = relativeSource.replace(/\.ts$/, ".mjs");
   const compiled = result.outputText.replace(/(["'])(\.{1,2}\/[^"']+)\.ts\1/g, "$1$2.mjs$1");
   compiledFiles.set(outputPath, compiled);
@@ -111,7 +111,7 @@ const manifest = {
 const artifactLockText = `${JSON.stringify(manifest, null, 2)}\n`;
 compiledFiles.set("artifact-lock.json", artifactLockText);
 
-const imageLockPath = join(root, "evals/container/image-lock.json");
+const imageLockPath = join(root, "container/image-lock.json");
 let imageLock;
 let updatedImageLock;
 if (maintainImageLock) {
@@ -125,7 +125,7 @@ if (maintainImageLock) {
     throw new Error("image-lock.json has an unexpected static build-context file set; review it before refreshing hashes");
   }
   const contextDigests = {};
-  for (const path of staticContextFiles) contextDigests[path] = `sha256:${sha256(await readFile(join(root, "evals/container", path)))}`;
+  for (const path of staticContextFiles) contextDigests[path] = `sha256:${sha256(await readFile(join(root, "container", path)))}`;
   profile.buildContextFiles = {
     ...contextDigests,
     "guest-runtime/artifact-lock.json": `sha256:${sha256(artifactLockText)}`,

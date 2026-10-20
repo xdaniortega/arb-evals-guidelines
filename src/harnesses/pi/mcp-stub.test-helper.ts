@@ -2,7 +2,7 @@
  * Scripted loopback MCP server stub for test isolation.
  *
  * Test-helper only: bound to 127.0.0.1:0.
- * MUST NOT be included in the guest runtime closure (evals/scripts/build-guest-runtime.mjs).
+ * MUST NOT be included in the guest runtime closure (scripts/build-guest-runtime.mjs).
  */
 
 import http from "node:http";

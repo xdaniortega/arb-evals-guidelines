@@ -387,12 +387,50 @@ async function directoryEntries(path: string): Promise<readonly string[]> {
     .sort();
 }
 
+/** Repository-root directories that are never legacy suites. */
+const LEGACY_SCAN_SKIP: ReadonlySet<string> = new Set([
+  "src", "scripts", "container", "cases", "eval-cases", "node_modules", "arbitrum-skill-evals", "dist", "docs",
+]);
+
+/** Directory holding authored cases as `eval-cases/<skill>/<case-id>/`. */
+export const EVAL_CASES_DIR = "eval-cases";
+
+export interface CaseDirectory {
+  readonly skill: string;
+  readonly caseId: string;
+  readonly dir: string;
+}
+
+/**
+ * @notice Lists `eval-cases/<skill>/<case-id>` directories (real directories only, no symlinks).
+ * @param evalsRoot Repository root.
+ * @returns Case directories sorted by skill then case id; empty when `eval-cases` is absent.
+ */
+export async function listCaseDirectories(evalsRoot: string): Promise<readonly CaseDirectory[]> {
+  const casesRoot = join(evalsRoot, EVAL_CASES_DIR);
+  const found: CaseDirectory[] = [];
+  if (!(await assertRealDirectory(casesRoot, EVAL_CASES_DIR, { allowMissing: true }))) return found;
+  let skills: readonly string[];
+  try {
+    skills = await directoryEntries(casesRoot);
+  } catch (cause: unknown) {
+    throw new EvalError("input-invalid", `${EVAL_CASES_DIR} is not readable: ${casesRoot}`, { at: EVAL_CASES_DIR, cause });
+  }
+  for (const skill of skills) {
+    const skillDir = containedPath(casesRoot, skill, `${EVAL_CASES_DIR}/${skill}`);
+    for (const caseId of await directoryEntries(skillDir)) {
+      found.push({ skill, caseId, dir: containedPath(skillDir, caseId, `${EVAL_CASES_DIR}/${skill}/${caseId}`) });
+    }
+  }
+  return found;
+}
+
 export async function discoverSuites(evalsRoot: string, options?: DecodeConfigOptions): Promise<readonly SuiteRef[]> {
   const suites: SuiteRef[] = [];
   const seenIds = new Set<string>();
   for (const name of await directoryEntries(evalsRoot)) {
-    if (name === "src" || name === "scripts" || name === "container" || name === "cases") continue;
-    const dir = containedPath(evalsRoot, name, `evals/${name}`);
+    if (LEGACY_SCAN_SKIP.has(name)) continue;
+    const dir = containedPath(evalsRoot, name, name);
     const configPath = join(dir, "eval.json");
     const exists = await lstat(configPath).then((stats) => stats.isFile()).catch(() => false);
     if (!exists) continue;
@@ -440,28 +478,25 @@ export async function discoverCases(suite: SuiteRef, options?: DecodeConfigOptio
   return [...found].sort((left, right) => (left.selector < right.selector ? -1 : 1));
 }
 
-/** One authored task per evals/cases/<case-id>/case.json, independent of any skill setup. */
+/** One authored task per eval-cases/<skill>/<case-id>/case.json; case ids are unique across skills. */
 export async function discoverAuthoredCases(evalsRoot: string, options?: DecodeConfigOptions): Promise<readonly CaseRef[]> {
   const cases: CaseRef[] = [];
-  const casesRoot = join(evalsRoot, "cases");
-  if (!(await assertRealDirectory(casesRoot, "evals/cases", { allowMissing: true }))) return cases;
-  let names: readonly string[];
-  try {
-    names = await directoryEntries(casesRoot);
-  } catch (cause: unknown) {
-    throw new EvalError("input-invalid", `evals/cases is not readable: ${casesRoot}`, { at: "evals/cases", cause });
-  }
-  for (const name of names) {
-    const dir = containedPath(casesRoot, name, `evals/cases/${name}`);
+  const seen = new Map<string, string>();
+  for (const { skill, caseId, dir } of await listCaseDirectories(evalsRoot)) {
     const configPath = join(dir, "case.json");
     const exists = await lstat(configPath).then(() => true).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return false;
       throw error;
     });
     if (!exists) continue;
-    const at = `evals/cases/${name}/case.json`;
+    const at = `${EVAL_CASES_DIR}/${skill}/${caseId}/case.json`;
     const config = decodeFreshCaseConfig(await readJsonFile(configPath, at), at, options);
-    if (config.id !== name) throw new EvalError("input-invalid", `${at} id must equal its directory name`, { at });
+    if (config.id !== caseId) throw new EvalError("input-invalid", `${at} id must equal its directory name`, { at });
+    const previous = seen.get(config.id);
+    if (previous !== undefined) {
+      throw new EvalError("input-invalid", `duplicate case id ${config.id}: ${previous} and ${at}`, { at });
+    }
+    seen.set(config.id, at);
     cases.push({ suiteId: config.id, selector: config.id, dir, config });
   }
   return cases;
@@ -489,7 +524,7 @@ export async function resolveSetupSuites(input: SetupSelection, options?: Decode
   }
   if (input.skillPath != null) {
     const skillPath = assertSafeRelativePath(input.skillPath, "--skill");
-    const repoRoot = input.repoRoot ?? dirname(input.evalsRoot);
+    const repoRoot = input.repoRoot ?? input.evalsRoot;
     await assertNoSymlinkedAncestor(repoRoot, skillPath, "--skill");
     const skillRoot = containedPath(repoRoot, skillPath, "--skill");
     await assertRealDirectory(skillRoot, "--skill");

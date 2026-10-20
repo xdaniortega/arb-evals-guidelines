@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { validateSnapshot } from "../../cases/network-config-01/validator.ts";
+import { validateSnapshot } from "../../eval-cases/arbitrum-docs/network-config-01/validator.ts";
 import { EvalError } from "../core/types.ts";
 import { ACCURACY_GROUPS, decodeRubric, isRubricScore, scoreWithRubric } from "./rubric.ts";
 
 const NETWORK_CONFIG_01_RUBRIC_PATH = fileURLToPath(
-  new URL("../../cases/network-config-01/rubric.json", import.meta.url),
+  new URL("../../eval-cases/arbitrum-docs/network-config-01/rubric.json", import.meta.url),
 );
 
 // Outcome 50 + 30 = 80, constraints 20.
@@ -179,7 +179,7 @@ describe("rubric v0.2 scoring and validation", () => {
 
     it("pins the scoring endpoints of the real network-config-01 rubric", async () => {
       const json = JSON.parse(await readFile(NETWORK_CONFIG_01_RUBRIC_PATH, "utf8")) as unknown;
-      const rubric = decodeRubric(json, "evals/cases/network-config-01/rubric.json");
+      const rubric = decodeRubric(json, "eval-cases/arbitrum-docs/network-config-01/rubric.json");
       expect(rubric.rubricVersion).toBe("v0.2");
       expect(rubric.display).toEqual({
         title: "network configuration migration",

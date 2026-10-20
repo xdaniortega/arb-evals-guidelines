@@ -3,12 +3,12 @@
  *
  * Thin composition entrypoint only: it parses argv at the process boundary, constructs
  * the resolved values the runner needs, and prints the result. Every policy, algorithm,
- * ordering rule, and failure classification lives in evals/src/runner/run.ts.
+ * ordering rule, and failure classification lives in src/runner/run.ts.
  *
  * Credential loading happens strictly at this process boundary only when `--harness pi`
  * is selected, via the gated loader that enforces Git-ignore and never mutates
  * `process.env`. When `--mode fake` is selected, no credential is read
- * and evals/.env is never opened.
+ * and .env is never opened.
  */
 
 import { randomBytes } from "node:crypto";
@@ -405,7 +405,7 @@ export async function runCli(
   }
   const boundaryController = new AbortController();
   const evalsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const repoRoot = resolve(evalsRoot, "..");
+  const repoRoot = evalsRoot;
   const now = new Date();
   const runId = runIdFor(now, randomBytes(4).toString("hex"));
   let workDir = "";

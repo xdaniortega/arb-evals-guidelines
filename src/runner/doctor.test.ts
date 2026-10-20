@@ -35,7 +35,7 @@ async function syntheticSetup(credentials: string): Promise<{ repoRoot: string; 
     writeFile(join(repoRoot, ".gitignore"), "/setup/.env\n"),
     writeFile(join(evalsRoot, ".env"), credentials),
     ...["Containerfile", "image-lock.json"].map((name) => copyFile(
-      join(process.cwd(), "evals", "container", name), join(evalsRoot, "container", name),
+      join(process.cwd(), "container", name), join(evalsRoot, "container", name),
     )),
   ]);
   execFileSync("git", ["init", "-q", repoRoot], { env: buildAllowlistedEnv(repoRoot), stdio: "pipe" });
@@ -44,7 +44,7 @@ async function syntheticSetup(credentials: string): Promise<{ repoRoot: string; 
 
 describe("no-request readiness doctor", () => {
   it("runs readiness doctor and structurally guarantees 0 provider requests", async () => {
-    const evalsRoot = `${process.cwd()}/evals`;
+    const evalsRoot = process.cwd();
     const repoRoot = process.cwd();
 
     const report = await runReadinessDoctor({
@@ -84,11 +84,11 @@ describe("no-request readiness doctor", () => {
     // `npm install -g @earendil-works/pi-coding-agent@0.85.0`, so adding npm's
     // `--save-exact` flag to the Containerfile made a correctly pinned image report
     // NOT READY and skipped guest readiness behind it.
-    const containerfile = await readFile(`${process.cwd()}/evals/container/Containerfile`, "utf8");
+    const containerfile = await readFile(`${process.cwd()}/container/Containerfile`, "utf8");
     expect(containerfile).toMatch(/npm install -g[^\n]*@earendil-works\/pi-coding-agent@0\.85\.0/);
 
     const report = await runReadinessDoctor({
-      evalsRoot: `${process.cwd()}/evals`,
+      evalsRoot: process.cwd(),
       repoRoot: process.cwd(),
       skipGuestReadiness: true,
     });

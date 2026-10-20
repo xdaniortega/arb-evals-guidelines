@@ -73,8 +73,8 @@ describe("startup deadline and image build", () => {
 import type { RunOptions, RunResult } from "./run.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
-const evalsRoot = join(repoRoot, "evals");
+const repoRoot = resolve(here, "..", "..");
+const evalsRoot = repoRoot;
 const SUITE = "network-config-01";
 const CASE = "network-config-01";
 
@@ -101,9 +101,9 @@ interface Harnessed {
 async function createTempEvalsRootWithRubric(rubric: unknown): Promise<string> {
   const tempEvals = await mkdtemp(join(tmpdir(), "eval-rubric-evals-"));
   tempRoots.push(tempEvals);
-  const sourceCaseDir = join(evalsRoot, "cases", "network-config-01");
-  const targetCaseDir = join(tempEvals, "cases", "network-config-01");
-  await mkdir(join(tempEvals, "cases"), { recursive: true });
+  const sourceCaseDir = join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01");
+  const targetCaseDir = join(tempEvals, "eval-cases", "arbitrum-docs", "network-config-01");
+  await mkdir(join(tempEvals, "eval-cases", "arbitrum-docs"), { recursive: true });
   await cp(sourceCaseDir, targetCaseDir, {
     recursive: true,
     filter: (src) => relative(sourceCaseDir, src).split(sep)[0] !== "runs",

@@ -242,7 +242,7 @@ const composition: TestOnlyRunComposition = {
   testOnly: true,
   guardedSecrets: [{ label: "GEMINI_API_KEY", value: secret }],
   credentials: [{ variable: "GEMINI_API_KEY", value: secret }],
-  stateDir: join(process.cwd(), "evals", ".state", suiteId),
+  stateDir: join(process.cwd(), ".state", suiteId),
   ...(preparer === undefined ? {} : { preparer }),
   ...(fault === "export" ? { faults: { simulateSurvivingSecretHit: true } } : {}),
   ...(timingEnabled ? { onProgress: (event: RunProgressEvent) => progress.push(event) } : {}),

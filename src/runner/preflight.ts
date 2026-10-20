@@ -8,7 +8,7 @@
  * checks must run before any paid dispatch in a later phase.
  *
  * It performs no network access, creates no guest, reads no credential, and never
- * touches evals/.env: it only reads the suite data that is already in the repository.
+ * touches .env: it only reads the suite data that is already in the repository.
  */
 
 import { EvalError, toStructuredFailure } from "../core/types.ts";

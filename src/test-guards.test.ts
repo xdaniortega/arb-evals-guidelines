@@ -196,11 +196,11 @@ describe("zero-paid-call test guards", () => {
     });
   });
 
-  it("forbids loading the real evals/.env file during tests", async () => {
+  it("forbids loading the real .env file during tests", async () => {
     const repoRoot = process.cwd();
-    const realEnvPath = resolve(repoRoot, "evals", ".env");
+    const realEnvPath = resolve(repoRoot, ".env");
     await expect(loadGuardedCredentials(realEnvPath, repoRoot)).rejects.toThrow(
-      /Tests must NEVER load the real evals\/\.env file/,
+      /Tests must NEVER load the real \.env file/,
     );
   });
 
@@ -554,7 +554,7 @@ main().catch((err) => {
   });
 
   it("keeps the fail-closed transport guard active in the image-resident SDK process", async () => {
-    const supervisorPath = join(process.cwd(), "evals", "container", "run-measured.mjs");
+    const supervisorPath = join(process.cwd(), "container", "run-measured.mjs");
     const tempDir = mkdtempSync(join(tmpdir(), "guest-sdk-guard-"));
     const socketPath = join(tempDir, "control.sock");
     const server = createServer((socket) => {

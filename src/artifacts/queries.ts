@@ -30,7 +30,7 @@ import {
 } from "../core/experiment.ts";
 import type { ConditionGrade, ManifestEntry, PairDelta, Target } from "../core/experiment.ts";
 import { decodePartialLimits, EvalError, LIMIT_KEYS, STOP_CAUSES } from "../core/types.ts";
-import { assertRealDirectory } from "../runner/case-loader.ts";
+import { EVAL_CASES_DIR, listCaseDirectories } from "../runner/case-loader.ts";
 import type { CandidateMode, ConditionId, PartialLimits, StopCause, StructuredFailure, ValidationOutcome } from "../core/types.ts";
 import type { NormalizedMessage, NormalizedToolStep } from "../harnesses/harness.ts";
 import { MANIFEST_FILE, RECEIPT_FILE, VIEWS_DIR, isChainExcludedPath } from "./store.ts";
@@ -2543,28 +2543,23 @@ export interface HistoryEntry {
  * @returns History entries retaining the exact on-disk run and receipt paths.
  */
 export async function listRunHistory(evalsRoot: string): Promise<readonly HistoryEntry[]> {
-  const canonicalRoot = resolve(evalsRoot, "cases");
-  const legacyRoot = resolve(evalsRoot);
-  const roots = [canonicalRoot, legacyRoot];
+  const namespaces: { name: string; base: string }[] = (await listCaseDirectories(evalsRoot)).map((entry) => ({
+    name: `${entry.skill}/${entry.caseId}`,
+    base: entry.dir,
+  }));
+  // Historical namespaces: <root>/<namespace>/runs, never inside eval-cases.
+  const legacyEntries = await readdir(resolve(evalsRoot), { withFileTypes: true }).catch((cause: NodeJS.ErrnoException) => {
+    throw new EvalError("evidence-invalid", `evidence namespace root is not readable: ${evalsRoot}`, { at: evalsRoot, cause });
+  });
+  for (const entry of legacyEntries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".") || entry.name === EVAL_CASES_DIR) continue;
+    namespaces.push({ name: entry.name, base: join(resolve(evalsRoot), entry.name) });
+  }
   const result: HistoryEntry[] = [];
   const seenRuns = new Set<string>();
-  for (const root of roots) {
-    if (root === canonicalRoot) {
-      try {
-        if (!(await assertRealDirectory(root, root, { allowMissing: true }))) continue;
-      } catch (error) {
-        if (error instanceof EvalError && error.code === "path-unsafe") throw error;
-        throw new EvalError("evidence-invalid", `evidence namespace root is not readable: ${root}`, { at: root, cause: error });
-      }
-    }
-    const namespaces = await readdir(root, { withFileTypes: true }).catch((cause: NodeJS.ErrnoException) => {
-      if (root !== resolve(evalsRoot) && cause.code === "ENOENT") return [];
-      throw new EvalError("evidence-invalid", `evidence namespace root is not readable: ${root}`, { at: root, cause });
-    });
-    for (const namespace of namespaces.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!namespace.isDirectory() || namespace.isSymbolicLink() || namespace.name.startsWith(".")) continue;
-    if (root === resolve(evalsRoot) && namespace.name === "cases") continue;
-    const runsDir = join(root, namespace.name, "runs");
+  {
+    for (const namespace of namespaces) {
+    const runsDir = join(namespace.base, "runs");
     const runsStat = await lstat(runsDir).catch(() => null);
     if (runsStat === null || !runsStat.isDirectory() || runsStat.isSymbolicLink()) continue;
     const runs = await readdir(runsDir, { withFileTypes: true }).catch(() => []);

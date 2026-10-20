@@ -71,7 +71,7 @@ describe("terminal classification", () => {
   }
 
   it("matches the generated guest classifier", async () => {
-    const guestPath = join(process.cwd(), "evals/container/guest-runtime/src/harnesses/pi/terminal-classification.mjs");
+    const guestPath = join(process.cwd(), "container/guest-runtime/src/harnesses/pi/terminal-classification.mjs");
     const guest = await import(pathToFileURL(guestPath).href) as {
       classifyTerminalState: typeof classifyTerminalState;
     };

@@ -18,7 +18,7 @@
 import { lstat, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { assertSafeRelativePath, buildManifestTree, canonicalJson, sha256Hex } from "../core/experiment.ts";
-import { assertRealDirectory } from "./case-loader.ts";
+import { EVAL_CASES_DIR, listCaseDirectories } from "./case-loader.ts";
 import type { ManifestEntry } from "../core/experiment.ts";
 import { EvalError, SCHEMA_VERSION, toStructuredFailure } from "../core/types.ts";
 import type { StructuredFailure } from "../core/types.ts";
@@ -54,31 +54,22 @@ export interface RecoveryResult {
  */
 export async function findRunDirectory(evalsRoot: string, runId: string): Promise<string> {
   const safeRunId = assertSafeRelativePath(runId, "--run");
-  const canonicalRoot = join(evalsRoot, "cases");
-  const roots = [canonicalRoot, evalsRoot];
   const matches: string[] = [];
-  for (const root of roots) {
-    if (root === canonicalRoot) {
-      try {
-        if (!(await assertRealDirectory(root, "--run", { allowMissing: true }))) continue;
-      } catch (error) {
-        if (error instanceof EvalError && error.code === "path-unsafe") throw error;
-        throw new EvalError("input-invalid", `evidence namespace root is not readable: ${root}`, { at: "--run", cause: error });
-      }
-    }
-    const entries = await readdir(root, { withFileTypes: true }).catch((cause: NodeJS.ErrnoException) => {
-      if (root !== evalsRoot && cause.code === "ENOENT") return [];
-      throw new EvalError("input-invalid", `evidence namespace root is not readable: ${root}`, { at: "--run", cause });
-    });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".") || (root === evalsRoot && entry.name === "cases")) continue;
-      const runsDir = join(root, entry.name, "runs");
-      const runsStats = await lstat(runsDir).catch(() => null);
-      if (runsStats === null || !runsStats.isDirectory() || runsStats.isSymbolicLink()) continue;
-      const candidate = join(runsDir, safeRunId);
-      const found = await lstat(candidate).then((stats) => stats.isDirectory() && !stats.isSymbolicLink()).catch(() => false);
-      if (found) matches.push(candidate);
-    }
+  const candidates: string[] = (await listCaseDirectories(evalsRoot)).map((entry) => join(entry.dir, "runs"));
+  // Legacy namespaces: <root>/<namespace>/runs, never inside eval-cases.
+  const legacy = await readdir(evalsRoot, { withFileTypes: true }).catch((cause: NodeJS.ErrnoException) => {
+    throw new EvalError("input-invalid", `evidence namespace root is not readable: ${evalsRoot}`, { at: "--run", cause });
+  });
+  for (const entry of legacy) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".") || entry.name === EVAL_CASES_DIR) continue;
+    candidates.push(join(evalsRoot, entry.name, "runs"));
+  }
+  for (const runsDir of candidates) {
+    const runsStats = await lstat(runsDir).catch(() => null);
+    if (runsStats === null || !runsStats.isDirectory() || runsStats.isSymbolicLink()) continue;
+    const candidate = join(runsDir, safeRunId);
+    const found = await lstat(candidate).then((stats) => stats.isDirectory() && !stats.isSymbolicLink()).catch(() => false);
+    if (found) matches.push(candidate);
   }
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) throw new EvalError("input-invalid", `run id ${safeRunId} is ambiguous across namespaces`, { at: "--run" });

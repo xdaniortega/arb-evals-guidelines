@@ -6,7 +6,7 @@
  * 1. Platform is Apple-silicon macOS (darwin arm64).
  * 2. Apple Container runtime is installed and running (`container system status`).
  * 3. Container image lock verifies and Pi is present at pinned version 0.85.0.
- * 4. Provider credential is present and non-blank in git-ignored evals/.env, WITHOUT printing or hashing it.
+ * 4. Provider credential is present and non-blank in git-ignored .env, WITHOUT printing or hashing it.
  * 5. Guest readiness: a credential-free guest starts, attests, and destroys cleanly.
  *
  * ZERO-REQUEST GUARANTEE: this doctor never sends a prompt or completion request. The guest
@@ -160,9 +160,9 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
     const value = getProviderCredential(provider, loaded.credentials);
     if (value !== null && value.length > 0) {
       credOk = true;
-      credDetail = `${PROVIDER_CREDENTIAL_VARIABLES[provider]} present for ${provider} / ${model} in git-ignored evals/.env (non-blank)`;
+      credDetail = `${PROVIDER_CREDENTIAL_VARIABLES[provider]} present for ${provider} / ${model} in git-ignored .env (non-blank)`;
     } else {
-      credDetail = `no non-blank ${PROVIDER_CREDENTIAL_VARIABLES[provider]} found for ${provider} / ${model} in evals/.env`;
+      credDetail = `no non-blank ${PROVIDER_CREDENTIAL_VARIABLES[provider]} found for ${provider} / ${model} in .env`;
     }
   } catch (error) {
     credDetail = `credential check for ${provider} / ${model} failed: ${error instanceof Error ? error.message : String(error)}`;

@@ -5,7 +5,7 @@
  * manifest. Only treatment receives those declared server seeds. Both arms share the same
  * callable MCP client and may connect to servers they discover independently. These declarations are host-side inputs, so this module deliberately lives
  * OUTSIDE the image-locked in-guest source closure listed in
- * `evals/scripts/build-guest-runtime.mjs` and imports nothing.
+ * `scripts/build-guest-runtime.mjs` and imports nothing.
  */
 
 /** Path, inside the frozen skill snapshot, of the skill's own agent tool manifest. */

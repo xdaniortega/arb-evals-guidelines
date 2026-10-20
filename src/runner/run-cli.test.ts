@@ -1,5 +1,5 @@
 /**
- * Tests for the CLI process boundary in evals/scripts/run.ts.
+ * Tests for the CLI process boundary in scripts/run.ts.
  *
  * Verifies that:
  * - `--harness fake|pi` is parsed at the process boundary.
@@ -18,7 +18,7 @@ import { buildAllowlistedEnv } from "../test-guards.ts";
 import { resolveTargetConfiguration } from "./models.ts";
 import { parseArgs } from "../../scripts/run.ts";
 
-const RUN_SCRIPT = resolve(process.cwd(), "evals/scripts/run.ts");
+const RUN_SCRIPT = resolve(process.cwd(), "scripts/run.ts");
 
 function runCli(
   args: readonly string[],
@@ -48,7 +48,7 @@ function runCli(
   }
 }
 
-describe("CLI process boundary (evals/scripts/run.ts)", () => {
+describe("CLI process boundary (scripts/run.ts)", () => {
   it("requires one explicit treatment skill and rejects duplicate or conflicting setup selectors", () => {
     for (const args of [
       ["--case", "network-config-01", "--mode", "fake"],

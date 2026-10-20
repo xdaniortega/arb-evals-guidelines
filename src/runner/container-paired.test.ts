@@ -12,7 +12,7 @@ import { sha256Hex } from "../core/experiment.ts";
 import { buildFreshBoundaryCommand } from "./container-paired-boundary.ts";
 
 const enabled = process.env.EVAL_CONTAINER_TESTS === "1";
-const evalsRoot = resolve(process.cwd(), "evals");
+const evalsRoot = process.cwd();
 const stateDir = join(evalsRoot, ".state");
 const childScript = resolve(evalsRoot, "src/runner/container-paired.test-child.ts");
 const reportScript = resolve(evalsRoot, "scripts/report.ts");
@@ -400,7 +400,7 @@ if (!enabled) {
       // shared immutable cache before taking the inventory that must stay unchanged.
       await createAppleContainerSandbox({ runId: `${suiteId}-image` }).buildImage({
         runtimeProfileId: "default",
-        contextDir: resolve("evals/container"),
+        contextDir: resolve("container"),
         signal: AbortSignal.timeout(150_000),
         deadlineAtMs: Date.now() + 150_000,
       });

@@ -51,11 +51,11 @@ function findAllMatches(content: string, regex: RegExp): RegExpExecArray[] {
 
 /**
  * Resolves the default repository root from the location of this module.
- * publish.ts lives at <repo>/evals/src/artifacts/publish.ts, so three parent
+ * publish.ts lives at <repo>/src/artifacts/publish.ts, so two parent
  * directory traversals yield the actual repository root.
  */
 export function resolveDefaultRepoRoot(): string {
-  return resolve(import.meta.dirname, "..", "..", "..");
+  return resolve(import.meta.dirname, "..", "..");
 }
 
 export interface DestinationResolutionInput {

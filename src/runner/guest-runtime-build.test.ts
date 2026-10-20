@@ -16,14 +16,14 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "eval-guest-lock-build-"));
   roots.push(root);
-  const container = join(root, "evals/container");
-  const script = join(root, "evals/scripts/build-guest-runtime.mjs");
+  const container = join(root, "container");
+  const script = join(root, "scripts/build-guest-runtime.mjs");
   await mkdir(dirname(script), { recursive: true });
   await mkdir(container, { recursive: true });
-  await cp(join(process.cwd(), "evals/src"), join(root, "evals/src"), { recursive: true });
-  await cp(join(process.cwd(), "evals/scripts/build-guest-runtime.mjs"), script);
+  await cp(join(process.cwd(), "src"), join(root, "src"), { recursive: true });
+  await cp(join(process.cwd(), "scripts/build-guest-runtime.mjs"), script);
   for (const name of [...staticFiles, "image-lock.json"]) {
-    await cp(join(process.cwd(), "evals/container", name), join(container, name));
+    await cp(join(process.cwd(), "container", name), join(container, name));
   }
   await symlink(join(process.cwd(), "node_modules"), join(root, "node_modules"), "dir");
   const run = (...args: string[]) => execFileSync(process.execPath, [script, ...args], {
@@ -60,7 +60,7 @@ describe("guest runtime lock maintenance", () => {
     expect(await readFile(join(container, "guest-runtime/artifact-lock.json"))).toEqual(artifactBytes);
 
     // A source edit must be detected before a stale runtime can be used, without repairing it.
-    const source = join(root, "evals/src/core/types.ts");
+    const source = join(root, "src/core/types.ts");
     await writeFile(source, `${await readFile(source, "utf8")}\n// changed source\n`);
     expect(() => run("--check")).toThrow(/Guest runtime locks are stale/);
     expect(await readFile(join(container, "image-lock.json"))).toEqual(lockBytes);
@@ -73,7 +73,7 @@ describe("guest runtime lock maintenance", () => {
     const { root, container, run, readJson } = await fixture();
     run();
     const lock = await readJson("image-lock.json");
-    lock.profiles.default.guestRuntime.sources["evals/src/core/types.ts"] = "sha256:stale";
+    lock.profiles.default.guestRuntime.sources["src/core/types.ts"] = "sha256:stale";
     lock.profiles.default.buildContextFiles.Containerfile = "sha256:stale";
     const staleLock = `${JSON.stringify(lock, null, 2)}\n`;
     await writeFile(join(container, "image-lock.json"), staleLock);

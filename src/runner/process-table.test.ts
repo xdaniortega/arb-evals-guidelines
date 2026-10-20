@@ -1,6 +1,6 @@
 /**
  * Process-level reporting and runner tests:
- * - Launches actual CLI entry points (evals/scripts/run.ts and evals/scripts/report.ts).
+ * - Launches actual CLI entry points (scripts/run.ts and scripts/report.ts).
  * - Captures BOTH stdout and stderr on success and failure.
  * - Asserts grouped pair rows with unique IDs and nine-column averages for repeated runs.
  * - Asserts byte-identical table output between run and report.
@@ -30,11 +30,11 @@ import { createFakeSandbox } from "../sandboxes/fake.ts";
 import { createInProcessValidatorRunner } from "./validation.ts";
 import { disposeRunWorkDir, runPairedEvaluation } from "./run.ts";
 
-const RUN_SCRIPT = resolve(process.cwd(), "evals/scripts/run.ts");
-const REPORT_SCRIPT = resolve(process.cwd(), "evals/scripts/report.ts");
-const VALIDATE_SCRIPT = resolve(process.cwd(), "evals/scripts/validate.ts");
-const DOCTOR_SCRIPT = resolve(process.cwd(), "evals/scripts/doctor.ts");
-const HISTORY_SCRIPT = resolve(process.cwd(), "evals/scripts/history.ts");
+const RUN_SCRIPT = resolve(process.cwd(), "scripts/run.ts");
+const REPORT_SCRIPT = resolve(process.cwd(), "scripts/report.ts");
+const VALIDATE_SCRIPT = resolve(process.cwd(), "scripts/validate.ts");
+const DOCTOR_SCRIPT = resolve(process.cwd(), "scripts/doctor.ts");
+const HISTORY_SCRIPT = resolve(process.cwd(), "scripts/history.ts");
 
 function runCommand(
   scriptPath: string,
@@ -494,7 +494,7 @@ describe("Process-level automatic table and report contract", () => {
       });
 
       const result = await runPairedEvaluation({
-        evalsRoot: resolve(process.cwd(), "evals"),
+        evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
         skillPath: "skills/arbitrum-docs",
@@ -1150,7 +1150,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
       const validatorRunner = createInProcessValidatorRunner();
 
       const result = await runPairedEvaluation({
-        evalsRoot: resolve(process.cwd(), "evals"),
+        evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
         skillPath: "skills/arbitrum-docs",
@@ -1493,7 +1493,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
         ]),
       });
       const budgetResult = await runPairedEvaluation({
-        evalsRoot: resolve(process.cwd(), "evals"),
+        evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
         skillPath: "skills/arbitrum-docs",
@@ -1522,7 +1522,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
         ]),
       });
       const errorResult = await runPairedEvaluation({
-        evalsRoot: resolve(process.cwd(), "evals"),
+        evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
         skillPath: "skills/arbitrum-docs",
@@ -1548,7 +1548,7 @@ describe("Population regression, cache accounting, and telemetry denominators", 
       const controller = new AbortController();
       controller.abort(new Error("caller cancelled"));
       const cancelResult = await runPairedEvaluation({
-        evalsRoot: resolve(process.cwd(), "evals"),
+        evalsRoot: process.cwd(),
         repoRoot: tempRoot,
         caseSelector: "network-config-01",
         skillPath: "skills/arbitrum-docs",
