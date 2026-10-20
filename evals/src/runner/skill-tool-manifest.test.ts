@@ -353,7 +353,7 @@ dependencies:
     );
   });
 
-  describe("validateSkillToolBundle (Amendment 9 S4)", () => {
+  describe("validateSkillToolBundle", () => {
     it("accepts a valid bundle and returns it", () => {
       const valid = {
         schemaVersion: 1,

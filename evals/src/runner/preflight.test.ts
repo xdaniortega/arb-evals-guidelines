@@ -122,7 +122,7 @@ describe("preflightInputs", () => {
   it("records a per-case failure without aborting the sweep", async () => {
     const root = await tempRoot();
     await buildSuite(root, "s1", { selector: "group/good", caseId: "good" });
-    // Phase 1: absent output is now valid; use an unreadable validator to test preflight failure.
+    // Absent output is valid; use an unreadable validator to test preflight failure.
     await buildSuite(root, "s1", { selector: "group/bad", caseId: "bad", caseOverrides: { validator: "missing-validator.ts" } });
     const report = await preflightInputs({ evalsRoot: root, suiteId: "s1", caseSelector: null, cliLimits: {} });
     expect(report.ok).toBe(false);
@@ -163,7 +163,7 @@ describe("formatPreflightReport", () => {
 
   it("prints the structured code, message, and location on failure", async () => {
     const root = await tempRoot();
-    // Phase 1: absent output is now valid; use an unreadable validator to test preflight failure.
+    // Absent output is valid; use an unreadable validator to test preflight failure.
     await buildSuite(root, "s1", { caseOverrides: { validator: "missing-validator.ts" } });
     const report = await preflightInputs({ evalsRoot: root, suiteId: null, caseSelector: null, cliLimits: {} });
     const text = formatPreflightReport(report);

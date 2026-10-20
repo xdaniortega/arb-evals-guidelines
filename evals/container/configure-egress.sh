@@ -3,9 +3,10 @@
 #
 # WHY this script exists at all: Apple Container gives a guest a routable interface on a
 # host-visible bridge, so BEFORE the lock the host's own LAN address and the network
-# gateway are reachable from inside the guest. The contract requires host, gateway,
-# loopback, private, link-local, metadata, and sibling ranges to be denied while locked
-# public name resolution and public web transport stay available. Only a privileged
+# gateway can be reachable from inside the guest. The policy denies specified IPv4
+# private, loopback, link-local, multicast and broadcast destinations, plus all IPv6,
+# while public IPv4 access stays available. It does not identify every possible host
+# address or a public relay back to the laptop. Only a privileged
 # process can install that policy, so exactly this much runs as root and nothing else.
 #
 # It handles NO credential of any kind. A credential reaches a guest only in memory over
@@ -34,17 +35,13 @@ fail() {
 }
 
 command -v iptables >/dev/null 2>&1 || fail "iptables is not installed in this image"
+command -v ip6tables >/dev/null 2>&1 || fail "ip6tables is not installed in this image"
 command -v setpriv >/dev/null 2>&1 || fail "setpriv is not installed in this image"
 
 deny_ipv6() {
-  # A guest with IPv4 locked and IPv6 open would be trivially able to reach a denied
-  # range over the other family. ip6tables may legitimately be absent when the kernel has
-  # no IPv6 support at all, which is denial by construction, so that case is tolerated.
-  if command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -P OUTPUT DROP || fail "could not deny IPv6 egress"
-  else
-    echo "configure-egress: ip6tables absent; IPv6 is unavailable in this kernel" >&2
-  fi
+  # Both profiles deny all IPv6. Missing tooling does not prove the kernel lacks IPv6,
+  # so the required command is checked above and any enforcement failure stops startup.
+  ip6tables -P OUTPUT DROP || fail "could not deny IPv6 egress"
 }
 
 case "$EGRESS_PROFILE" in
@@ -58,11 +55,11 @@ case "$EGRESS_PROFILE" in
       *[!0-9,]*) fail "EVAL_ALLOWED_TCP_PORTS must be a comma-separated port list: $ALLOWED_TCP_PORTS" ;;
     esac
     # Default-accept plus explicit denials, in this exact order. The denied CIDRs cover
-    # loopback, RFC1918 private space, link-local and cloud metadata, and carrier-grade
-    # NAT (a sibling-range spelling). The final rule restricts outbound TCP to declared ports
+    # loopback, RFC1918 private space, link-local and cloud metadata, carrier-grade
+    # NAT, multicast and limited broadcast. The final rule restricts outbound TCP to declared ports
     # when a restricted allowlist is provided; when "all", no multiport restriction is installed.
     iptables -P OUTPUT ACCEPT || fail "could not set the OUTPUT policy"
-    for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 127.0.0.0/8 100.64.0.0/10; do
+    for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 255.255.255.255/32; do
       iptables -A OUTPUT -d "$cidr" -j REJECT || fail "could not deny $cidr"
     done
     if [ "$ALLOWED_TCP_PORTS" != "all" ]; then

@@ -4,7 +4,7 @@
  * validity. No filesystem, process, container, provider, or case-specific behavior.
  */
 import { createHash } from "node:crypto";
-import { CONDITION_IDS, EvalError, LIMIT_KEYS, RUNTIME_PROFILES, SAFE_DEFAULT_LIMITS, SCHEMA_VERSION, } from "./types.mjs";
+import { CONDITION_IDS, EvalError, isTaskLimitKey, LIMIT_KEYS, RUNTIME_PROFILES, SAFE_DEFAULT_LIMITS, SCHEMA_VERSION, } from "./types.mjs";
 // ---------------------------------------------------------------------------
 // Path safety
 // ---------------------------------------------------------------------------
@@ -166,14 +166,29 @@ export function resolveLimits(input) {
             ["profile", profile.limits[key]],
             ["default", SAFE_DEFAULT_LIMITS[key]],
         ];
+        // `null` (unlimited wallClockMs) is a real chosen value and must stop the cascade,
+        // so only `undefined` is treated as "not configured at this tier".
         const chosen = layers.find(([, value]) => value !== undefined);
         if (chosen === undefined || chosen[1] === undefined) {
             throw new EvalError("limit-invalid", `limit ${key} did not resolve`, { at: key });
         }
-        if (!Number.isSafeInteger(chosen[1]) || chosen[1] <= 0) {
-            throw new EvalError("limit-invalid", `limit ${key} must be a positive safe integer`, { at: key });
+        const value = chosen[1];
+        if (isTaskLimitKey(key)) {
+            // A task budget is unlimited (explicit `null`) or a positive integer. An explicit
+            // `null` at any tier is a real chosen value and stops the cascade above, so it can
+            // never be replaced by a lower-precedence finite value.
+            if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) {
+                throw new EvalError("limit-invalid", `limit ${key} must be a positive safe integer or null (unlimited)`, { at: key });
+            }
+            limits[key] = value;
         }
-        limits[key] = chosen[1];
+        else {
+            // Resource/isolation bounds are always positive integers; null is never valid.
+            if (value === null || !Number.isSafeInteger(value) || value <= 0) {
+                throw new EvalError("limit-invalid", `limit ${key} must be a positive safe integer`, { at: key });
+            }
+            limits[key] = value;
+        }
         provenance[key] = chosen[0];
     }
     return {

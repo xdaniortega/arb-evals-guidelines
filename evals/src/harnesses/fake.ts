@@ -9,7 +9,7 @@
  */
 
 import { assertNotAborted } from "../core/types.ts";
-import type { StructuredFailure } from "../core/types.ts";
+import type { StopCause, StructuredFailure } from "../core/types.ts";
 import type { Guest } from "../sandboxes/sandbox.ts";
 import type {
   Harness,
@@ -69,7 +69,6 @@ function runtimeIdentity(request: HarnessRequest, version: string): RuntimeIdent
     model: request.target.model,
     thinking: request.target.thinking,
     allowedTools: [...request.allowedTools],
-    ambientTools: [...request.ambientTools],
     skillPaths: [...request.skillPaths],
     ambientDiscoveryDisabled: true,
     implicitRetryDisabled: true,
@@ -77,6 +76,11 @@ function runtimeIdentity(request: HarnessRequest, version: string): RuntimeIdent
   };
 }
 
+/**
+ * @notice Provides deterministic, zero-provider-call harness behavior for tests.
+ * @param options Script and lifecycle overrides for synthetic evaluations.
+ * @returns A harness explicitly marked as a test double.
+ */
 export function createFakeHarness(
   options: { readonly script?: FakeHarnessScript; readonly version?: string } = {},
 ): Harness {
@@ -120,6 +124,8 @@ export function createFakeHarness(
           timing: { startedAt: FAKE_CLOCK, completedAt: FAKE_CLOCK, durationMs: 0 },
           runtime: runtimeIdentity(request, version),
           failures: [],
+          stopCause: "wall-clock",
+          providerStopReason: null,
         };
       }
 
@@ -154,6 +160,8 @@ export function createFakeHarness(
           timing: { startedAt: FAKE_CLOCK, completedAt: FAKE_CLOCK, durationMs: 0 },
           runtime: runtimeIdentity(request, version),
           failures: [],
+          stopCause: "wall-clock",
+          providerStopReason: null,
         };
       }
 
@@ -178,8 +186,18 @@ export function createFakeHarness(
       ];
       const toolSteps = response.toolSteps ?? [];
 
+      const finalOutcome = isWallClockAbort(request.signal) ? "task-limit" : response.outcome;
+      const finalStopCause: StopCause = isWallClockAbort(request.signal)
+        ? "wall-clock"
+        : finalOutcome === "completed"
+          ? "completed"
+          : finalOutcome === "infrastructure-failure"
+            ? "infrastructure-error"
+            : "unknown";
       return {
-        outcome: isWallClockAbort(request.signal) ? "task-limit" : response.outcome,
+        outcome: finalOutcome,
+        stopCause: finalStopCause,
+        providerStopReason: null,
         messages,
         toolSteps,
         usage: {

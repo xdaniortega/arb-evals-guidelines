@@ -7,7 +7,7 @@
  * - Failure or cancellation produces ZERO agent dispatches
  * - Checked-in case files remain completely untouched
  * - Oracle, helper code, and hidden provenance never enter agent guests
- * - Reports and reproduction use retained bytes and NEVER re-invoke the preparer
+ * - Reports and verification use retained bytes and NEVER re-invoke the preparer
  */
 
 import { execFileSync } from "node:child_process";
@@ -16,7 +16,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EvalError, SAFE_DEFAULT_LIMITS } from "../core/types.ts";
+import { EvalError } from "../core/types.ts";
 import type { CasePreparer, PreparedCaseData, PartialLimits } from "../core/types.ts";
 import { createFakeHarness } from "../harnesses/fake.ts";
 import { createFakeSandbox } from "../sandboxes/fake.ts";
@@ -383,7 +383,7 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
     });
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
-    const result = runPairedEvaluation({ ...run.options, cliLimits: { wallClockMs: 60 }, preparer, signal: controller.signal });
+    const result = runPairedEvaluation({ ...run.options, cliLimits: { wallClockMs: null }, operationAllowanceMs: 60, preparer, signal: controller.signal });
     const rejected = expect(result).rejects.toMatchObject({ code: "interrupted", message: expect.stringContaining("exceeded deadline") });
     const context = await started.promise;
     expect(preparer).toHaveBeenCalledTimes(1);
@@ -496,7 +496,7 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
     process.on("unhandledRejection", onUnhandled);
     vi.useFakeTimers();
     try {
-      const result = runPairedEvaluation({ ...run.options, cliLimits: { wallClockMs: 40 }, preparer });
+      const result = runPairedEvaluation({ ...run.options, cliLimits: { wallClockMs: null }, operationAllowanceMs: 40, preparer });
       const rejected = expect(result).rejects.toMatchObject({ code: "interrupted" });
       const context = await started.promise;
       expect(preparer).toHaveBeenCalledTimes(1);
@@ -529,7 +529,7 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
       if (work === "rejection") throw new Error("late preparer failure");
       return {};
     });
-    await expect(runPairedEvaluation({ ...run.options, cliLimits: { wallClockMs: 60 }, preparer })).rejects.toMatchObject({ code: "interrupted" });
+    await expect(runPairedEvaluation({ ...run.options, cliLimits: { wallClockMs: null }, operationAllowanceMs: 60, preparer })).rejects.toMatchObject({ code: "interrupted" });
     expect(preparer).toHaveBeenCalledTimes(1);
     expect(signal?.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
@@ -551,14 +551,15 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
 
-  it("does not start a preparer when preflight consumed the invocation deadline", async () => {
+  it("does not start a preparer when preflight consumed the startup deadline", async () => {
     const run = await preparationRun({ case: { wallClockMs: 60 } });
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const preparer = vi.fn<CasePreparer>(async () => ({}));
     const result = runPairedEvaluation({
       ...run.options,
-      overallCeilingMs: 30_000,
+      invocationStartedAtMs: 1_000,
+      startupAllowanceMs: 29_000,
       preparer,
       onProgress(event) {
         run.events.push(event);
@@ -572,23 +573,26 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
   });
 
   it.each([
-    { name: "cli", cli: 100, case: 200, suite: 300, profile: 400, expected: 100 },
-    { name: "case", case: 200, suite: 300, profile: 400, expected: 200 },
-    { name: "suite", suite: 300, profile: 400, expected: 300 },
-    { name: "profile", profile: 400, expected: 400 },
-    { name: "default", expected: SAFE_DEFAULT_LIMITS.wallClockMs },
-  ])("preparation reuses $name limit resolution anchored to preparation start, not curtailed by preflight", async (row) => {
-    const limits = (wallClockMs?: number): PartialLimits => wallClockMs === undefined ? {} : { wallClockMs };
+    { name: "cli", cli: 100, case: 200, suite: 300, profile: 400 },
+    { name: "case", case: 200, suite: 300, profile: 400 },
+    { name: "suite", suite: 300, profile: 400 },
+    { name: "profile", profile: 400 },
+    { name: "default" },
+    { name: "unlimited", cli: null },
+    { name: "long finite", cli: 2_147_483_648 },
+  ])("preparation uses its infrastructure allowance independently of the $name arm time limit", async (row) => {
+    const limits = (wallClockMs?: number | null): PartialLimits => wallClockMs === undefined ? {} : { wallClockMs };
     const run = await preparationRun({ case: limits(row.case), suite: limits(row.suite) });
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const stop = new EvalError("interrupted", "stop after observing preparation deadline");
     const preparer = vi.fn<CasePreparer>(async (context) => {
-      expect(context.deadlineAtMs).toBe(1_010 + row.expected);
+      expect(context.deadlineAtMs).toBe(1_010 + 5_000);
       throw stop;
     });
     await expect(runPairedEvaluation({
       ...run.options,
+      operationAllowanceMs: 5_000,
       cliLimits: limits(row.cli),
       profileCatalog: { default: { id: "default", description: "Synthetic defaults", limits: limits(row.profile) } },
       preparer,
@@ -602,17 +606,52 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
     await run.expectNoDispatch();
   });
 
+  it("clamps preparation to the remaining startup allowance after preflight", async () => {
+    const run = await preparationRun();
+    const started = deferred<Parameters<CasePreparer>[0]>();
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const preparer = vi.fn<CasePreparer>((context) => {
+      started.resolve(context);
+      return new Promise(() => {});
+    });
+    const result = runPairedEvaluation({
+      ...run.options,
+      cliLimits: { wallClockMs: null },
+      invocationStartedAtMs: 1_000,
+      startupAllowanceMs: 80,
+      operationAllowanceMs: 60,
+      preparer,
+      onProgress(event) {
+        run.events.push(event);
+        if (event.type === "request-validated") vi.setSystemTime(1_050);
+      },
+    });
+    const rejected = expect(result).rejects.toMatchObject({ code: "interrupted" });
+    const context = await started.promise;
+    expect(context.deadlineAtMs).toBe(1_080);
+    await vi.advanceTimersByTimeAsync(29);
+    expect(context.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(context.signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await run.expectNoDispatch();
+  });
+
   it("success passes absolute deadlineAtMs and emits preparation facts in order, omitting completed on failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "eval-prep-progress-"));
     tempRoots.push(root);
     const suiteInfo = await setupSuite(root);
 
     let recordedDeadlineAtMs = 0;
+    let recordedPreparationAtMs = 0;
     let recordedSignal: AbortSignal | null = null;
     const eventsSuccess: RunProgressEvent[] = [];
 
     const startBeforeRun = Date.now();
     const preparerSuccess: CasePreparer = async (context) => {
+      recordedPreparationAtMs = Date.now();
       recordedDeadlineAtMs = context.deadlineAtMs;
       recordedSignal = context.signal;
       return {
@@ -632,6 +671,7 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
       mode: "fake",
       repetitions: 1,
       cliLimits: { wallClockMs: 25_000 },
+      operationAllowanceMs: 5_000,
       target: { provider: "google", model: "fake-model", thinking: "off" },
       runId: "19700101T000000Z-prep-order",
       resourceNonce: "0a1b2c3d",
@@ -649,11 +689,12 @@ describe("Trusted Preparation (once-per-invocation, zero dispatches on failure, 
     const result = await runPairedEvaluation(runOptionsSuccess);
     expect(result.status).toBe("complete");
 
-    // Context checks: deadlineAtMs is absolute epoch >= invocation start + budget
+    // Preparation gets its own infrastructure allowance, not the longer arm budget.
     expect(recordedSignal).not.toBeNull();
     expect(recordedSignal!.aborted).toBe(false);
     expect(typeof recordedDeadlineAtMs).toBe("number");
-    expect(recordedDeadlineAtMs).toBeGreaterThanOrEqual(startBeforeRun + 25_000);
+    expect(recordedDeadlineAtMs).toBeGreaterThanOrEqual(startBeforeRun + 5_000);
+    expect(recordedDeadlineAtMs).toBeLessThanOrEqual(recordedPreparationAtMs + 5_000);
 
     // Progress fact order check:
     const typesSuccess = eventsSuccess.map((e) => e.type);

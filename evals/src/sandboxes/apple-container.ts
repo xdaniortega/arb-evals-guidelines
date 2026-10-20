@@ -22,14 +22,15 @@
  *   attestation, with the value arriving on stdin and only the variable NAME in argv.
  * - **Apple Container has no `--no-new-privileges` and no disk quota.** `no_new_privs`
  *   is obtained by `setpriv` in the guest entrypoint and then attested; the disk bound
- *   is the tmpfs set, not a quota (see the CONTESTED note in the phase report).
+ *   is the tmpfs set, constrained by the guest memory limit.
  */
 
+import { scheduleTimeout, type DeadlineTimer } from "../core/timing.ts";
 import { spawn } from "node:child_process";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { assertSafeRelativePath, canonicalJsonSha256, sha256Hex } from "../core/experiment.ts";
-import { CONDITION_CLEANUP_ALLOWANCE_MS, CONDITION_OPERATION_ALLOWANCE_MS, EvalError, MAX_ARM_WALL_CLOCK_MS, assertNotAborted } from "../core/types.ts";
+import { EvalError, assertNotAborted, resolveGuestTimeouts } from "../core/types.ts";
 import { scanForSecrets } from "../core/secret-scan.ts";
 import type { GuardedSecret } from "../core/secret-scan.ts";
 import type {
@@ -118,17 +119,6 @@ const DEFAULT_MAX_OUTPUT_BYTES = 96 * 1024 * 1024;
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 400;
 
-const GUEST_PRE_PROMPT_TIMEOUT_MS = CONDITION_OPERATION_ALLOWANCE_MS;
-const GUEST_MAX_ARM_ALLOWANCE_MS = MAX_ARM_WALL_CLOCK_MS;
-const GUEST_SUPERVISOR_MARGIN_MS = 10_000;
-/**
- * Absolute maximum at the supported 10-minute prompt allowance. Actual guests use
- * their resolved allowance below. Own setup, sibling setup/capture, both serial prompt
- * allowances, sibling cleanup and shutdown are separate from the prompt's own timer.
- * The host stream starts later and uses the same formula with a 30-second margin.
- */
-export const MAX_INVOCATION_GUEST_MS = 3 * GUEST_PRE_PROMPT_TIMEOUT_MS + 2 * GUEST_MAX_ARM_ALLOWANCE_MS + CONDITION_CLEANUP_ALLOWANCE_MS + GUEST_SUPERVISOR_MARGIN_MS;
-
 // ---------------------------------------------------------------------------
 // Bounded CLI invocation
 // ---------------------------------------------------------------------------
@@ -150,25 +140,32 @@ export interface CliOptions {
   readonly signal?: AbortSignal;
   /** Absolute deadline; the command cap may only shorten the remaining time. */
   readonly deadlineAtMs?: number;
+  /** Injectable only for deterministic CLI-boundary tests; defaults to node spawn. */
+  readonly spawnProcess?: typeof spawn;
 }
 
 /**
- * Runs the `container` CLI with no shell, bounded output, and a bounded wall clock.
- *
- * GNU `timeout` does not exist on the supported host and `container exec` has no timeout
- * flag, so the bound is imposed here: SIGTERM, then SIGKILL, then a `timedOut` result
- * rather than a promise that never settles.
+ * @notice Executes the container CLI without a shell and bounds output and operation time.
+ * @param args Container subcommand and arguments.
+ * @param options Cancellation, deadline, output bounds, and process dependencies.
+ * @returns Captured output and explicit exit or timeout status.
+ * @dev Termination escalates from SIGTERM to SIGKILL before bounded settlement.
  */
 export async function runContainerCli(args: readonly string[], options: CliOptions = {}): Promise<CliResult> {
   const commandCapMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
-  const remainingMs = options.deadlineAtMs === undefined ? commandCapMs : options.deadlineAtMs - Date.now();
-  if (remainingMs <= 0) throw new EvalError("interrupted", `container ${args[0] ?? ""} deadline expired before spawn`, { at: `container ${args[0] ?? ""}` });
-  const timeoutMs = Math.min(commandCapMs, remainingMs);
+  const finiteDeadline = options.deadlineAtMs !== undefined && Number.isFinite(options.deadlineAtMs);
+  if (finiteDeadline && options.deadlineAtMs! <= Date.now()) {
+    throw new EvalError("interrupted", `container ${args[0] ?? ""} deadline expired before spawn`, { at: `container ${args[0] ?? ""}` });
+  }
+  const remainingMs = finiteDeadline ? options.deadlineAtMs! - Date.now() : undefined;
+  const timeoutMs = remainingMs !== undefined
+    ? (commandCapMs !== undefined && Number.isFinite(commandCapMs) ? Math.min(commandCapMs, remainingMs) : remainingMs)
+    : commandCapMs;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   assertNotAborted(options.signal, `container ${args[0] ?? ""}`);
   return await new Promise<CliResult>((resolve, reject) => {
     // A separate process group lets cancellation terminate CLI descendants too.
-    const child = spawn(options.cliPath ?? DEFAULT_CLI, [...args], { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const child = (options.spawnProcess ?? spawn)(options.cliPath ?? DEFAULT_CLI, [...args], { stdio: ["pipe", "pipe", "pipe"], detached: true });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let outBytes = 0;
@@ -179,6 +176,7 @@ export async function runContainerCli(args: readonly string[], options: CliOptio
     let settled = false;
     let escalation: NodeJS.Timeout | null = null;
     let finalSettle: NodeJS.Timeout | null = null;
+    let timer: DeadlineTimer | null = null;
 
     const signalGroup = (signal: NodeJS.Signals): void => {
       if (child.pid !== undefined) {
@@ -190,7 +188,7 @@ export async function runContainerCli(args: readonly string[], options: CliOptio
       signalGroup("SIGTERM");
       if (escalation === null) {
         escalation = setTimeout(() => signalGroup("SIGKILL"), 2_000);
-        escalation.unref?.();
+        escalation.unref();
       }
       if (finalSettle === null) {
         // Kept referenced: a pending CLI promise must not let Node exit successfully.
@@ -200,17 +198,19 @@ export async function runContainerCli(args: readonly string[], options: CliOptio
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== null) timer.cancel();
       if (escalation !== null) clearTimeout(escalation);
       if (finalSettle !== null) clearTimeout(finalSettle);
       options.signal?.removeEventListener("abort", onAbort);
       child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
       resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), truncated, timedOut, aborted });
     };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      kill();
-    }, timeoutMs);
+    if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = scheduleTimeout(() => {
+        timedOut = true;
+        kill();
+      }, timeoutMs);
+    }
     const onAbort = (): void => {
       aborted = true;
       kill();
@@ -239,7 +239,7 @@ export async function runContainerCli(args: readonly string[], options: CliOptio
     child.once("error", (error: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== null) timer.cancel();
       if (escalation !== null) clearTimeout(escalation);
       if (finalSettle !== null) clearTimeout(finalSettle);
       options.signal?.removeEventListener("abort", onAbort);
@@ -367,6 +367,8 @@ export interface AppleContainerSandboxOptions {
   readonly supervisorMaxMs?: number;
   /** Overrides the readiness wait, for tests. */
   readonly readyTimeoutMs?: number;
+  /** Injectable only for deterministic CLI-boundary tests; defaults to node spawn. */
+  readonly spawnProcess?: typeof spawn;
 }
 
 function normalizedRunId(runId: string): string {
@@ -568,7 +570,7 @@ async function loadLockedProfile(contextDir: string, runtimeProfileId: string): 
 // Guest
 // ---------------------------------------------------------------------------
 
-interface GuestContext {
+export interface AppleContainerGuestContext {
   readonly spec: GuestSpec;
   readonly cliPath: string;
   readonly timeoutMs: number;
@@ -577,19 +579,20 @@ interface GuestContext {
   readonly allowedTcpPorts: string;
   readonly deadlineAtMs?: number;
   readonly signal?: AbortSignal;
+  readonly spawnProcess: typeof spawn;
   destroyed: boolean;
   attested: boolean;
   readonly deliveredCredentialVariables: string[];
   lastAttestation: GuestAttestation | null;
 }
 
-class AppleContainerGuest implements Guest {
+export class AppleContainerGuest implements Guest {
   readonly name: string;
   readonly networkName: string;
   readonly imageDigest: string;
-  private readonly context: GuestContext;
+  private readonly context: AppleContainerGuestContext;
 
-  constructor(context: GuestContext) {
+  constructor(context: AppleContainerGuestContext) {
     this.name = context.spec.name;
     this.networkName = context.spec.networkName;
     this.imageDigest = context.spec.imageDigest;
@@ -639,7 +642,7 @@ class AppleContainerGuest implements Guest {
     const cli: CliOptions = {
       cliPath: this.context.cliPath,
       timeoutMs: options.timeoutMs ?? this.context.timeoutMs,
-      ...(this.context.deadlineAtMs === undefined ? {} : { deadlineAtMs: this.context.deadlineAtMs }),
+      ...(this.context.deadlineAtMs === undefined || !Number.isFinite(this.context.deadlineAtMs) ? {} : { deadlineAtMs: this.context.deadlineAtMs }),
     };
     const result = await runContainerCli(argv, {
       ...cli,
@@ -721,45 +724,50 @@ class AppleContainerGuest implements Guest {
       this.name,
       ...request.command,
     ];
-    const child = spawn(this.context.cliPath, argv, { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const child = this.context.spawnProcess(this.context.cliPath, argv, { stdio: ["pipe", "pipe", "pipe"], detached: true });
 
     const signalGroup = (signal: NodeJS.Signals): void => {
       if (child.pid !== undefined) { try { process.kill(-child.pid, signal); return; } catch { /* direct fallback */ } }
       try { child.kill(signal); } catch { /* already gone */ }
     };
     let escalation: NodeJS.Timeout | null = null;
-    let timer: NodeJS.Timeout | null = null;
+    let timer: DeadlineTimer | null = null;
+    let settlementTimer: NodeJS.Timeout | null = null;
+    let settled = false;
+    let finish!: (code: number | null, reason?: "confirmed" | "forced") => void;
     const terminate = (): void => {
+      if (settled) return;
       signalGroup("SIGTERM");
-      if (escalation === null) { escalation = setTimeout(() => signalGroup("SIGKILL"), 1_000); escalation.unref?.(); }
+      if (escalation === null) {
+        escalation = setTimeout(() => signalGroup("SIGKILL"), 1_000);
+        escalation.unref();
+        settlementTimer = setTimeout(() => finish(null, "forced"), 2_000);
+      }
     };
-    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
-      timer = setTimeout(() => {
-        terminate();
-      }, request.timeoutMs);
-      timer.unref?.();
-    }
-
     const onAbort = (): void => terminate();
-    request.signal?.addEventListener("abort", onAbort, { once: true });
-    if (request.signal?.aborted) onAbort();
-
+    let resolveTermination!: (reason: "confirmed" | "forced") => void;
+    const termination = new Promise<"confirmed" | "forced">((resolve) => { resolveTermination = resolve; });
     const exitCode = new Promise<number | null>((resolve) => {
-      let settled = false;
-      const finish = (code: number | null): void => {
+      finish = (code, reason = "confirmed"): void => {
         if (settled) return;
         settled = true;
-        if (timer !== null) clearTimeout(timer);
+        timer?.cancel();
         if (escalation !== null) clearTimeout(escalation);
+        if (settlementTimer !== null) clearTimeout(settlementTimer);
         request.signal?.removeEventListener("abort", onAbort);
         child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+        resolveTermination(reason);
         resolve(code);
       };
-      child.once("close", finish);
-      child.once("error", () => finish(null));
-      // Pipe teardown/close is independently bounded after termination.
-      request.signal?.addEventListener("abort", () => setTimeout(() => finish(null), 2_000), { once: true });
+      child.once("close", (code: number | null) => finish(code, "confirmed"));
+      child.once("error", () => finish(null, "confirmed"));
     });
+    if (request.timeoutMs !== undefined && Number.isFinite(request.timeoutMs) && request.timeoutMs > 0) {
+      timer = scheduleTimeout(terminate, request.timeoutMs);
+      timer.unref();
+    }
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) onAbort();
 
     return {
       stdin: child.stdin,
@@ -767,6 +775,7 @@ class AppleContainerGuest implements Guest {
       stderr: child.stderr,
       kill: (sig?: NodeJS.Signals) => signalGroup(sig ?? "SIGTERM"),
       exitCode,
+      termination,
     };
   }
 
@@ -824,13 +833,17 @@ class AppleContainerGuest implements Guest {
    */
   async attest(signal?: AbortSignal, deadlineAtMs?: number): Promise<GuestAttestation> {
     this.assertAlive();
-    const frame = await this.execSupervisor("attest", ["attest"], { signal: signal ?? this.context.signal,
-      timeoutMs: deadlineAtMs === undefined ? undefined : Math.max(1, deadlineAtMs - Date.now()) });
+    const finiteDeadline = deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs);
+    const frame = await this.execSupervisor("attest", ["attest"], {
+      signal: signal ?? this.context.signal,
+      timeoutMs: finiteDeadline ? Math.max(1, deadlineAtMs - Date.now()) : undefined,
+    });
     const observed = frame.attestation as GuestAttestationFrame | undefined;
     if (observed === undefined) {
       throw new EvalError("protocol-drift", "the guest attestation frame is empty", { at: "attest" });
     }
-    const failures = attestationViolations(observed, this.context.spec);
+    const allowedTcpPorts = this.context.allowedTcpPorts === "all" ? "all" : this.context.allowedTcpPorts.split(",").map(Number);
+    const failures = attestationViolations(observed, this.context.spec, allowedTcpPorts);
     const record = toObservedAttestation(observed);
     const transportProbe = record.egressProbes.find((probe) => probe.category === "public" && probe.port === 443);
     const attestation: GuestAttestation = {
@@ -896,10 +909,11 @@ class AppleContainerGuest implements Guest {
         at: request.variable,
       });
     }
+    const finiteDeadline = request.deadlineAtMs !== undefined && Number.isFinite(request.deadlineAtMs);
     await this.execSupervisor("deliverCredential", ["deliver-credential", "--variable", request.variable], {
       stdin: JSON.stringify({ value: request.value }),
       signal: request.signal ?? this.context.signal,
-      timeoutMs: request.deadlineAtMs === undefined ? undefined : Math.max(1, request.deadlineAtMs - Date.now()),
+      timeoutMs: finiteDeadline ? Math.max(1, request.deadlineAtMs! - Date.now()) : undefined,
     });
     // Only the NAME is retained, here and in evidence.
     this.context.deliveredCredentialVariables.push(request.variable);
@@ -923,6 +937,7 @@ interface GuestMountFrame {
 interface GuestProbeFrame {
   readonly label: string;
   readonly category: string;
+  readonly protocol: string;
   readonly host: string;
   readonly port: number;
   readonly expectation: string;
@@ -955,8 +970,8 @@ interface GuestAttestationFrame {
   };
 }
 
-function probeOutcome(value: string): "blocked" | "connected" {
-  return value === "connected" ? "connected" : "blocked";
+function probeOutcome(value: string): ObservedEgressProbe["outcome"] {
+  return value === "connected" || value === "blocked" ? value : "inconclusive";
 }
 
 /**
@@ -976,7 +991,8 @@ function toObservedAttestation(frame: GuestAttestationFrame): ObservedAttestatio
   });
   const probes: ObservedEgressProbe[] = (frame.egress.probes ?? []).map((probe) => ({
     label: String(probe.label),
-    category: probe.category === "public" ? "public" : "private",
+    category: probe.category as ObservedEgressProbe["category"],
+    protocol: probe.protocol as "tcp" | "udp",
     host: String(probe.host),
     port: Number(probe.port),
     expectation: probe.expectation === "connected" ? "connected" : "blocked",
@@ -1021,7 +1037,7 @@ function toObservedAttestation(frame: GuestAttestationFrame): ObservedAttestatio
 }
 
 /** Every fact the contract requires, checked against what the guest actually reported. */
-function attestationViolations(observed: GuestAttestationFrame, spec: GuestSpec): readonly string[] {
+function attestationViolations(observed: GuestAttestationFrame, spec: GuestSpec, allowedTcpPorts: AllowedTcpPorts): readonly string[] {
   const failures: string[] = [];
   if (observed.init.uid !== GUEST_UID) failures.push(`PID 1 uid is ${String(observed.init.uid)}, expected ${GUEST_UID}`);
   if (observed.init.gid !== GUEST_GID) failures.push(`PID 1 gid is ${String(observed.init.gid)}, expected ${GUEST_GID}`);
@@ -1051,17 +1067,47 @@ function attestationViolations(observed: GuestAttestationFrame, spec: GuestSpec)
   for (const resolver of observed.resolvers) {
     if (resolver.private) failures.push(`a private resolver was inherited: ${resolver.address}`);
   }
-  if (observed.egress.probes.length === 0) failures.push("no egress probe was performed");
-  // Judged against the expectation the guest DERIVED from the declared port allowlist,
-  // so a permitted port that is blocked and a denied port that connects are both
-  // violations, and neither can be papered over by a literal in this file.
-  for (const probe of observed.egress.probes) {
-    if (probe.outcome === probe.expectation) continue;
-    failures.push(
-      `egress probe ${probe.label} ${probe.host}:${String(probe.port)} was ${probe.outcome}, expected ${probe.expectation} (${probe.detail})`,
-    );
-  }
+  failures.push(...egressProbeViolations(observed.egress.probes, allowedTcpPorts));
   if (observed.egress.dns.ok !== true) failures.push(`public name resolution failed: ${observed.egress.dns.detail}`);
+  return failures;
+}
+
+/**
+ * @notice Rejects missing or contradictory guest network-isolation observations.
+ * @param probes Guest-reported destination and transport probe results.
+ * @param ports Public TCP ports allowed by the host policy.
+ * @returns Policy violations, empty only when every required observation agrees.
+ */
+export function egressProbeViolations(probes: readonly GuestProbeFrame[], ports: AllowedTcpPorts): readonly string[] {
+  const required = [
+    { label: "metadata", category: "private", protocol: "tcp", host: "169.254.169.254", port: 80 },
+    { label: "private-10", category: "private", protocol: "tcp", host: "10.0.0.1", port: 80 },
+    { label: "private-192", category: "private", protocol: "tcp", host: "192.168.64.1", port: 53 },
+    { label: "guest-loopback", category: "private", protocol: "tcp", host: "127.0.0.1", port: 22 },
+    { label: "public-80", category: "public", protocol: "tcp", host: "1.1.1.1", port: 80 },
+    { label: "public-443", category: "public", protocol: "tcp", host: "1.1.1.1", port: 443 },
+    { label: "ipv4-multicast", category: "multicast", protocol: "udp", host: "239.255.42.99", port: 9 },
+    { label: "ipv4-broadcast", category: "broadcast", protocol: "udp", host: "255.255.255.255", port: 9 },
+    { label: "ipv6-loopback", category: "ipv6", protocol: "udp", host: "::1", port: null },
+  ];
+  const failures: string[] = [];
+  if (probes.length !== required.length) failures.push(`expected ${required.length} egress probes, received ${probes.length}`);
+  for (const expected of required) {
+    const matches = probes.filter((probe) => probe.label === expected.label);
+    if (matches.length !== 1) {
+      failures.push(`expected one egress probe ${expected.label}, received ${matches.length}`);
+      continue;
+    }
+    const probe = matches[0]!;
+    const expectation = expected.category === "public" && (ports === "all" || ports.includes(expected.port!)) ? "connected" : "blocked";
+    const portMatches = expected.port === null ? Number.isInteger(probe.port) && probe.port > 0 && probe.port <= 65_535 : probe.port === expected.port;
+    if (probe.category !== expected.category || probe.protocol !== expected.protocol || probe.host !== expected.host || !portMatches) {
+      failures.push(`egress probe ${probe.label} has the wrong destination or transport`);
+    }
+    if (probe.expectation !== expectation || probe.outcome !== expectation) {
+      failures.push(`egress probe ${probe.label} ${probe.host}:${String(probe.port)} was ${probe.outcome}, expected ${expectation} (${probe.detail})`);
+    }
+  }
   return failures;
 }
 
@@ -1113,6 +1159,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
   const dnsServers = options.dnsServers ?? [...LOCKED_PUBLIC_RESOLVERS];
   const guardedSecrets = options.guardedSecrets ?? [];
   const readyTimeoutMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+  const spawnProcess = options.spawnProcess ?? spawn;
   const labels = Object.entries(options.labels ?? { "eval-run": options.runId }).map(
     ([key, value]) => `${key}=${value}`,
   );
@@ -1147,7 +1194,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
     if (!name.startsWith("sha256:")) return { reference: name, digest: null };
     for (const profileId of ["default"]) {
       const reference = referenceFor(profileId);
-      const inspect = await runContainerCli(["image", "inspect", reference], { cliPath, timeoutMs, signal });
+      const inspect = await runContainerCli(["image", "inspect", reference], { cliPath, spawnProcess, timeoutMs, signal });
       if (inspect.code !== 0) continue;
       const digest = firstDigest(parseJson("container image inspect", inspect.stdout));
       if (digest === name) return { reference, digest };
@@ -1170,7 +1217,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
       const details: Array<{ name: string; status: "ok" | "missing" | "unsupported"; detail: string }> = [];
       let version: CliResult | null = null;
       try {
-        version = await runContainerCli(["--version"], { cliPath, timeoutMs: 15_000, signal });
+        version = await runContainerCli(["--version"], { cliPath, spawnProcess, timeoutMs: 15_000, signal });
       } catch (error: unknown) {
         details.push({
           name: "container-cli",
@@ -1184,7 +1231,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
             ? { name: "container-cli", status: "ok", detail: version.stdout.trim().slice(0, 200) }
             : { name: "container-cli", status: "missing", detail: version.stderr.trim().slice(0, 200) },
         );
-        const status = await runContainerCli(["system", "status"], { cliPath, timeoutMs: 30_000, signal }).catch(() => null);
+        const status = await runContainerCli(["system", "status"], { cliPath, spawnProcess, timeoutMs: 30_000, signal }).catch(() => null);
         assertNotAborted(signal, "sandbox probe");
         if (status === null || status.code !== 0) {
           details.push({
@@ -1210,23 +1257,16 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
       const locked = await loadLockedProfile(spec.contextDir, spec.runtimeProfileId);
       assertNotAborted(spec.signal, "buildImage");
       const recipeDigest = recipeDigestFor(locked);
-      const reference = spec.expectedIdentity?.reference ?? referenceFor(spec.runtimeProfileId, recipeDigest);
+      const reference = referenceFor(spec.runtimeProfileId, recipeDigest);
 
-      // Check if warm matching image already exists in container storage. Reproduction
-      // supplies an exact retained reference+digest and may never fall through to build.
-      const inspectExisting = await runContainerCli(["image", "inspect", reference], { cliPath, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
+      // Reuse a warm image only under the reference derived from the verified recipe.
+      const inspectExisting = await runContainerCli(["image", "inspect", reference], { cliPath, spawnProcess, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
       if (inspectExisting.code === 0) {
         const existingDigest = firstDigest(parseJson("container image inspect", inspectExisting.stdout));
         if (existingDigest !== null) {
-          if (spec.expectedIdentity !== undefined && existingDigest !== spec.expectedIdentity.digest) {
-            throw new EvalError("evidence-invalid", `retained image digest mismatch for ${reference}: expected ${spec.expectedIdentity.digest}, found ${existingDigest}`, { at: reference });
-          }
           references.set(existingDigest, reference);
           return { reference, digest: existingDigest, runtimeProfileId: spec.runtimeProfileId, testDouble: false, cacheHit: true };
         }
-      }
-      if (spec.expectedIdentity !== undefined) {
-        throw new EvalError("platform-unsupported", `retained image is not available: ${reference}@${spec.expectedIdentity.digest}; reproduction will not rebuild or substitute it`, { at: reference });
       }
 
       spec.onBuildStarted?.();
@@ -1241,10 +1281,10 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         ...labels.flatMap((label) => ["--label", label]),
         spec.contextDir,
       ];
-      const build = await runContainerCli(buildArgs, { cliPath, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
+      const build = await runContainerCli(buildArgs, { cliPath, spawnProcess, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
       if (build.code !== 0) throw cliFailure("buildImage", buildArgs, build);
       const inspectArgs = ["image", "inspect", reference];
-      const inspect = await runContainerCli(inspectArgs, { cliPath, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
+      const inspect = await runContainerCli(inspectArgs, { cliPath, spawnProcess, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
       if (inspect.code !== 0) throw cliFailure("buildImage.inspect", inspectArgs, inspect);
       const digest = firstDigest(parseJson("container image inspect", inspect.stdout));
       if (digest === null) {
@@ -1265,7 +1305,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
       // Validated before creation: an unusable allowlist must fail here rather than
       // produce a guest whose entrypoint refuses to start.
       encodeAllowedTcpPorts(policy.allowPublicTcpPorts, `network ${name}.allowPublicTcpPorts`);
-      const result = await runContainerCli(args, { cliPath, timeoutMs, signal, deadlineAtMs });
+      const result = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal, deadlineAtMs });
       if (result.code !== 0 || result.aborted || result.timedOut || result.truncated) throw cliFailure("createNetwork", args, result);
       networkPolicies.set(name, policy);
       return { name, policySha256: canonicalJsonSha256(policy) };
@@ -1275,7 +1315,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
       // Apple Container 1.2.2's delete error for a missing network is generic and does
       // not name the absent identity. Inspect the exact identity first so absence is
       // proven without treating an arbitrary delete failure as benign.
-      const before = await runContainerCli(["network", "inspect", name], { cliPath, timeoutMs, signal });
+      const before = await runContainerCli(["network", "inspect", name], { cliPath, spawnProcess, timeoutMs, signal });
       if (before.code !== 0 && looksAbsent("network.inspect", before)) {
         networkPolicies.delete(name);
         return { status: "already-absent", verified: true, failure: null };
@@ -1288,7 +1328,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         };
       }
       const args = ["network", "delete", name];
-      const result = await runContainerCli(args, { cliPath, timeoutMs, signal });
+      const result = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal });
       if (result.code === 0) {
         networkPolicies.delete(name);
         return { status: "destroyed", verified: true, failure: null };
@@ -1367,8 +1407,13 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         `network ${spec.networkName}.allowPublicTcpPorts`,
       );
       const writablePaths = writablePathsOf(spec);
-      const supervisorAllowanceMs = 3 * GUEST_PRE_PROMPT_TIMEOUT_MS + spec.limits.wallClockMs +
-        Math.max(spec.limits.wallClockMs, 180_000) + CONDITION_CLEANUP_ALLOWANCE_MS + GUEST_SUPERVISOR_MARGIN_MS;
+      // Zero explicitly disables the supervisor lifetime for an unlimited arm.
+      // An explicit deadline still bounds short-lived doctor/validation guests.
+      const supervisorAllowanceMs = options.supervisorMaxMs ?? resolveGuestTimeouts(spec.limits.wallClockMs).supervisorMs;
+      const supervisorDeadlineWindowMs = spec.deadlineAtMs === undefined || !Number.isFinite(spec.deadlineAtMs)
+        ? Number.POSITIVE_INFINITY
+        : Math.max(1, spec.deadlineAtMs - Date.now());
+      const supervisorLifetimeMs = Math.min(supervisorAllowanceMs ?? Number.POSITIVE_INFINITY, supervisorDeadlineWindowMs);
       const args = [
         "run",
         "--detach",
@@ -1403,7 +1448,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         "--env",
         `EVAL_WRITABLE_PATHS=${writablePaths.join(":")}`,
         "--env",
-        `EVAL_SUPERVISOR_MAX_MS=${String(Math.max(1, Math.min(options.supervisorMaxMs ?? supervisorAllowanceMs, spec.deadlineAtMs === undefined ? supervisorAllowanceMs : spec.deadlineAtMs - Date.now())))}`,
+        `EVAL_SUPERVISOR_MAX_MS=${String(Number.isFinite(supervisorLifetimeMs) ? supervisorLifetimeMs : 0)}`,
         // Derived from the declared network policy: the entrypoint's iptables rule and
         // every public egress probe expectation both read this one value.
         "--env",
@@ -1413,12 +1458,12 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         GUEST_SUPERVISOR,
         "supervise",
       ];
-      const run = await runContainerCli(args, { cliPath, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
+      const run = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
       if (run.code !== 0 || run.aborted || run.timedOut || run.truncated) throw cliFailure("createGuest", args, run);
 
       // The digest the RUNTIME started, not the one we asked for. This is what makes
       // "both arms ran from one image digest" an observation.
-      const inspect = await runContainerCli(["inspect", spec.name], { cliPath, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
+      const inspect = await runContainerCli(["inspect", spec.name], { cliPath, spawnProcess, timeoutMs, signal: spec.signal, deadlineAtMs: spec.deadlineAtMs });
       if (inspect.code !== 0) throw cliFailure("createGuest.inspect", ["inspect", spec.name], inspect);
       const started = containerImageDigest(parseJson("container inspect", inspect.stdout));
       if (started !== null && started !== spec.imageDigest) {
@@ -1437,7 +1482,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
       while (Date.now() < deadline) {
         const probe = await runContainerCli(
           ["exec", "--user", `${GUEST_UID}:${GUEST_GID}`, spec.name, "cat", `${GUEST_CONTROL_DIR}/ready`],
-          { cliPath, timeoutMs: 20_000, signal: spec.signal, deadlineAtMs: deadline },
+          { cliPath, spawnProcess, timeoutMs: 20_000, signal: spec.signal, deadlineAtMs: deadline },
         );
         if (probe.code === 0 && probe.stdout.trim() !== "") {
           ready = true;
@@ -1447,7 +1492,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         await new Promise((resolve) => setTimeout(resolve, Math.min(READY_POLL_MS, Math.max(1, deadline - Date.now()))));
       }
       if (!ready) {
-        const logs = spec.signal?.aborted || Date.now() >= deadline ? null : await runContainerCli(["logs", spec.name], { cliPath, timeoutMs: 20_000, signal: spec.signal, deadlineAtMs: deadline }).catch(() => null);
+        const logs = spec.signal?.aborted || Date.now() >= deadline ? null : await runContainerCli(["logs", spec.name], { cliPath, spawnProcess, timeoutMs: 20_000, signal: spec.signal, deadlineAtMs: deadline }).catch(() => null);
         throw new EvalError(
           "platform-unsupported",
           `guest ${spec.name} never became ready: ${lastDetail}${logs === null ? "" : ` | logs: ${logs.stdout.trim().slice(0, 300)}${logs.stderr.trim().slice(0, 300)}`}`,
@@ -1461,19 +1506,20 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         timeoutMs,
         labels,
         allowedTcpPorts,
-        ...(spec.deadlineAtMs === undefined ? {} : { deadlineAtMs: spec.deadlineAtMs }),
+        ...(spec.deadlineAtMs === undefined || !Number.isFinite(spec.deadlineAtMs) ? {} : { deadlineAtMs: spec.deadlineAtMs }),
         ...(spec.signal === undefined ? {} : { signal: spec.signal }),
         destroyed: false,
         attested: false,
         deliveredCredentialVariables: [],
         lastAttestation: null,
+        spawnProcess: options.spawnProcess ?? spawn,
       });
     },
 
     async inspectResourceOwnership(kind: ResourceKind, name: string, expectedLabels: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<ResourceOwnership> {
       if (kind === "image") return { status: "unknown", labels: {}, reason: "shared image ownership is not used for recovery destruction" };
       const args = kind === "network" ? ["network", "inspect", name] : ["inspect", name];
-      const result = await runContainerCli(args, { cliPath, timeoutMs, signal });
+      const result = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal });
       if (result.code !== 0) {
         if (looksAbsent(`${kind}.inspect`, result)) return { status: "unknown", labels: {}, reason: "resource is absent" };
         return { status: "unknown", labels: {}, reason: `exact ${kind} ownership metadata could not be inspected` };
@@ -1497,7 +1543,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         const resolved = await resolveImageReference(name, signal);
         if (resolved === null) return "absent";
         const args = ["image", "inspect", resolved.reference];
-        const result = await runContainerCli(args, { cliPath, timeoutMs, signal });
+        const result = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal });
         if (result.code === 0) {
           if (!name.startsWith("sha256:")) return "present";
           // A reference that exists but now points at different content is NOT the exact
@@ -1508,7 +1554,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         throw cliFailure("inspectResource", args, result);
       }
       const args = kind === "network" ? ["network", "inspect", name] : ["inspect", name];
-      const result = await runContainerCli(args, { cliPath, timeoutMs, signal });
+      const result = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal });
       if (result.code === 0) return "present";
       if (looksAbsent(`${kind}.inspect`, result)) return "absent";
       throw cliFailure("inspectResource", args, result);
@@ -1523,7 +1569,7 @@ export function createAppleContainerSandbox(options: AppleContainerSandboxOption
         return { status: "already-absent", verified: true, failure: null };
       }
       const args = ["image", "delete", resolved.reference];
-      const result = await runContainerCli(args, { cliPath, timeoutMs, signal });
+      const result = await runContainerCli(args, { cliPath, spawnProcess, timeoutMs, signal });
       if (result.code === 0) {
         references.delete(name);
         return { status: "destroyed", verified: true, failure: null };

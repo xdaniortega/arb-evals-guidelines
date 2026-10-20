@@ -1,8 +1,7 @@
 /**
  * Fake sandbox conformance.
  *
- * The double is the only sandbox Phase 1 has, so its seams must behave like the
- * contract they stand in for: no credential before attestation, no retained secret
+ * The test double must honor the sandbox contract: no credential before attestation, no retained secret
  * value, cancellable staging and export, refused unsafe staged paths, and
  * exact-identity presence reporting for cleanup.
  */

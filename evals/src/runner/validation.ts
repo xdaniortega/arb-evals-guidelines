@@ -6,9 +6,10 @@
  * fixture, output path, oracle) and is identical for both arms of a pair.
  */
 
-import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import {
   CANDIDATE_MODES,
+  CONDITION_OPERATION_ALLOWANCE_MS,
   EvalError,
   WORKSPACE_OUTPUT_MARKER,
   assertNotAborted,
@@ -17,12 +18,12 @@ import {
 } from "../core/types.ts";
 import type {
   CandidateMode,
-  CaseValidatorModule,
   SnapshotValidationInput,
   StructuredFailure,
   ValidationOutcome,
 } from "../core/types.ts";
 import { assertSafeRelativePath } from "../core/experiment.ts";
+import { scheduleTimeout, type DeadlineTimer } from "../core/timing.ts";
 import type { FrozenFile } from "./case-loader.ts";
 
 export { CANDIDATE_MODES, WORKSPACE_OUTPUT_MARKER };
@@ -152,16 +153,15 @@ export interface ValidatorRequest {
   /** Frozen validator bundle files containing entry file and all dependencies. */
   readonly validatorBundle?: readonly ValidatorBundleFile[];
   /**
-   * Cooperative cancellation. Implementations MUST check it on entry and fail with
-   * EvalError `interrupted` when aborted, so validation can be bounded by the run's
-   * wall clock and by a signal.
+   * Cancellation. Implementations MUST check it on entry and stop in-flight grading
+   * with EvalError `interrupted`, independently of the arm's task time limit.
    */
   readonly signal?: AbortSignal;
   /**
    * Hard upper bound on the whole validator run, in milliseconds.
    *
-   * Derived by the runner from the already-resolved wall-clock limit; never a constant
-   * invented here. Omitted only by callers that have no resolved limits (unit tests).
+   * Supplied by the runner's infrastructure allowance, independently of arm time.
+   * Standalone callers that omit it use the same finite infrastructure default.
    * Exceeding it is a `validator-infrastructure` outcome with `score: null`, never a
    * task failure.
    */
@@ -195,59 +195,62 @@ function infrastructureOutcome(failure: StructuredFailure): ValidationOutcome {
 }
 
 /**
- * Races a validator against its deadline and against cooperative cancellation.
- *
- * A deadline can only pre-empt a validator that yields; a validator that blocks the loop
- * synchronously is still caught after the fact by the elapsed-time check in the caller.
- * The losing promise is explicitly silenced so a late rejection is never unhandled.
+ * @notice Keeps synchronous validator work outside the host cancellation loop.
+ * @param request Trusted validator path, cloned grading inputs, and cancellation signal.
+ * @param deadlineMs Finite infrastructure allowance for grading.
+ * @returns A validated grading outcome before the worker is terminated.
+ * @dev Worker isolation provides liveness, not measured-container network attestation.
  */
-async function withValidatorDeadline<T>(
-  work: Promise<T>,
-  deadlineMs: number | null,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (deadlineMs === null && signal === undefined) return work;
-  work.catch(() => undefined);
-  let timer: ReturnType<typeof setTimeout> | null = null;
+async function runValidatorWorker(request: ValidatorRequest, deadlineMs: number): Promise<ValidationOutcome> {
+  const worker = new Worker(new URL("./validator-worker.ts", import.meta.url), {
+    workerData: { validatorPath: request.validatorPath, input: request.input },
+    execArgv: ["--experimental-strip-types"],
+    // A pure validator needs its explicit inputs, not ambient credentials or Node hooks.
+    env: {},
+    stdout: true,
+    stderr: true,
+  });
+  // Validator logging is not evidence and must not leak into the CLI or test output.
+  worker.stdout.resume();
+  worker.stderr.resume();
+  let timer: DeadlineTimer | null = null;
   let onAbort: (() => void) | null = null;
-  const bound = new Promise<never>((_resolve, reject) => {
-    if (deadlineMs !== null) {
-      timer = setTimeout(() => {
-        reject(
-          new EvalError(
-            "validator-infrastructure",
-            `the validator exceeded its bounded deadline of ${deadlineMs}ms and was abandoned`,
-            { at: "validator run" },
-          ),
-        );
-      }, deadlineMs);
-      if (typeof timer.unref === "function") timer.unref();
-    }
-    if (signal !== undefined) {
+  try {
+    return await new Promise<ValidationOutcome>((resolve, reject) => {
+      worker.once("message", (message: { outcome?: unknown; failure?: StructuredFailure }) => {
+        try {
+          if (message.failure !== undefined) {
+            throw new EvalError(message.failure.code, message.failure.message, { at: message.failure.at ?? undefined });
+          }
+          resolve(decodeValidationOutcome(message.outcome, "validator outcome"));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      worker.once("error", reject);
+      worker.once("exit", (code) => reject(new EvalError(
+        "validator-infrastructure", `validator worker exited before returning an outcome (exit ${code})`, { at: "validator run" },
+      )));
+      timer = scheduleTimeout(() => reject(new EvalError(
+        "validator-infrastructure", `the validator exceeded its bounded deadline of ${deadlineMs}ms and was terminated`, { at: "validator run" },
+      )), deadlineMs);
       onAbort = (): void => {
         reject(new EvalError("interrupted", "the validator run was aborted", { at: "validator run" }));
       };
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
-  try {
-    return await Promise.race([work, bound]);
+      request.signal?.addEventListener("abort", onAbort, { once: true });
+      if (request.signal?.aborted) onAbort();
+    });
   } finally {
-    if (timer !== null) clearTimeout(timer);
-    if (onAbort !== null) signal?.removeEventListener("abort", onAbort);
+    (timer as DeadlineTimer | null)?.cancel();
+    if (onAbort !== null) request.signal?.removeEventListener("abort", onAbort);
+    await worker.terminate();
   }
 }
 
 /**
- * Host, in-process validator runner.
- *
- * The validator is owner-authored trusted code and receives only immutable base64
- * strings, so no guest-authored code executes and the candidate cannot be mutated.
- * It is still a test double: it does not prove network and credential isolation, so it
- * is only usable in `fake` mode.
- *
- * The run is bounded: a pathological validator produces a `validator-infrastructure`
- * outcome with `score: null` rather than hanging the run or scoring a task failure.
+ * @notice Provides fake-mode grading in terminable workers with cloned candidate inputs.
+ * @returns A validator test double with bounded execution and cancellation.
+ * @dev Retains the historical in-process identifier; it does not attest network isolation.
  */
 export function createInProcessValidatorRunner(): ValidatorRunner {
   return {
@@ -258,27 +261,12 @@ export function createInProcessValidatorRunner(): ValidatorRunner {
       const deadlineMs =
         typeof request.deadlineMs === "number" && Number.isFinite(request.deadlineMs) && request.deadlineMs > 0
           ? request.deadlineMs
-          : null;
+          : CONDITION_OPERATION_ALLOWANCE_MS;
       try {
         assertNotAborted(request.signal, "validator run");
-        const outcome = await withValidatorDeadline(
-          (async (): Promise<ValidationOutcome> => {
-            const loaded = (await import(pathToFileURL(request.validatorPath).href)) as Partial<CaseValidatorModule>;
-            if (typeof loaded.validateSnapshot !== "function") {
-              throw new EvalError(
-                "validator-infrastructure",
-                `validator ${request.validatorPath} does not export validateSnapshot()`,
-              );
-            }
-            return decodeValidationOutcome(loaded.validateSnapshot(request.input), "validator outcome");
-          })(),
-          deadlineMs,
-          request.signal,
-        );
-        // A validator that blocked the event loop cannot be pre-empted; it is still
-        // refused after the fact rather than allowed to contribute a score.
+        const outcome = await runValidatorWorker(request, deadlineMs);
         const elapsedMs = Date.now() - startedAt;
-        if (deadlineMs !== null && elapsedMs > deadlineMs) {
+        if (elapsedMs > deadlineMs) {
           throw new EvalError(
             "validator-infrastructure",
             `the validator took ${elapsedMs}ms, exceeding its bounded deadline of ${deadlineMs}ms`,

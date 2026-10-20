@@ -1,7 +1,7 @@
 /**
  * Paired run orchestration: preflight -> freeze -> execute -> validate -> clean up -> seal.
  *
- * The stage order is the contract (evals/ARCHITECTURE.md section 6) and is not an
+ * The stage order is the contract (evals/docs/ARCHITECTURE.md section 6) and is not an
  * implementation detail. Each stage exists to make one specific dishonest outcome
  * impossible:
  *
@@ -13,10 +13,9 @@
  *   `ParityBinding`, including the skill snapshot tree hash, which is bound to BOTH arms
  *   even though only treatment stages it. Frozen inputs are written before dispatch and
  *   never rewritten.
- * - **Execute** is strictly sequential and destroys the previous guest and network, then
- *   VERIFIES their absence by exact-identity lookup, before the next condition is
- *   created. Overlapping guests would silently share host pressure and make the arms
- *   incomparable.
+ * - **Execute** prepares both isolated arms before dispatch. Overlap runs them together;
+ *   serial dispatch waits for baseline capture and verified cleanup before treatment.
+ *   Both schedules keep separate guests, networks, and prompt-relative budgets.
  * - **Validate** projects a bounded candidate from the exported workspace and grades both
  *   arms with the same validator. It runs after both guests are gone, so no model guest
  *   is alive while grading happens.
@@ -32,6 +31,8 @@
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { assertNotAborted } from "../core/types.ts";
+import { scheduleTimeout, type DeadlineTimer } from "../core/timing.ts";
 import {
   assertParity,
   buildManifestTree,
@@ -56,8 +57,7 @@ import {
   CONDITION_CLEANUP_ALLOWANCE_MS,
   CONDITION_OPERATION_ALLOWANCE_MS,
   EvalError,
-  MAX_ARM_WALL_CLOCK_MS,
-  SAFE_DEFAULT_LIMITS,
+  resolveGuestTimeouts,
   SCHEMA_VERSION,
   toStructuredFailure,
 } from "../core/types.ts";
@@ -112,7 +112,7 @@ import type {
 } from "../core/types.ts";
 import type { SkillToolBundle } from "../core/skill-tools.ts";
 import { resolveSkillToolBundle } from "./skill-tool-manifest.ts";
-import type { RetainedRunInputs } from "./reproduction.ts";
+import { scoreWithRubric } from "./rubric.ts";
 
 // ---------------------------------------------------------------------------
 // Frozen guest layout and policies
@@ -122,38 +122,23 @@ export const EVAL_WORKSPACE_ROOT = "/work";
 export const EVAL_HOME_DIR = "/home/agent";
 export const EVAL_SKILL_GUEST_ROOT = "/opt/skills";
 
-/** Identical for both arms. Public egress only; every host-adjacent range is denied. */
+/** Identical for both arms: public IPv4 egress with explicit local, multicast and broadcast denials. */
 export const EVAL_NETWORK_POLICY: NetworkPolicy = {
   allowPublicDns: true,
   allowPublicTcpPorts: "all",
   denyRanges: [
     "0.0.0.0/8",
     "10.0.0.0/8",
+    "100.64.0.0/10",
     "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
     "192.168.0.0/16",
-    "::1/128",
-    "fc00::/7",
-    "fe80::/10",
+    "224.0.0.0/4",
+    "255.255.255.255/32",
+    "::/0",
   ],
 };
-
-export const EVAL_AMBIENT_TOOLS: readonly string[] = ["glob"];
-
-/**
- * Ambient tools OFFERED to a case, intersected with its frozen allowlist.
- *
- * The case's `allowedTools` is the frozen, parity-bound native/optional-ambient tool policy,
- * and the guest independently refuses an ambient tool outside it, so requesting one the
- * case never allowed would fail every arm at readiness. Intersecting keeps the ambient set
- * identical across arms (it derives only from frozen case bytes) while letting a case that
- * does not list `glob` run exactly as before.
- */
-export function resolveAmbientTools(allowedTools: readonly string[]): readonly string[] {
-  const allowed = new Set(allowedTools);
-  return EVAL_AMBIENT_TOOLS.filter((tool) => allowed.has(tool));
-}
 
 /**
  * Identical for both arms. Read-only root plus explicitly bounded writable paths.
@@ -190,7 +175,6 @@ export interface ExecutionPolicy {
   readonly mcpClient: typeof MCP_CLIENT_POLICY;
   readonly schemaVersion: number;
   readonly armOrder: readonly ConditionId[];
-  readonly ambientTools: readonly string[];
   readonly sequentialExecution: boolean;
   readonly destroyPreviousBeforeNext: boolean;
   readonly verifyDestructionBeforeNext: boolean;
@@ -202,50 +186,28 @@ export interface ExecutionPolicy {
   readonly maxActiveAgents: number;
 }
 
-/** Bounded startup work before guests are prepared; not a whole-run execution cap. */
-export const MAX_INVOCATION_MS = 300_000;
-
 /**
- * Upper bound on a single prompt allowance, also validated by the guest protocol.
+ * Bounded startup work before guests are prepared; not a whole-run execution cap.
+ *
+ * This is the startup/backstop watchdog for infrastructure liveness. It bounds image
+ * build and pre-dispatch preparation only. It is deliberately NOT a function of the
+ * per-arm wall clock, so it never becomes a hidden finite cap on a legitimately-unlimited
+ * arm: an unlimited arm runs without any wall-clock deadline, while startup stays bounded.
  */
-export const MAX_ARM_ALLOWANCE_MS = MAX_ARM_WALL_CLOCK_MS;
+export const STARTUP_ALLOWANCE_MS = 300_000;
+
 export const CLEANUP_RESERVE_MS = CONDITION_CLEANUP_ALLOWANCE_MS;
-export const SEAL_RESERVE_MS = 5_000;
 
-export function computeRunnerCeilingMs(scheduledConditionCount: number, wallClockMs: number): number {
-  if (!Number.isSafeInteger(scheduledConditionCount) || scheduledConditionCount <= 0 ||
-      !Number.isSafeInteger(wallClockMs) || wallClockMs <= 0 || wallClockMs > MAX_ARM_ALLOWANCE_MS) {
-    throw new EvalError("limit-invalid", "condition count and per-child wallClockMs must be bounded positive integers", { at: "limits.wallClockMs" });
-  }
-  // Reserve trusted preparation and startup, then each child's bounded setup, capture,
-  // grading and guest/grader cleanup independently from execution. Serial is the
-  // conservative bound even when the two prompts overlap.
-  const totalMs = MAX_INVOCATION_MS + wallClockMs + scheduledConditionCount *
-    (wallClockMs + 3 * CONDITION_OPERATION_ALLOWANCE_MS + 2 * CLEANUP_RESERVE_MS) + CLEANUP_RESERVE_MS;
-  if (!Number.isSafeInteger(totalMs) || totalMs > 2_147_483_647 - 120_000) {
-    throw new EvalError("limit-invalid", "resolved invocation budget exceeds the supported timer range", { at: "repetitions" });
-  }
-  return totalMs;
-}
-
-export function resolveOverallCeilingMs(input: {
-  readonly override: number | undefined;
-  readonly derived: number;
-  readonly scheduledConditionCount: number;
-  readonly perConditionMs: number;
-}): number {
-  const requested = input.override ?? input.derived;
-  if (!Number.isSafeInteger(requested) || requested <= 0 || requested > 2_147_483_647 - 120_000) {
-    throw new EvalError("limit-invalid", "invocation budget must be a positive integer within the supported timer range", { at: "invocation budget" });
-  }
-  return requested;
-}
+// The fixed maximum permitted arm duration and the overall run-time ceiling were removed
+// (task-limit policy, item 6). Each arm is bounded only by its own per-arm wall clock
+// (or unlimited when null); every infrastructure operation is bounded by its own
+// allowance; and process liveness is guarded by the startup deadline plus the CLI hard
+// backstop. There is no single combined ceiling over the whole run.
 
 export function buildExecutionPolicy(input: {
   readonly armOrder: readonly ConditionId[];
   readonly candidateMode: CandidateMode;
   readonly validatorIsolationMode: string;
-  readonly ambientTools: readonly string[];
   readonly schedulingPolicy?: "serial" | "overlap";
 }): ExecutionPolicy {
   const schedulingPolicy = input.schedulingPolicy ?? "serial";
@@ -254,7 +216,6 @@ export function buildExecutionPolicy(input: {
     schemaVersion: SCHEMA_VERSION,
     mcpClient: MCP_CLIENT_POLICY,
     armOrder: [...input.armOrder],
-    ambientTools: [...input.ambientTools],
     sequentialExecution,
     destroyPreviousBeforeNext: true,
     verifyDestructionBeforeNext: true,
@@ -389,9 +350,6 @@ export const NO_RESOURCE_JOURNALED_STATUS = "no-resource-journaled";
 export type ConditionStatus = "completed" | "task-limit" | "infrastructure-failure" | "not-started";
 
 export type RunProgressEvent =
-  /** The overall run ceiling elapsed. Emitted before the cooperative abort so the reason
-   *  is visible in the log even if sealing takes a while afterwards. */
-  | { readonly type: "run-timeout"; readonly ceilingMs: number; readonly timestampMs: number }
   | { readonly type: "request-validated"; readonly timestampMs: number }
   | { readonly type: "preparation-started"; readonly timestampMs: number }
   | { readonly type: "preparation-completed"; readonly timestampMs: number }
@@ -440,11 +398,14 @@ export interface RunOptions {
   readonly guardedSecrets?: readonly GuardedSecret[];
   readonly credentials?: readonly CredentialDeliveryRequest[];
   /**
-   * Overall wall-clock ceiling for the WHOLE invocation, including preparation and cleanup.
-   * Defaults to the sum of all prompt and infrastructure allowances. A lower injected
-   * test deadline may curtail execution; public CLI runs always use the derived budget.
+   * Test-only overrides for the bounded INFRASTRUCTURE allowances (never the per-arm wall
+   * clock). These bound setup, capture, grading and cleanup independently of arm time; a
+   * test may shrink them to exercise infrastructure bounds/cancellation quickly. Production
+   * always uses the module constants. There is no overall run-time ceiling.
    */
-  readonly overallCeilingMs?: number;
+  readonly operationAllowanceMs?: number;
+  readonly cleanupReserveMs?: number;
+  readonly startupAllowanceMs?: number;
   /** Process-boundary timestamp; prevents preflight/probes from restarting the clock. */
   readonly invocationStartedAtMs?: number;
   /** Optional trusted preparation executed once at the composition boundary before freezing. */
@@ -459,9 +420,9 @@ export interface RunOptions {
     readonly simulateSurvivingSecretHit?: boolean;
   };
   readonly schedulingPolicy?: "serial" | "overlap";
+  /** Optional flag: when true, preserve model reasoning verbatim in native session entries. Defaults to false (strip). */
+  readonly captureReasoning?: boolean;
   readonly onProgress?: (event: RunProgressEvent) => void;
-  /** Verified, complete retained bytes for fresh reproduction; bypasses source discovery/preparation. */
-  readonly retainedInputs?: RetainedRunInputs;
 }
 
 export type RunPairedEvaluationOptions = RunOptions;
@@ -498,12 +459,18 @@ interface ConditionState {
   nativePromotionFailure: EvalError | null;
   usage: HarnessRunResult["usage"] | null;
   timing: HarnessRunResult["timing"] | null;
+  /** Structured stop cause; null until the arm executes (never-started arms have none). */
+  stopCause: HarnessRunResult["stopCause"] | null;
+  /** Provider raw stop reason preserved verbatim, distinct from the harness stop cause. */
+  providerStopReason: string | null;
   exported: ExportedTree | null;
   /** The OBSERVED attestation this condition's guest reported. Null if it never started. */
   attestation: GuestAttestation | null;
   candidate: CandidateProjection | null;
   validation: ValidatorRun | null;
   cleanup: CleanupRecord[];
+  /** Retained per-resource creation operations; cleanup must not inspect unresolved identities. */
+  creationHandles: Partial<Record<"guest" | "network", BoundedEffect<unknown>>>;
   failures: StructuredFailure[];
   imageDigest: string | null;
   redactions: {
@@ -531,11 +498,14 @@ function newConditionState(step: ScheduleStep, plan: ConditionPlan): ConditionSt
     nativePromotionFailure: null,
     usage: null,
     timing: null,
+    stopCause: null,
+    providerStopReason: null,
     exported: null,
     attestation: null,
     candidate: null,
     validation: null,
     cleanup: [],
+    creationHandles: {},
     failures: [],
     imageDigest: null,
     redactions: {
@@ -579,13 +549,8 @@ export async function preflightForRun(input: {
     runtimeProfileId: selected.config.runtimeProfileId ?? suite.config.runtimeProfileId,
     profileCatalog: input.profileCatalog,
   });
-  if (resolved.limits.wallClockMs > MAX_ARM_ALLOWANCE_MS) {
-    throw new EvalError(
-      "limit-invalid",
-      `resolved wallClockMs ${resolved.limits.wallClockMs}ms (from ${resolved.provenance.wallClockMs}) exceeds the ${MAX_ARM_ALLOWANCE_MS}ms per-child execution maximum`,
-      { at: "limits.wallClockMs" },
-    );
-  }
+  // No fixed maximum arm duration: a finite wallClockMs of any positive size is accepted,
+  // and `null` means unlimited (no per-arm wall-clock deadline).
   return { suite, selected, resolved };
 }
 
@@ -679,7 +644,7 @@ export async function executeTrustedPreparer(
     options.signal.addEventListener("abort", parentAbortListener, { once: true });
   }
 
-  let timeoutId: NodeJS.Timeout | null = null;
+  let timeoutId: DeadlineTimer | null = null;
   let prepAbortListener: (() => void) | null = null;
 
   const timeoutMs = Math.max(0, options.deadlineAtMs - Date.now());
@@ -704,7 +669,7 @@ export async function executeTrustedPreparer(
     prepController.signal.addEventListener("abort", prepAbortListener, { once: true });
 
     // IMPORTANT: Keep timeout referenced while awaiting so Node child cannot silently exit with code 0 on a pending Promise!
-    timeoutId = setTimeout(() => {
+    timeoutId = scheduleTimeout(() => {
       prepController.abort(
         new EvalError(
           "interrupted",
@@ -760,7 +725,7 @@ export async function executeTrustedPreparer(
     );
   } finally {
     if (timeoutId !== null) {
-      clearTimeout(timeoutId);
+      (timeoutId as DeadlineTimer).cancel();
       timeoutId = null;
     }
     if (prepAbortListener !== null) {
@@ -779,16 +744,15 @@ export async function executeTrustedPreparer(
 // ---------------------------------------------------------------------------
 
 /**
- * @notice Coordinates an offline paired evaluation comparing baseline and treatment arms in isolated sandbox environments.
+ * @notice Coordinates a paired evaluation comparing baseline and treatment arms in isolated sandbox environments.
  * @param options Evaluation options specifying target model, suite, case selector, harness, sandbox, and limits.
  * @returns Complete evaluation outcome containing arm outcomes, comparative deltas, telemetry, and sealed receipt.
- * @dev The overall run ceiling dedicates reserved time windows for external process cleanup, state destruction, and receipt sealing before invocation timeout.
+ * @dev Arm timing is independent of bounded setup, grading, capture and cleanup operations; cancellation still tears down exact owned resources.
  */
 export async function runPairedEvaluation(options: RunOptions): Promise<RunResult> {
   const invocationStartedAtMs = options.invocationStartedAtMs ?? Date.now();
   // -- Stage 1: preflight ---------------------------------------------------
-  const retained = options.retainedInputs;
-  const selection = retained === undefined ? options.preflightInputs ?? await preflightForRun({
+  const selection = options.preflightInputs ?? await preflightForRun({
     evalsRoot: options.evalsRoot,
     repoRoot: options.repoRoot,
     skillPath: options.skillPath,
@@ -796,40 +760,30 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
     caseSelector: options.caseSelector,
     cliLimits: options.cliLimits,
     profileCatalog: options.profileCatalog,
-  }) : null;
-  if (retained !== undefined) {
-    if (options.preparer !== undefined || Object.keys(options.cliLimits).length > 0 || options.mode !== retained.mode ||
-        options.suiteId !== retained.frozen.suite.id || options.caseSelector !== retained.frozen.selector ||
-        options.target.provider !== retained.target.provider || options.target.model !== retained.target.model || options.target.thinking !== retained.target.thinking ||
-        options.repetitions !== retained.repetitions || options.schedulingPolicy !== retained.schedulingPolicy ||
-        options.harness.id !== retained.harnessId || options.sandbox.id !== retained.sandboxId || options.validatorRunner.id !== retained.validatorRunnerId) {
-      throw new EvalError("parity-violation", "reproduction settings conflict with the verified retained plan", { at: "--from" });
-    }
-  }
+  });
   assertModeAllows(options);
   options.onProgress?.({ type: "request-validated", timestampMs: Date.now() });
 
-  const resolved = retained === undefined ? selection!.resolved : { limits: retained.limits, provenance: retained.limitProvenance };
-  const scheduledConditionCount = Math.max(1, (options.repetitions ?? 1) * 2);
-  const derivedCeilingMs = computeRunnerCeilingMs(scheduledConditionCount, resolved.limits.wallClockMs);
-  const overallRunCeilingMs = resolveOverallCeilingMs({
-    override: options.overallCeilingMs,
-    derived: derivedCeilingMs,
-    scheduledConditionCount,
-    perConditionMs: resolved.limits.wallClockMs,
-  });
-  const invocationDeadlineAtMs = invocationStartedAtMs + overallRunCeilingMs;
-  const cleanupReserveMs = Math.min(CLEANUP_RESERVE_MS, Math.max(1, Math.floor(overallRunCeilingMs / 3)));
-  const activeDeadlineAtMs = invocationDeadlineAtMs - cleanupReserveMs;
-  const cleanupDeadlineAtMs = invocationDeadlineAtMs - Math.min(SEAL_RESERVE_MS, Math.max(1, Math.floor(cleanupReserveMs / 2)));
-  const startupDeadlineAtMs = Math.min(activeDeadlineAtMs, invocationStartedAtMs + resolved.limits.wallClockMs + MAX_INVOCATION_MS);
+  const resolved = selection.resolved;
+  const wallClockMs = resolved.limits.wallClockMs;
+  // Bounded infrastructure allowances (never the arm wall clock). Production uses the
+  // module constants; tests may shrink them to exercise infra bounds/cancellation quickly.
+  const operationAllowanceMs = options.operationAllowanceMs ?? CONDITION_OPERATION_ALLOWANCE_MS;
+  const cleanupReserveMs = options.cleanupReserveMs ?? CLEANUP_RESERVE_MS;
+  const startupAllowanceMs = options.startupAllowanceMs ?? STARTUP_ALLOWANCE_MS;
+  // There is NO overall run-time ceiling. Each infrastructure operation carries its own
+  // finite deadline computed from `Date.now()` plus an allowance at its call site (setup
+  // and capture use operationAllowanceMs; cleanup uses cleanupReserveMs), so nothing caps
+  // arm execution and no hidden finite bound is introduced anywhere.
+  // Startup liveness only; independent of the arm wall clock so unlimited arms are uncapped.
+  const startupDeadlineAtMs = invocationStartedAtMs + startupAllowanceMs;
 
   // -- Cancellation ---------------------------------------------------------
-  // The active-work timer is armed before preparation/freezing. Its named reserve is
-  // exclusively for stopping external work, exact cleanup, sealing and verification.
+  // Cancellation is a SEPARATE responsibility from arm timing: parent abort and
+  // SIGINT/SIGTERM stop active work and begin bounded cleanup regardless of arm limits.
   const controller = new AbortController();
   // Ordinary arm failure stops active agents, but a gradeable overlap sibling gets its
-  // already-produced output captured until an external/deadline/quarantine stop occurs.
+  // already-produced output captured until an external/quarantine stop occurs.
   const captureController = new AbortController();
   const validationController = new AbortController();
   let stopReason: string | null = null;
@@ -840,14 +794,6 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
     if (stopReason === null) stopReason = reason;
     if (!controller.signal.aborted) controller.abort(cause instanceof Error ? cause : new Error(reason));
   };
-  const activeTimer = setTimeout(() => {
-    const timeout = new Error("overall invocation active-work deadline elapsed");
-    validationController.abort(timeout);
-    stopCapture(timeout);
-    options.onProgress?.({ type: "run-timeout", ceilingMs: overallRunCeilingMs, timestampMs: Date.now() });
-    stop(`overall invocation active-work deadline elapsed; ${cleanupReserveMs}ms cleanup reserve began`, timeout);
-  }, Math.max(0, activeDeadlineAtMs - Date.now()));
-  if (typeof activeTimer.unref === "function") activeTimer.unref();
   const onParentAbort = (): void => {
     validationController.abort(options.signal?.reason);
     stopCapture(options.signal?.reason ?? new Error("the caller aborted the run"));
@@ -857,6 +803,8 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   else options.signal?.addEventListener("abort", onParentAbort, { once: true });
 
   let sealing = false;
+  // Set before snapshotting/sealing so no late external continuation can mutate state.
+  let finalized = false;
   const onSignal = (name: string): (() => void) => (): void => {
     if (sealing) {
       process.stderr.write(`${name} received while sealing evidence; ignoring it so the run is not left half-sealed\n`);
@@ -877,7 +825,6 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   const releaseCancellation = (): void => {
     if (cancellationReleased) return;
     cancellationReleased = true;
-    clearTimeout(activeTimer);
     options.signal?.removeEventListener("abort", onParentAbort);
     if (options.installSignalHandlers === true) {
       process.removeListener("SIGINT", onSigint);
@@ -886,25 +833,26 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   };
   const signal = controller.signal;
 
-  // Optional trusted preparation runs once before freezing and shares the same absolute
-  // invocation deadline; it cannot consume the cleanup reserve.
+  // Optional trusted preparation runs once before freezing. It is a bounded infrastructure
+  // operation with its own allowance and never consumes the cleanup reserve.
   let prepared: PreparedCaseData | undefined;
-  if (retained === undefined && options.preparer !== undefined) {
+  if (options.preparer !== undefined) {
+    // Startup liveness bounds pre-dispatch preparation (not the arm wall clock): if the
+    // startup allowance is already spent before preparation begins, fail closed instead of
+    // starting work that cannot finish within the pre-dispatch budget.
+    if (Date.now() >= startupDeadlineAtMs) {
+      releaseCancellation();
+      throw new EvalError("interrupted", "run preparation exceeded its startup deadline before dispatch", { at: "run preparation" });
+    }
     options.onProgress?.({ type: "preparation-started", timestampMs: Date.now() });
     try {
       const prepStart = Date.now();
-      if (prepStart >= activeDeadlineAtMs) {
-        throw new EvalError(
-          "interrupted",
-          `overall invocation active-work deadline elapsed before preparation (current time: ${prepStart}ms, deadline: ${activeDeadlineAtMs}ms)`,
-          { at: "trusted-preparation" },
-        );
-      }
       prepared = await executeTrustedPreparer({
         preparer: options.preparer,
-        suiteId: selection!.suite.id,
-        caseSelector: selection!.selected.selector,
-        deadlineAtMs: Math.min(prepStart + resolved.limits.wallClockMs, activeDeadlineAtMs),
+        suiteId: selection.suite.id,
+        caseSelector: selection.selected.selector,
+        // Preparation has its own allowance within the remaining startup window.
+        deadlineAtMs: Math.min(startupDeadlineAtMs, prepStart + operationAllowanceMs),
         signal,
       });
       options.onProgress?.({ type: "preparation-completed", timestampMs: Date.now() });
@@ -916,7 +864,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
 
   let frozen: FrozenCase;
   try {
-    frozen = retained?.frozen ?? await freezeCase(selection!.suite, selection!.selected, prepared);
+    frozen = await freezeCase(selection.suite, selection.selected, prepared);
   } catch (error) {
     releaseCancellation();
     throw error;
@@ -927,13 +875,6 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   const stateDir = options.stateDir ?? join(options.evalsRoot, ".state");
   const guardedSecrets = options.guardedSecrets ?? [];
   const candidateMode: CandidateMode = frozen.config.candidateMode;
-  if (retained !== undefined) {
-    const currentExecution = buildExecutionPolicy({ armOrder: ["baseline", "treatment"], candidateMode, validatorIsolationMode: options.validatorRunner.id, ambientTools: resolveAmbientTools(frozen.config.allowedTools), schedulingPolicy: options.schedulingPolicy });
-    if (canonicalJsonSha256(EVAL_NETWORK_POLICY) !== retained.policyHashes.network || canonicalJsonSha256(EVAL_GUEST_POLICY) !== retained.policyHashes.guest || canonicalJsonSha256(currentExecution) !== retained.policyHashes.execution) {
-      releaseCancellation();
-      throw new EvalError("parity-violation", "current evaluator policy drifted from the retained run; reproduction is refused before external effects", { at: "--from" });
-    }
-  }
 
   const journal = await createRunJournal({
     stateDir,
@@ -953,6 +894,8 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   };
 
   let states: ConditionState[] = [];
+  // Retain timed-out operations so cleanup never races their late resource creation.
+  const pendingEffects: Array<{ readonly handle: BoundedEffect<unknown>; readonly conditionId: ConditionId | null }> = [];
   let plan: RunPlan | null = null;
   let snapshot: SkillSnapshot | null = null;
   let frozenSnapshot: FrozenInputSnapshot | null = null;
@@ -960,13 +903,13 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   try {
     // -- Stage 2: freeze ----------------------------------------------------
     options.onProgress?.({ type: "freeze-started", timestampMs: Date.now() });
-    snapshot = retained?.snapshot ?? await createSkillSnapshot({
+    snapshot = await createSkillSnapshot({
       repoRoot: options.repoRoot,
       skillPath: frozen.suite.skillPath,
       snapshotDir: join(options.workDir, "skill-snapshot"),
     });
 
-    const skillToolBundle = retained?.skillToolBundle ?? await resolveSkillToolBundle({
+    const skillToolBundle = await resolveSkillToolBundle({
       snapshotDir: snapshot.snapshotDir,
       at: `skill ${frozen.suite.skillPath}`,
     });
@@ -982,17 +925,15 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       conditionId: null,
       status: null,
     });
-    const image = await boundedEffect(startupDeadlineAtMs, "image preparation", (startupSignal) => options.sandbox.buildImage({
+    const imageHandle = boundedEffect(startupDeadlineAtMs, "image preparation", (startupSignal) => options.sandbox.buildImage({
       runtimeProfileId: frozen.runtimeProfileId,
       contextDir: join(options.evalsRoot, "container"),
       signal: AbortSignal.any([signal, startupSignal]),
       deadlineAtMs: startupDeadlineAtMs,
-      ...(retained === undefined ? {} : { expectedIdentity: { reference: retained.image.reference, digest: retained.image.digest } }),
       onBuildStarted: () => options.onProgress?.({ type: "image-build-started", profileId: frozen.runtimeProfileId, timestampMs: Date.now() }),
     }), "interrupted");
-    if (retained !== undefined && (image.reference !== retained.image.reference || image.digest !== retained.image.digest || image.runtimeProfileId !== retained.image.runtimeProfileId || image.testDouble !== retained.image.testDouble)) {
-      throw new EvalError("evidence-invalid", "acquired image does not exactly match the retained image identity", { at: "--from" });
-    }
+    pendingEffects.push({ handle: imageHandle as BoundedEffect<unknown>, conditionId: null });
+    const image = await imageHandle.result;
     await journal.record({
       event: "observed",
       action: "create",
@@ -1030,7 +971,6 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       armOrder: ["baseline", "treatment"],
       candidateMode,
       validatorIsolationMode: options.validatorRunner.id,
-      ambientTools: resolveAmbientTools(frozen.config.allowedTools),
       schedulingPolicy: options.schedulingPolicy,
     });
     const skillGuestPath = `${EVAL_SKILL_GUEST_ROOT}/${frozen.suite.id}`;
@@ -1107,7 +1047,6 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       sandboxId: options.sandbox.id,
       validatorRunnerId: options.validatorRunner.id,
       testDouble: isTestDoubleRun(options),
-      reproduction: retained === undefined ? null : { sourceReceiptPath: retained.sourceReceiptPath, sourceRunId: retained.sourceRunId },
     });
 
     // Prepare complete bounded input snapshot in evaluator-owned scratch state
@@ -1133,6 +1072,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       state.nativeCapture = createNativeSessionCapture({
         path: join(stateDir, "native-prefixes", `${options.runId}-${step.pairId}-${step.conditionId}.jsonl`),
         guardedSecrets,
+        captureReasoning: options.captureReasoning,
       });
       return state;
     });
@@ -1149,7 +1089,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       if (signal.aborted || paidCallsBlocked) {
         for (const state of pairStates) {
           state.notStartedReason = stopReason ?? "the run stopped before this pair started";
-          state.cleanup.push(...(await confirmNeverCreated(options.sandbox, journal, state, cleanupDeadlineAtMs)));
+          state.cleanup.push(...(await confirmNeverCreated(options.sandbox, journal, state, Date.now() + cleanupReserveMs)));
         }
         continue;
       }
@@ -1160,8 +1100,14 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       let preparationFailure: StructuredFailure | null = null;
       for (const state of pairStates) {
         try {
-          const preparationDeadline = Math.min(activeDeadlineAtMs, Date.now() + CONDITION_OPERATION_ALLOWANCE_MS);
-          prepared.set(state.step.conditionId, await boundedEffect(preparationDeadline, `${state.step.conditionId} preparation`, (preparationSignal) => prepareCondition({
+          const preparationDeadline = Date.now() + operationAllowanceMs;
+          // The guest must OUTLIVE setup: its supervisor covers setup + prompt + capture +
+          // cleanup. Derive that lifetime from the arm wall clock (finite) or leave it
+          // unbounded (unlimited). Setup CLI operations stay bounded by the outer
+          // preparation boundedEffect above, not by this longer guest-lifetime deadline.
+          const guestSupervisorMs = resolveGuestTimeouts(wallClockMs).supervisorMs;
+          const guestLifetimeDeadlineAtMs = guestSupervisorMs === null ? Number.POSITIVE_INFINITY : Date.now() + guestSupervisorMs;
+          const preparationHandle = boundedEffect(preparationDeadline, `${state.step.conditionId} preparation`, (preparationSignal) => prepareCondition({
             state,
             sandbox: options.sandbox,
             harness: options.harness,
@@ -1175,10 +1121,14 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
             guardedSecrets,
             credentials: options.credentials ?? [],
             signal: AbortSignal.any([signal, preparationSignal]),
-            deadlineAtMs: activeDeadlineAtMs,
+            deadlineAtMs: guestLifetimeDeadlineAtMs,
             skillToolBundle,
             skillToolBundleSha256,
-          }), "interrupted"));
+            captureReasoning: options.captureReasoning,
+            isFinalized: () => finalized,
+          }), "interrupted");
+          pendingEffects.push({ handle: preparationHandle as BoundedEffect<unknown>, conditionId: state.step.conditionId });
+          prepared.set(state.step.conditionId, await preparationHandle.result);
         } catch (error: unknown) {
           preparationFailure = structuredFrom(error);
           state.status = "infrastructure-failure";
@@ -1204,12 +1154,19 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           dispatched.add(state.step.conditionId);
           options.onProgress?.({ type: "arm-execution-started", pairIndex: p, arm: state.step.conditionId, timestampMs: Date.now() });
           try {
-            await dispatchArmPrompt({ state, harness: options.harness, prepared: prepared.get(state.step.conditionId)!, limits: resolved.limits, signal });
+            await dispatchArmPrompt({ state, harness: options.harness, prepared: prepared.get(state.step.conditionId)!, limits: resolved.limits, signal, isFinalized: () => finalized });
             if (state.status === "infrastructure-failure") stop(`${state.step.conditionId} failed: ${state.failures[0]?.code ?? "infrastructure failure"}`);
           } catch (error: unknown) {
             const failure = structuredFrom(error);
             state.status = "infrastructure-failure";
             state.notStartedReason = null;
+            // A local arm that throws before the harness could derive a stop cause still
+            // seals a concrete cause: an external cancellation is `external-cancellation`
+            // (matching the guest classification of the same event), and every other
+            // pre-cause throw is an `infrastructure-error`, never a silent null/unknown.
+            if (state.stopCause === null) {
+              state.stopCause = failure.code === "interrupted" ? "external-cancellation" : "infrastructure-error";
+            }
             state.failures.push(failure);
             runFailures.push(failure);
             if (failure.code === "secret-quarantine") blockPaidCalls("a secret quarantine blocks every further paid call in this run", true);
@@ -1222,9 +1179,11 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           if (!dispatched.has(state.step.conditionId)) return;
           try {
             const exportSignal = isOverlap && state.status !== "infrastructure-failure" ? captureController.signal : signal;
-            await boundedEffect(Math.min(activeDeadlineAtMs, Date.now() + CONDITION_OPERATION_ALLOWANCE_MS), `${state.step.conditionId} capture`,
+            const captureHandle = boundedEffect(Date.now() + operationAllowanceMs, `${state.step.conditionId} capture`,
               (captureSignal) => exportArmOutput({ state, prepared: prepared.get(state.step.conditionId)!, limits: resolved.limits, guardedSecrets,
-                signal: AbortSignal.any([exportSignal, captureSignal]), faults: options.faults }), "interrupted");
+                signal: AbortSignal.any([exportSignal, captureSignal]), faults: options.faults, isFinalized: () => finalized }), "interrupted");
+            pendingEffects.push({ handle: captureHandle as BoundedEffect<unknown>, conditionId: state.step.conditionId });
+            await captureHandle.result;
           } catch (error: unknown) {
             const failure = structuredFrom(error);
             state.status = "infrastructure-failure";
@@ -1234,7 +1193,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
             stop(`${state.step.conditionId} export failed: ${failure.code}`);
           }
         };
-        const cleanupArm = async (state: ConditionState, deadline = Math.min(cleanupDeadlineAtMs, Date.now() + CLEANUP_RESERVE_MS)): Promise<void> => {
+        const cleanupArm = async (state: ConditionState, deadline = Date.now() + cleanupReserveMs): Promise<void> => {
           if (cleaned.has(state.step.conditionId)) return;
           cleaned.add(state.step.conditionId);
           const outcomes = await destroyConditionResources(options.sandbox, journal, state, deadline);
@@ -1255,7 +1214,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           await runArm(baselineState);
           await exportArm(baselineState);
           options.onProgress?.({ type: "cleanup-started", pairIndex: p, timestampMs: Date.now() });
-          const baselineCleanupDeadline = Math.min(cleanupDeadlineAtMs, Date.now() + CLEANUP_RESERVE_MS);
+          const baselineCleanupDeadline = Date.now() + cleanupReserveMs;
           await cleanupArm(baselineState, baselineCleanupDeadline);
           await verifyAbsent(options.sandbox, journal, "guest", baselineState.step.guestName, "treatment", baselineCleanupDeadline);
           await verifyAbsent(options.sandbox, journal, "network", baselineState.step.networkName, "treatment", baselineCleanupDeadline);
@@ -1274,7 +1233,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
         options.onProgress?.({ type: "cleanup-started", pairIndex: p, timestampMs: Date.now() });
         let verified = true;
         for (const state of pairStates) {
-          const outcomes = await destroyConditionResources(options.sandbox, journal, state, cleanupDeadlineAtMs);
+          const outcomes = await destroyConditionResources(options.sandbox, journal, state, Date.now() + cleanupReserveMs);
           state.cleanup.push(...outcomes);
           if (outcomes.some((outcome) => outcome.status === "failed" || !outcome.verified)) verified = false;
         }
@@ -1296,7 +1255,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   // be indistinguishable from "cleanup ran and found nothing".
   for (const state of states) {
     if (state.status !== "not-started" || state.cleanup.length > 0) continue;
-    state.cleanup.push(...(await resolveNotStartedCleanup(options.sandbox, journal, state, cleanupDeadlineAtMs)));
+    state.cleanup.push(...(await resolveNotStartedCleanup(options.sandbox, journal, state, Date.now() + cleanupReserveMs)));
   }
 
   // Close every evaluator-owned prefix before promotion. This also covers arms that
@@ -1342,15 +1301,16 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           maxTotalBytes: resolved.limits.maxWorkspaceBytes,
         });
         state.candidate = projection;
-        // Validation is useful after an arm task-limit, but never escapes the one
-        // invocation deadline or continues after external/infrastructure cancellation.
+        // Gradeable task-limit outputs are still scored; grading has its own
+        // bounded infrastructure window and observes external cancellation.
         const validatorPath = frozenSnapshot?.validatorPath ?? frozen.validatorPath;
         const validatorSource = frozenSnapshot?.validatorSource ?? frozen.validatorBytes.toString("utf8");
         const validatorEntryPath = frozenSnapshot?.validatorEntryPath ?? frozen.validatorEntryPath;
         const validatorBundle = frozen.validatorBundle?.map((file) => ({ path: file.path, base64: file.base64 }));
-        const gradingDeadlineMs = Math.max(1, Math.min(resolved.limits.wallClockMs, CONDITION_OPERATION_ALLOWANCE_MS, cleanupDeadlineAtMs - Date.now()));
-        const gradingCleanupDeadline = Math.min(cleanupDeadlineAtMs, Date.now() + gradingDeadlineMs + CLEANUP_RESERVE_MS);
-        state.validation = await options.validatorRunner.run({
+        const gradingDeadlineMs = operationAllowanceMs;
+        const gradingCleanupDeadline = Date.now() + gradingDeadlineMs + cleanupReserveMs;
+        assertNotAborted(validationController.signal, "validation");
+        const gradingHandle = boundedEffect(Date.now() + gradingDeadlineMs, "validation", (gradingSignal) => options.validatorRunner.run({
           validatorPath,
           validatorSource,
           validatorEntryPath,
@@ -1363,8 +1323,12 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           },
           deadlineMs: gradingDeadlineMs,
           cleanupDeadlineAtMs: gradingCleanupDeadline,
-          signal: validationController.signal,
-        });
+          signal: AbortSignal.any([validationController.signal, gradingSignal]),
+        }), "interrupted");
+        pendingEffects.push({ handle: gradingHandle as BoundedEffect<unknown>, conditionId: state.step.conditionId });
+        const validation = await gradingHandle.result;
+        if (finalized || validationController.signal.aborted) throw new EvalError("interrupted", "validation completed after cancellation", { at: "validation" });
+        state.validation = validation;
         if (state.validation.failure !== null || state.validation.outcome.status === "infrastructure-failure") {
           const failure = state.validation.failure ?? {
             code: "validator-infrastructure",
@@ -1376,6 +1340,36 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           state.failures.push(failure);
           runFailures.push(failure);
           if (stopReason === null) stopReason = `validation failed: ${failure.code}`;
+        } else if (frozen.rubric !== undefined && state.validation.outcome.status === "graded") {
+          // Authoritative central rubric scoring
+          try {
+            const rubricScore = scoreWithRubric(frozen.rubric, state.validation.outcome.checks);
+            state.validation = {
+              ...state.validation,
+              outcome: {
+                ...state.validation.outcome,
+                score: rubricScore.score,
+                fullPass: rubricScore.fullPass,
+                rubricScore,
+              } as any,
+            };
+          } catch (rubricError: unknown) {
+            const failure = structuredFrom(rubricError);
+            state.status = "infrastructure-failure";
+            state.failures.push(failure);
+            runFailures.push(failure);
+            state.validation = {
+              ...state.validation,
+              failure,
+              outcome: {
+                status: "infrastructure-failure",
+                score: null,
+                fullPass: null,
+                checks: state.validation.outcome.checks,
+              },
+            };
+            if (stopReason === null) stopReason = `rubric scoring failed: ${failure.message}`;
+          }
         }
         options.onProgress?.({
           type: "capture-grading-completed",
@@ -1407,16 +1401,56 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
 
   // -- Stage 5: clean up ----------------------------------------------------
   // Every journaled exact identity, on success, error, signal, or timeout.
-  // Amendment 3: Shared immutable cached images are shared build assets, not per-run
+  // Shared immutable cached images are shared build assets, not per-run
   // resources that must be destroyed after every run. Final run cleanup never deletes
   // a shared cached image or another run's resources.
   const sweep: CleanupRecord[] = [];
-  for (const identity of journaledIdentities(journal.entries())) {
+  // The final sweep is a bounded infrastructure operation anchored at cleanup start, so it
+  // stays bounded even when the arm ran unlimited (there is no overall run-time ceiling).
+  const sweepDeadlineAtMs = Date.now() + cleanupReserveMs;
+  // Give every timed-out operation a bounded chance to settle before exact inspection.
+  const settledPending = new Set<typeof pendingEffects[number]>();
+  for (const pending of pendingEffects) {
+    const remaining = Math.min(5_000, sweepDeadlineAtMs - Date.now());
+    if (remaining <= 0) break;
+    const settled = await settlesWithin(pending.handle.settled, remaining);
+    if (settled) settledPending.add(pending);
+  }
+  const journalEntries = journal.entries();
+  for (const identity of journaledIdentities(journalEntries)) {
     if (identity.kind === "image") continue;
-    const presence = await boundedEffect(cleanupDeadlineAtMs, `final inspect ${identity.kind} ${identity.name}`, (signal) =>
+    const creationObserved = journalEntries.some((entry) => entry.event === "observed" && entry.action === "create" && entry.kind === identity.kind && entry.name === identity.name && entry.status === "created");
+    const creationPending = pendingEffects.find((pending) => pending.conditionId === identity.conditionId);
+    if (!creationObserved && creationPending !== undefined && !settledPending.has(creationPending)) {
+      const outcome = {
+        kind: identity.kind,
+        name: identity.name,
+        status: "failed",
+        verified: false,
+        detail: `${identity.kind} ${identity.name} creation did not settle within the cleanup window`,
+        failure: { code: "cleanup-failed", failureClass: "infrastructure" as const, message: "creation unresolved; absence was not inspected", at: identity.name },
+      } satisfies CleanupRecord;
+      sweep.push(outcome);
+      blockPaidCalls("a cleanup failure blocks every further paid call in this run");
+      runFailures.push(outcome.failure);
+      continue;
+    }
+    const inspectHandle = boundedEffect(sweepDeadlineAtMs, `final inspect ${identity.kind} ${identity.name}`, (signal) =>
       options.sandbox.inspectResource(identity.kind, identity.name, signal),
-    ).catch(() => "present" as const);
-    const outcome = presence === "absent"
+    );
+    let inspectSettled = false;
+    void inspectHandle.settled.then(() => { inspectSettled = true; });
+    const presence = await inspectHandle.result.catch(() => "present" as const);
+    const outcome = !inspectSettled
+      ? {
+          kind: identity.kind,
+          name: identity.name,
+          status: "failed",
+          verified: false,
+          detail: `${identity.kind} ${identity.name} exact-identity inspection did not settle within the cleanup window`,
+          failure: { code: "cleanup-failed", failureClass: "infrastructure" as const, message: "cleanup inspection unresolved", at: identity.name },
+        } satisfies CleanupRecord
+      : presence === "absent"
       ? {
           kind: identity.kind,
           name: identity.name,
@@ -1425,7 +1459,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           detail: `${identity.kind} ${identity.name} remained absent during the final exact-identity sweep`,
           failure: null,
         } satisfies CleanupRecord
-      : await destroyExact(options.sandbox, journal, identity.kind, identity.name, identity.conditionId, cleanupDeadlineAtMs);
+      : await destroyExact(options.sandbox, journal, identity.kind, identity.name, identity.conditionId, sweepDeadlineAtMs);
     sweep.push(outcome);
     if (outcome.status === "failed") {
       blockPaidCalls("a cleanup failure blocks every further paid call in this run");
@@ -1450,6 +1484,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
   // Guarded: a record-write failure here must surface as a structured `evidence-invalid`
   // failure, not as a raw error, and must not leave a half-sealed run unannounced. The
   // signal handlers stay installed for the whole of this stage.
+  finalized = true;
   sealing = true;
   options.onProgress?.({ type: "sealing-started", timestampMs: Date.now() });
   let receiptPath: string;
@@ -1545,7 +1580,6 @@ async function writeFrozenInputs(
     readonly sandboxId: string;
     readonly validatorRunnerId: string;
     readonly testDouble: boolean;
-    readonly reproduction: { readonly sourceReceiptPath: string; readonly sourceRunId: string } | null;
   },
 ): Promise<void> {
   await store.writeRecord("inputs/plan.json", input.plan);
@@ -1592,16 +1626,6 @@ async function writeFrozenInputs(
       sha256: file.sha256,
     })),
   });
-  if (input.reproduction !== null) {
-    await store.writeRecord("inputs/reproduction.json", {
-      schemaVersion: EVIDENCE_SCHEMA_VERSION,
-      kind: "fresh-retained-input-reproduction",
-      sourceRunId: input.reproduction.sourceRunId,
-      sourceReceiptPath: input.reproduction.sourceReceiptPath,
-      resumed: false,
-      preparerInvoked: false,
-    });
-  }
   await store.writeRecord("inputs/skill-snapshot.json", {
     schemaVersion: EVIDENCE_SCHEMA_VERSION,
     sourcePath: input.snapshot.sourcePath,
@@ -1682,7 +1706,18 @@ async function writeFrozenInputs(
     frozenEntries.push({ path: "provenance.json", sha256: sha256Hex(provBytes), bytes: provBytes.byteLength });
   }
 
-  // 8. Snapshot manifest
+  // 8. Rubric, if present
+  if (input.frozen.rubricBytes !== undefined) {
+    await store.writeFile("inputs/frozen/case/rubric.json", input.frozen.rubricBytes);
+    await store.writeFile("inputs/rubric.json", input.frozen.rubricBytes);
+    frozenEntries.push({
+      path: "case/rubric.json",
+      sha256: input.frozen.rubricSha256 ?? sha256Hex(input.frozen.rubricBytes),
+      bytes: input.frozen.rubricBytes.byteLength,
+    });
+  }
+
+  // 9. Snapshot manifest
   const frozenManifest = buildManifestTree(frozenEntries, EVIDENCE_SCHEMA_VERSION);
   await store.writeRecord("inputs/frozen/manifest.json", {
     schemaVersion: EVIDENCE_SCHEMA_VERSION,
@@ -1729,9 +1764,14 @@ async function prepareCondition(input: {
   readonly deadlineAtMs: number;
   readonly skillToolBundle: SkillToolBundle;
   readonly skillToolBundleSha256: string;
+  readonly captureReasoning?: boolean;
+  readonly isFinalized?: () => boolean;
 }): Promise<PreparedCondition> {
   const { state, sandbox, journal, frozen, signal } = input;
   const conditionId = state.step.conditionId;
+  const cancelled = (): void => {
+    if (input.signal.aborted || input.isFinalized?.() === true) throw new EvalError("interrupted", "condition preparation completed after cancellation", { at: "condition preparation" });
+  };
 
   await journal.record({
     event: "intent",
@@ -1741,7 +1781,11 @@ async function prepareCondition(input: {
     conditionId,
     status: null,
   });
-  const network = await sandbox.createNetwork(state.step.networkName, EVAL_NETWORK_POLICY, signal, input.deadlineAtMs);
+  const networkHandle = boundedEffect(input.deadlineAtMs, `create network ${state.step.networkName}`, (creationSignal) =>
+    sandbox.createNetwork(state.step.networkName, EVAL_NETWORK_POLICY, AbortSignal.any([signal, creationSignal]), input.deadlineAtMs));
+  state.creationHandles.network = networkHandle;
+  const network = await networkHandle.result;
+  cancelled();
   await journal.record({
     event: "observed",
     action: "create",
@@ -1750,6 +1794,7 @@ async function prepareCondition(input: {
     conditionId,
     status: "created",
   });
+  cancelled();
 
   await journal.record({
     event: "intent",
@@ -1759,21 +1804,26 @@ async function prepareCondition(input: {
     conditionId,
     status: null,
   });
-  const guest: Guest = await sandbox.createGuest({
-    name: state.step.guestName,
-    networkName: network.name,
-    imageDigest: input.imageDigest,
-    limits: input.limits,
-    policy: EVAL_GUEST_POLICY,
-    deadlineAtMs: input.deadlineAtMs,
-    signal,
-    env: {
-      HOME: EVAL_HOME_DIR,
-      TMPDIR: "/tmp",
-      EVAL_CONDITION: conditionId,
-      EVAL_WORKSPACE: EVAL_WORKSPACE_ROOT,
-    },
-  });
+  const boundaryDeadlineAtMs = Number.isFinite(input.deadlineAtMs) ? input.deadlineAtMs : undefined;
+  const guestHandle = boundedEffect(input.deadlineAtMs, `create guest ${state.step.guestName}`, (creationSignal) =>
+    sandbox.createGuest({
+      name: state.step.guestName,
+      networkName: network.name,
+      imageDigest: input.imageDigest,
+      limits: input.limits,
+      policy: EVAL_GUEST_POLICY,
+      // Creation is bounded by the signal from boundedEffect. Its setup deadline must
+      // not become the lifetime of a guest that will execute after preparation.
+      signal: AbortSignal.any([signal, creationSignal]),
+      env: {
+        HOME: EVAL_HOME_DIR,
+        TMPDIR: "/tmp",
+        EVAL_CONDITION: conditionId,
+        EVAL_WORKSPACE: EVAL_WORKSPACE_ROOT,
+      },
+    }));
+  state.creationHandles.guest = guestHandle;
+  const guest: Guest = await guestHandle.result;
   await journal.record({
     event: "observed",
     action: "create",
@@ -1782,13 +1832,19 @@ async function prepareCondition(input: {
     conditionId,
     status: "created",
   });
+  cancelled();
 
-  state.attestation = await guest.attest(signal, input.deadlineAtMs);
+  const guestAttestation = await guest.attest(signal, boundaryDeadlineAtMs);
+  cancelled();
+  state.attestation = guestAttestation;
 
   for (const cred of input.credentials) {
-    await guest.deliverCredential({ ...cred, signal, deadlineAtMs: input.deadlineAtMs });
+    cancelled();
+    await guest.deliverCredential({ ...cred, signal, deadlineAtMs: boundaryDeadlineAtMs });
+    cancelled();
   }
 
+  cancelled();
   await guest.stage({
     destDir: EVAL_WORKSPACE_ROOT,
     files: frozen.fixtureFiles.map((file) => ({ path: file.path, base64: file.base64, mode: 0o644 })),
@@ -1796,6 +1852,7 @@ async function prepareCondition(input: {
     signal,
   });
 
+  cancelled();
   if (state.plan.skillPaths.length === 1) {
     await guest.stage({
       destDir: input.skillGuestPath,
@@ -1803,6 +1860,7 @@ async function prepareCondition(input: {
       readOnly: true,
       signal,
     });
+    cancelled();
   }
 
   const request: HarnessRequest = {
@@ -1811,22 +1869,24 @@ async function prepareCondition(input: {
     workspaceRoot: EVAL_WORKSPACE_ROOT,
     skillPaths: [...state.plan.skillPaths],
     allowedTools: [...frozen.config.allowedTools],
-    ambientTools: resolveAmbientTools(frozen.config.allowedTools),
     skillToolBundle: conditionId === "treatment" ? input.skillToolBundle : null,
     skillToolBundleSha256: input.skillToolBundleSha256,
     limits: input.limits,
     target: input.target,
     signal,
-    deadlineAtMs: input.deadlineAtMs,
+    deadlineAtMs: boundaryDeadlineAtMs,
     guardedSecrets: input.guardedSecrets,
+    captureReasoning: input.captureReasoning,
     ...(state.nativeCapture === null ? {} : {
       nativeSessionRecorder: { record: state.nativeCapture.record.bind(state.nativeCapture) },
     }),
   };
 
-  const attestation = await input.harness.attest(guest, request);
-  state.runtime = attestation.runtime;
+  const harnessAttestation = await input.harness.attest(guest, request);
+  cancelled();
+  state.runtime = harnessAttestation.runtime;
 
+  cancelled();
   return { guest, network, request };
 }
 
@@ -1836,8 +1896,12 @@ async function dispatchArmPrompt(input: {
   readonly prepared: PreparedCondition;
   readonly limits: Limits;
   readonly signal: AbortSignal;
+  readonly isFinalized?: () => boolean;
 }): Promise<void> {
   const { state, harness, prepared, limits, signal } = input;
+  const cancelled = (): void => {
+    if (signal.aborted || input.isFinalized?.() === true) throw new EvalError("interrupted", "arm completed after cancellation", { at: "arm dispatch" });
+  };
   const conditionController = new AbortController();
   const onRunAbort = (): void => {
     conditionController.abort(signal.reason);
@@ -1848,21 +1912,27 @@ async function dispatchArmPrompt(input: {
     signal.addEventListener("abort", onRunAbort, { once: true });
   }
 
-  let armTimer: NodeJS.Timeout | null = null;
-  armTimer = setTimeout(() => {
-    const reason = new Error(`wall-clock deadline of ${limits.wallClockMs}ms elapsed`);
-    reason.name = "ArmBudgetExceeded";
-    conditionController.abort(reason);
-  }, limits.wallClockMs);
-  if (typeof armTimer.unref === "function") armTimer.unref();
+  // Unlimited arm (wallClockMs === null): arm NO wall-clock watchdog and pass no deadline
+  // to the harness. Cancellation and the guest's own infrastructure liveness still apply.
+  let armTimer: DeadlineTimer | null = null;
+  if (limits.wallClockMs !== null) {
+    const wallClockMs = limits.wallClockMs;
+    armTimer = scheduleTimeout(() => {
+      const reason = new Error(`wall-clock deadline of ${wallClockMs}ms elapsed`);
+      reason.name = "ArmBudgetExceeded";
+      conditionController.abort(reason);
+    }, wallClockMs);
+    armTimer.unref();
+  }
 
   try {
     const requestWithSignal: HarnessRequest = {
       ...prepared.request,
-      deadlineAtMs: Date.now() + limits.wallClockMs,
+      deadlineAtMs: limits.wallClockMs !== null ? Date.now() + limits.wallClockMs : undefined,
       signal: conditionController.signal,
     };
     const result = await harness.run(prepared.guest, requestWithSignal);
+    cancelled();
     // A recorder failure is the authoritative cause: the SDK carrier may legitimately
     // contain the entry whose bounded durable append was rejected. Preserve the last
     // fsynced prefix and classify the arm as ungradeable infrastructure instead of
@@ -1872,9 +1942,19 @@ async function dispatchArmPrompt(input: {
     const livePrefix = state.nativeCapture?.snapshot();
     if (livePrefix && livePrefix.entries.length > 0 && result.nativeSessionEntries) {
       try {
+        // The harness already sanitized result.nativeSessionEntries (either the guest's
+        // per-record sanitization relayed over frames, or the local path's own single pass
+        // over the SDK's raw in-memory entries), so this sanitization is not adding a second
+        // *sanitization* pass over trusted data - it is independently re-verifying an
+        // *untrusted* claim. A harness is arbitrary code (including test doubles and
+        // future harnesses); if its reported entries still carry a live secret, that must
+        // surface as secret-quarantine specifically, because only that code blocks every
+        // further paid call in the run (see the `blockPaidCalls` call sites keyed on it) -
+        // a plain mismatch below would only fail this one condition.
         const carrier = sanitizeNativeSessionEntries(
           result.nativeSessionEntries as readonly NativeSessionEntry[],
           prepared.request.guardedSecrets ?? [],
+          { captureReasoning: prepared.request.captureReasoning },
         );
         if (canonicalJson(carrier.entries, "native result carrier") !==
             canonicalJson(livePrefix.entries, "native durable prefix")) {
@@ -1889,23 +1969,31 @@ async function dispatchArmPrompt(input: {
         throw error;
       }
     }
+    cancelled();
     state.runtime = result.runtime;
+    cancelled();
     state.messages = result.messages;
+    cancelled();
     state.toolSteps = result.toolSteps;
+    cancelled();
     state.sessionEntries = (result.nativeSessionEntries as readonly NativeSessionEntry[]) ?? [];
     state.sessionRedactions = result.nativeSessionRedactions ?? {
       count: 0,
       entries: [],
     };
+    cancelled();
     state.usage = result.usage;
+    cancelled();
     state.timing = result.timing;
+    state.stopCause = result.stopCause;
+    state.providerStopReason = result.providerStopReason;
     state.failures.push(...result.failures);
     state.notStartedReason = null;
     state.status = result.outcome;
   } finally {
-    if (armTimer !== null) clearTimeout(armTimer);
+    if (armTimer !== null) armTimer.cancel();
     signal.removeEventListener("abort", onRunAbort);
-    finalizeNativeCapture(state);
+    if (!input.isFinalized?.() && !signal.aborted) finalizeNativeCapture(state);
   }
 }
 
@@ -1929,6 +2017,7 @@ async function exportArmOutput(input: {
   readonly limits: Limits;
   readonly guardedSecrets: readonly GuardedSecret[];
   readonly signal: AbortSignal;
+  readonly isFinalized?: () => boolean;
   readonly faults?: {
     readonly simulateSurvivingSecretHit?: boolean;
   };
@@ -1941,6 +2030,7 @@ async function exportArmOutput(input: {
     maxTotalBytes: limits.maxWorkspaceBytes,
     signal,
   });
+  if (signal.aborted || input.isFinalized?.() === true) throw new EvalError("interrupted", "export completed after cancellation", { at: "output capture" });
 
   const redactionEntries: SecretRedaction[] = [];
   let totalRedactions = 0;
@@ -2025,6 +2115,7 @@ async function exportArmOutput(input: {
   );
 
   if (survivingHits.length > 0) {
+    if (signal.aborted || input.isFinalized?.() === true) throw new EvalError("interrupted", "output capture completed after cancellation", { at: "output capture" });
     state.messages = [];
     state.toolSteps = [];
     state.exported = null;
@@ -2061,6 +2152,7 @@ async function executeCondition(input: {
   readonly deadlineAtMs: number;
   readonly skillToolBundle: SkillToolBundle;
   readonly skillToolBundleSha256: string;
+  readonly captureReasoning?: boolean;
   readonly faults?: {
     readonly simulateSurvivingSecretHit?: boolean;
   };
@@ -2099,7 +2191,8 @@ async function confirmNeverCreated(
     ["guest", state.step.guestName],
     ["network", state.step.networkName],
   ] as ReadonlyArray<readonly [ResourceKind, string]>) {
-    const presence = await boundedEffect(deadlineAtMs, `confirm absent ${kind} ${name}`, (cleanupSignal) => sandbox.inspectResource(kind, name, cleanupSignal)).catch(() => "present" as const);
+    const presenceHandle = boundedEffect(deadlineAtMs, `confirm absent ${kind} ${name}`, (cleanupSignal) => sandbox.inspectResource(kind, name, cleanupSignal));
+    const presence = await presenceHandle.result.catch(() => "present" as const);
     await journal.record({
       event: "observed",
       action: "verify",
@@ -2182,26 +2275,57 @@ function outcomeToRecord(
   };
 }
 
-async function boundedEffect<T>(deadlineAtMs: number, label: string, effect: (signal: AbortSignal) => Promise<T>, failureCode: "cleanup-failed" | "interrupted" = "cleanup-failed"): Promise<T> {
+interface BoundedEffect<T> {
+  readonly result: Promise<T>;
+  /** Settles only when the underlying operation settles, including late rejection. */
+  readonly settled: Promise<void>;
+}
+
+function boundedEffect<T>(deadlineAtMs: number, label: string, effect: (signal: AbortSignal) => Promise<T>, failureCode: "cleanup-failed" | "interrupted" = "cleanup-failed"): BoundedEffect<T> {
+  // A non-finite deadline (positive infinity) means "no timer": run the effect without a
+  // watchdog. This is how an explicitly-unlimited window is represented; it never collapses
+  // to an immediate timeout the way setTimeout(Infinity) would (Node clamps that to 1ms).
+  if (!Number.isFinite(deadlineAtMs)) {
+    const work = effect(new AbortController().signal);
+    const settled = work.then(() => undefined, () => undefined);
+    work.catch(() => undefined);
+    return { result: work, settled };
+  }
   const remaining = deadlineAtMs - Date.now();
-  if (remaining <= 0) throw new EvalError(failureCode, `${label} exceeded the invocation deadline`, { at: label });
+  if (remaining <= 0) {
+    const error = Promise.reject<T>(new EvalError(failureCode, `${label} exceeded its operation deadline`, { at: label }));
+    return { result: error, settled: error.then(() => undefined, () => undefined) };
+  }
   const controller = new AbortController();
-  let timer: NodeJS.Timeout | null = null;
+  let timer: DeadlineTimer | null = null;
   const work = effect(controller.signal);
+  const settled = work.then(() => undefined, () => undefined);
   work.catch(() => undefined);
+  const result = Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      timer = scheduleTimeout(() => {
+        const failure = new EvalError(failureCode, `${label} exceeded its operation deadline`, { at: label });
+        controller.abort(failure);
+        reject(failure);
+      }, remaining);
+    }),
+  ]).finally(() => {
+    if (timer !== null) timer.cancel();
+  });
+  return { result, settled };
+}
+
+/** Waits for an operation to settle without leaving the losing timeout alive. */
+async function settlesWithin(settled: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          const failure = new EvalError(failureCode, `${label} exceeded the invocation deadline`, { at: label });
-          controller.abort(failure);
-          reject(failure);
-        }, remaining);
-      }),
+      settled.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
     ]);
   } finally {
-    if (timer !== null) clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -2217,7 +2341,31 @@ async function destroyExact(
   let outcome: DestroyOutcome;
   let detail: string | null = null;
   try {
-    outcome = await boundedEffect(deadlineAtMs, `destroy ${kind} ${name}`, (signal) => sandbox.destroyResource(kind, name, signal));
+    const destroyHandle = boundedEffect(deadlineAtMs, `destroy ${kind} ${name}`, (signal) => sandbox.destroyResource(kind, name, signal));
+    // `settled` absorbs rejection; only the bounded result's fulfillment is a successful destroy.
+    let destroySucceeded = false;
+    void destroyHandle.result.then(() => { destroySucceeded = true; }, () => undefined);
+    try {
+      outcome = await destroyHandle.result;
+    } catch (error: unknown) {
+      const settleRemaining = Math.min(5_000, deadlineAtMs - Date.now());
+      let didSettle = false;
+      void destroyHandle.settled.then(() => { didSettle = true; });
+      if (settleRemaining > 0) {
+        await settlesWithin(destroyHandle.settled, settleRemaining);
+      }
+      if (!didSettle) {
+        outcome = { status: "failed", verified: false, failure: { code: "cleanup-failed", failureClass: "infrastructure", message: `destroy ${kind} ${name} did not settle`, at: name } };
+      } else if (destroySucceeded) {
+        // The bounded result timed out, but the retained operation did complete;
+        // exact re-inspection below is still the authority for verified absence.
+        outcome = { status: "destroyed", verified: false, failure: null };
+        detail = `destroying ${kind} ${name} settled after its operation deadline`;
+      } else {
+        outcome = { status: "failed", verified: false, failure: toStructuredFailure(error, "cleanup-failed") };
+        detail = `destroying ${kind} ${name} timed out before its settled result was usable`;
+      }
+    }
   } catch (error: unknown) {
     outcome = { status: "failed", verified: false, failure: toStructuredFailure(error, "cleanup-failed") };
     detail = `destroying ${kind} ${name} threw`;
@@ -2225,7 +2373,8 @@ async function destroyExact(
   if (outcome.status !== "failed") {
     // Trust nothing: confirm absence by exact-identity lookup rather than by the
     // destroy call's own return value.
-    const presence = await boundedEffect(deadlineAtMs, `inspect ${kind} ${name}`, (signal) => sandbox.inspectResource(kind, name, signal)).catch(() => "present" as const);
+    const inspectHandle = boundedEffect(deadlineAtMs, `inspect ${kind} ${name}`, (signal) => sandbox.inspectResource(kind, name, signal));
+    const presence = await inspectHandle.result.catch(() => "present" as const);
     if (presence === "present") {
       detail = `${kind} ${name} reported ${outcome.status} but was still present on re-inspection`;
       outcome = {
@@ -2262,7 +2411,8 @@ async function verifyAbsent(
   conditionId: ConditionId,
   deadlineAtMs: number,
 ): Promise<void> {
-  const presence = await boundedEffect(deadlineAtMs, `verify absent ${kind} ${name}`, (cleanupSignal) => sandbox.inspectResource(kind, name, cleanupSignal));
+  const presenceHandle = boundedEffect(deadlineAtMs, `verify absent ${kind} ${name}`, (cleanupSignal) => sandbox.inspectResource(kind, name, cleanupSignal));
+  const presence = await presenceHandle.result;
   await journal.record({ event: "observed", action: "verify", kind, name, conditionId, status: presence });
   if (presence === "present") {
     throw new EvalError(
@@ -2280,12 +2430,23 @@ async function destroyConditionResources(
   deadlineAtMs = Number.POSITIVE_INFINITY,
 ): Promise<readonly CleanupRecord[]> {
   const records: CleanupRecord[] = [];
-  records.push(
-    await destroyExact(sandbox, journal, "guest", state.step.guestName, state.step.conditionId, deadlineAtMs),
-  );
-  records.push(
-    await destroyExact(sandbox, journal, "network", state.step.networkName, state.step.conditionId, deadlineAtMs),
-  );
+  const resourceNames: ReadonlyArray<readonly ["guest" | "network", string]> = [
+    ["guest", state.step.guestName],
+    ["network", state.step.networkName],
+  ];
+  for (const [kind, name] of resourceNames) {
+    const creation = state.creationHandles[kind];
+    if (creation !== undefined) {
+      const remaining = Math.max(0, Math.min(5_000, deadlineAtMs - Date.now()));
+      const settled = await settlesWithin(creation.settled, remaining);
+      if (!settled) {
+        const failure = { code: "cleanup-failed" as const, failureClass: "infrastructure" as const, message: `${kind} ${name} creation unresolved; cleanup was not attempted`, at: name };
+        records.push({ kind, name, status: "failed", verified: false, detail: failure.message, failure });
+        continue;
+      }
+    }
+    records.push(await destroyExact(sandbox, journal, kind, name, state.step.conditionId, deadlineAtMs));
+  }
   return records;
 }
 
@@ -2341,7 +2502,7 @@ async function sealRun(input: {
     const conditionRefs: Array<{ conditionId: ConditionId; dir: string }> = [];
     for (const state of states) {
       const dir = conditionDirFor(state.step);
-      await sealCondition(store, dir, state, testDouble, evidenceLabel, frozen, options.guardedSecrets ?? []);
+      await sealCondition(store, dir, state, testDouble, evidenceLabel, frozen, options.guardedSecrets ?? [], options.captureReasoning);
       conditionRefs.push({ conditionId: state.step.conditionId, dir });
     }
 
@@ -2373,6 +2534,7 @@ async function sealRun(input: {
       suiteId: frozen.suite.id,
       caseId: frozen.config.id,
       caseVersion: frozen.config.version,
+      ...(frozen.rubric !== undefined ? { rubricVersion: frozen.rubric.rubricVersion } : {}),
       testDouble,
       evidenceLabel,
       conditions: conditionRefs.map((ref) => ({ conditionId: ref.conditionId, dir: ref.dir })),
@@ -2404,6 +2566,7 @@ async function sealRun(input: {
     caseSelector: frozen.selector,
     caseId: frozen.config.id,
     caseVersion: frozen.config.version,
+    ...(frozen.rubric !== undefined ? { rubricVersion: frozen.rubric.rubricVersion } : {}),
     mode: options.mode,
     status: input.stopReason === null ? "complete" : "partial",
     stopReason: input.stopReason,
@@ -2454,6 +2617,7 @@ async function sealCondition(
   evidenceLabel: string,
   frozen: FrozenCase,
   guardedSecrets: readonly GuardedSecret[],
+  captureReasoning?: boolean,
 ): Promise<void> {
   const gradeable = isGradeable(state);
   await store.writeRecord(`${dir}/condition.json`, {
@@ -2473,9 +2637,13 @@ async function sealCondition(
     guestName: state.step.guestName,
     networkName: state.step.networkName,
     parity: state.plan.parity,
-    runtime: state.runtime === null ? null : { ...state.runtime, allowedTools: [...state.runtime.allowedTools], ambientTools: [...state.runtime.ambientTools], skillPaths: [...state.runtime.skillPaths] },
+    runtime: state.runtime === null ? null : { ...state.runtime, allowedTools: [...state.runtime.allowedTools], skillPaths: [...state.runtime.skillPaths] },
     timing: state.timing === null ? null : { ...state.timing },
     usage: state.usage === null ? null : { ...state.usage },
+    // Structured stop cause plus preserved provider raw stop reason. A never-started or
+    // pre-execution arm records null for both; readers treat null as unavailable.
+    stopCause: state.stopCause,
+    providerStopReason: state.providerStopReason,
     redactions: {
       count: state.redactions.count,
       locations: [...new Set(state.redactions.entries.map((e) => e.path))].sort(),
@@ -2486,9 +2654,15 @@ async function sealCondition(
   });
   await sealAttestation(store, dir, state, testDouble, evidenceLabel);
 
-  // Sanitized native session retention:
-  // Independently verify and rescan even if positive redaction count was supplied.
-  // A hostile/mismatched final carrier cannot be hidden by the authentic prefix.
+  // Native session retention: state.sessionEntries is the durable prefix when the arm's
+  // native session recorder captured at least one entry (the common Pi-harness case), but
+  // falls back to whatever the Harness implementation itself reported otherwise (e.g. a
+  // scripted or fake harness that never calls the recorder). The Harness interface is
+  // implemented by more than the Pi adapter, so this redaction pass is not defense in
+  // depth over already-trusted data - it is the actual, only sanitization point for those
+  // other implementations. Independently re-verify and rescan even when a positive
+  // redaction count was already supplied: a hostile or mismatched final carrier cannot
+  // be hidden by an authentic-looking prefix.
   if (state.nativePromotionFailure) throw state.nativePromotionFailure;
   const completed = state.status === "completed";
   const rawEntries = state.sessionEntries;
@@ -2496,7 +2670,7 @@ async function sealCondition(
   let sanitizedEntries = rawEntries;
   let sessionRedactions = state.sessionRedactions ?? { count: 0, entries: [] };
   if (hasNativeEntries && guardedSecrets.length > 0) {
-    const res = sanitizeNativeSessionEntries(rawEntries, guardedSecrets);
+    const res = sanitizeNativeSessionEntries(rawEntries, guardedSecrets, { captureReasoning });
     sanitizedEntries = res.entries;
     if (sessionRedactions.count === 0) {
       if (res.count > 0) {
@@ -2537,6 +2711,7 @@ async function sealCondition(
     tailStatus,
     incompleteTail,
     incompleteReason,
+    ...(captureReasoning !== undefined ? { reasoningCaptured: captureReasoning } : {}),
     entries: sanitizedEntries,
     entryCount: sanitizedEntries.length,
     redactions: {
@@ -2579,7 +2754,7 @@ async function sealCondition(
   });
 
   // The projected candidate the validator ACTUALLY scored.
-  // Graded projection references workspace bytes where possible instead of duplicating base64 (Amendment 5).
+  // Graded projection references workspace bytes where possible instead of duplicating base64.
   const workspaceFilesMap = new Map((state.exported?.files ?? []).map((f) => [f.path, f]));
   const candidateFiles = Object.entries(state.candidate?.candidateFiles ?? {})
     .sort(([left], [right]) => (left < right ? -1 : 1))
@@ -2641,6 +2816,9 @@ async function sealCondition(
             score: state.validation.outcome.score,
             fullPass: state.validation.outcome.fullPass,
             checks: state.validation.outcome.checks.map((check) => ({ ...check })),
+            ...((state.validation.outcome as any).rubricScore !== undefined
+              ? { rubricScore: (state.validation.outcome as any).rubricScore }
+              : {}),
           },
     failure: state.validation?.failure ?? null,
   });

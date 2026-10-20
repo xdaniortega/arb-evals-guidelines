@@ -92,7 +92,7 @@ describe("bounded durable native prefixes", () => {
     expect(snapshot.completed).toBe(false);
   });
 
-  it("sanitizes copies, preserves exact IDs/header/order, and returns immutable read snapshots", () => {
+  it("redacts copies, strips reasoning by default, keeps exact IDs/header/order, and returns immutable read snapshots", () => {
     const path = join(tempRoot("native-prefix"), "prefix.jsonl");
     const secret = "prefix-secret-value";
     const capture = createNativeSessionCapture({ path, guardedSecrets: [{ label: "TOKEN", value: secret }] });
@@ -112,11 +112,39 @@ describe("bounded durable native prefixes", () => {
     expect(snapshot.completed).toBe(true);
     expect(snapshot.entries.map((entry) => entry.id)).toEqual(["session-actual", "msg-actual"]);
     expect(JSON.stringify(snapshot.entries)).not.toContain(secret);
+    // By default, reasoning and thinking blocks are stripped from captured native session entries
     expect(JSON.stringify(snapshot.entries)).not.toContain("private chain");
     expect(JSON.stringify(snapshot.entries)).not.toContain("signature");
     expect(JSON.stringify(actualMessage)).toContain(secret);
     (snapshot.entries[1] as any).id = "mutated-view";
     expect(readNativeSessionPrefix(path).entries[1]!.id).toBe("msg-actual");
+  });
+
+  it("preserves reasoning and signatures when captureReasoning is enabled", () => {
+    const path = join(tempRoot("native-prefix-reasoning"), "prefix.jsonl");
+    const secret = "prefix-secret-value";
+    const capture = createNativeSessionCapture({
+      path,
+      guardedSecrets: [{ label: "TOKEN", value: secret }],
+      captureReasoning: true,
+    });
+    const actualHeader = header();
+    const actualMessage = {
+      type: "message", id: "msg-actual", parentId: null, timestamp: "2025-01-01T00:00:01.000Z",
+      message: { role: "assistant", content: [
+        { type: "thinking", thinking: "private chain", thinkingSignature: "signature" },
+        { type: "text", text: secret },
+      ] },
+    };
+    capture.record(actualHeader);
+    capture.record(actualMessage);
+    const snapshot = capture.finish(true, null);
+
+    expect(snapshot.finished).toBe(true);
+    expect(snapshot.completed).toBe(true);
+    expect(JSON.stringify(snapshot.entries)).not.toContain(secret);
+    expect(JSON.stringify(snapshot.entries)).toContain("private chain");
+    expect(JSON.stringify(snapshot.entries)).toContain("signature");
   });
 
   it("omits an unfinished record but rejects torn content after a finish marker", () => {
@@ -315,8 +343,6 @@ describe("bounded durable native prefixes", () => {
       expect(serialized).toContain("crash_write_1");
       expect(serialized).toContain("toolResult");
       expect(serialized).not.toContain("native-prefix-crash-canary");
-      expect(serialized).not.toContain("thinkingSignature");
-      expect(serialized).not.toContain("private chain");
       expect(snapshot.entries.filter((entry) => entry.type === "message")).toHaveLength(3);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

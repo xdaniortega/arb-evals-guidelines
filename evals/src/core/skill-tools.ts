@@ -1,5 +1,5 @@
 /**
- * Skill-declared tool bundle types (Amendment 9).
+ * Skill-declared tool bundle types.
  *
  * A skill is a bundle: its prose plus the tool dependencies it declares in its own
  * manifest. Only treatment receives those declared server seeds. Both arms share the same
@@ -23,8 +23,7 @@ export interface SkillToolServer {
 }
 
 /**
- * The tool dependencies a skill declares in its own bundle. Amendment 9 treats these as
- * part of skill presence: only treatment receives these preparation seeds.
+ * The tool dependencies a skill declares in its own bundle are part of skill presence: only treatment receives these preparation seeds.
  */
 export interface SkillToolBundle {
   readonly schemaVersion: 1;

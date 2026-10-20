@@ -1,3 +1,5 @@
+import { createAppleContainerSandbox } from "../sandboxes/apple-container.ts";
+import { MCP_CLIENT_POLICY } from "../harnesses/pi/mcp-tools.ts";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -14,14 +16,13 @@ const evalsRoot = resolve(process.cwd(), "evals");
 const stateDir = join(evalsRoot, ".state");
 const childScript = resolve(evalsRoot, "src/runner/container-paired.test-child.ts");
 const reportScript = resolve(evalsRoot, "scripts/report.ts");
-const runScript = resolve(evalsRoot, "scripts/run.ts");
 const nonce = randomBytes(4).toString("hex");
-const suiteId = `phase5-synthetic-${nonce}`;
+const suiteId = `paired-synthetic-${nonce}`;
 const suiteDir = join(evalsRoot, suiteId);
 const skillDir = join(evalsRoot, `${suiteId}-skill`);
 const testStateDir = join(stateDir, suiteId);
 const retained = process.env.EVALS_RETAIN_DEMO === "1";
-const recordPhase7Timings = process.env.EVALS_PHASE7_TIMINGS === "1";
+const recordTimings = process.env.EVALS_PAIRED_TIMINGS === "1";
 
 type JournalEntry = { action: string; conditionId: string | null; event: string; kind: string; name: string; runId: string; sequence: number; status: string | null };
 type ClaimedRun = { runId: string; runDir: string | null; journalPath: string | null; cleanupConfirmed: boolean; expectationConfirmed: boolean; diagnosis: string };
@@ -92,12 +93,12 @@ function assertProgressOrder(run: ChildRun, pairs: number): void {
   }
 }
 
-async function runChild(policy: "serial" | "overlap", repetitions: number, fromReceipt?: string, extraEnv: Readonly<Record<string, string>> = {}): Promise<ChildRun> {
-  const home = join(stateDir, `${suiteId}-${policy}${fromReceipt ? "-repro" : ""}-home`);
+async function runChild(policy: "serial" | "overlap", repetitions: number, extraEnv: Readonly<Record<string, string>> = {}): Promise<ChildRun> {
+  const home = join(stateDir, `${suiteId}-${policy}-home`);
   await mkdir(home, { recursive: true });
   const runDirsBefore = new Set(await names(join(suiteDir, "runs")));
   const journalsBefore = new Set(await names(testStateDir, ".journal.jsonl"));
-  const result = spawnSync(process.execPath, ["--experimental-strip-types", childScript, suiteId, policy, String(repetitions), ...(fromReceipt ? [fromReceipt] : [])], {
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", childScript, suiteId, policy, String(repetitions)], {
     cwd: process.cwd(), encoding: "utf8", timeout: 175_000,
     env: buildAllowlistedEnv(home, extraEnv),
   });
@@ -129,8 +130,8 @@ async function runChild(policy: "serial" | "overlap", repetitions: number, fromR
     if (!match?.[1]) throw new Error(`${name} missing from child output`);
     return match[1];
   };
-  const timingMatch = result.stdout.match(/^PHASE7_METRICS=(.+)$/m);
-  return { stdout: result.stdout, stderr: result.stderr, receipt: value("PHASE5_RECEIPT"), runDir: value("PHASE5_RUN_DIR"), baselineHtml: value("PHASE5_BASELINE_HTML"), treatmentHtml: value("PHASE5_TREATMENT_HTML"), claimed, policy, ...(timingMatch?.[1] ? { timing: JSON.parse(timingMatch[1]) as TimingPayload } : {}) };
+  const timingMatch = result.stdout.match(/^PAIRED_METRICS=(.+)$/m);
+  return { stdout: result.stdout, stderr: result.stderr, receipt: value("PAIRED_RECEIPT"), runDir: value("PAIRED_RUN_DIR"), baselineHtml: value("PAIRED_BASELINE_HTML"), treatmentHtml: value("PAIRED_TREATMENT_HTML"), claimed, policy, ...(timingMatch?.[1] ? { timing: JSON.parse(timingMatch[1]) as TimingPayload } : {}) };
 }
 
 async function discoverAndRegisterAttempts(
@@ -355,13 +356,13 @@ async function chainedHashes(runDir: string): Promise<Record<string, string>> {
 describe("paired L2 fresh-boundary shell", () => {
   for (const obstruction of ["pre-existing sentinel", "hidden oracle file"] as const) {
     it(`fails without a success marker for a ${obstruction}`, async () => {
-      const root = await mkdtemp(join(tmpdir(), "phase5-boundary-negative-"));
+      const root = await mkdtemp(join(tmpdir(), "paired-boundary-negative-"));
       const home = join(root, "home");
       const temp = join(root, "tmp");
       const work = join(root, "work");
       try {
         await Promise.all([mkdir(home), mkdir(temp), mkdir(work)]);
-        if (obstruction === "pre-existing sentinel") await writeFile(join(home, ".phase5-fresh"), "owned");
+        if (obstruction === "pre-existing sentinel") await writeFile(join(home, ".paired-fresh"), "owned");
         else await writeFile(join(work, "oracle.json"), "private");
         const result = spawnSync("/bin/bash", ["-c", buildFreshBoundaryCommand({
           suiteId: "negative-boundary",
@@ -395,6 +396,14 @@ if (!enabled) {
     });
 
     beforeAll(async () => {
+      // Fault scenarios target running guests, not a cold image build. Establish the
+      // shared immutable cache before taking the inventory that must stay unchanged.
+      await createAppleContainerSandbox({ runId: `${suiteId}-image` }).buildImage({
+        runtimeProfileId: "default",
+        contextDir: resolve("evals/container"),
+        signal: AbortSignal.timeout(150_000),
+        deadlineAtMs: Date.now() + 150_000,
+      });
       containersBefore = listIds("container");
       networksBefore = listIds("network");
       imagesBefore = listIds("image");
@@ -412,19 +421,19 @@ if (!enabled) {
       await writeFile(join(suiteDir, "cases/workspace/busy-validator/case.json"), JSON.stringify({ id: "busy-validator", version: 1, prompt: "Exercise an in-flight isolated grader.", outputPath: "__workspace__", allowedTools: ["read", "write", "edit", "bash"], validator: "validator.ts" }));
       await writeFile(join(suiteDir, "cases/workspace/busy-validator/oracle.json"), "{}");
       await writeFile(join(suiteDir, "cases/workspace/busy-validator/validator.ts"), `export function validateSnapshot() { const until = Date.now() + 120000; while (Date.now() < until) {} return { status: "graded", score: 1, fullPass: true, checks: [] }; }\n`);
-      await writeFile(join(skillDir, "SKILL.md"), "---\nname: phase5-frozen-skill\ndescription: Synthetic Phase 5 fixture.\n---\nUse the requested tools.\n");
-    });
+      await writeFile(join(skillDir, "SKILL.md"), "---\nname: paired-frozen-skill\ndescription: Synthetic paired-run fixture.\n---\nUse the requested tools.\n");
+    }, 180_000);
 
     afterAll(async () => {
       let baselinePreserved = false;
       try {
         baselinePreserved = JSON.stringify(listIds("container")) === JSON.stringify(containersBefore) && JSON.stringify(listIds("network")) === JSON.stringify(networksBefore) && JSON.stringify(listIds("image")) === JSON.stringify(imagesBefore);
       } catch (error) {
-        process.stderr.write(`PHASE5 teardown baseline inspection failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        process.stderr.write(`PAIRED teardown baseline inspection failed: ${error instanceof Error ? error.message : String(error)}\n`);
       }
       const selectedRetainedId = retained && overlap?.claimed.cleanupConfirmed && baselinePreserved ? overlap.claimed.runId : null;
       for (const claim of claimedRuns) {
-        process.stderr.write(`PHASE5 claimed run ${claim.runId}: ${claim.diagnosis}; baselinePreserved=${baselinePreserved}\n`);
+        process.stderr.write(`PAIRED claimed run ${claim.runId}: ${claim.diagnosis}; baselinePreserved=${baselinePreserved}\n`);
         if (suiteAssertionsFailed || !claim.cleanupConfirmed || !claim.expectationConfirmed || !baselinePreserved || claim.runId === selectedRetainedId) continue;
         if (claim.runDir) await rm(claim.runDir, { recursive: true, force: true });
       }
@@ -447,16 +456,16 @@ if (!enabled) {
         }
         if (!selectedRetainedId) await rm(testStateDir, { recursive: true, force: true });
       } else {
-        process.stderr.write(`PHASE5 unresolved cleanup retained explicitly: suite=${suiteDir}; claimed=${claimedRuns.map((claim) => claim.runId).join(",") || "none"}\n`);
+        process.stderr.write(`PAIRED unresolved cleanup retained explicitly: suite=${suiteDir}; claimed=${claimedRuns.map((claim) => claim.runId).join(",") || "none"}\n`);
       }
       if (selectedRetainedId && overlap) process.stdout.write(`\n${overlap.stdout}`);
     });
 
-    it.skipIf(!recordPhase7Timings)("records five equivalent warm workloads per scheduling policy at direct operation boundaries", async () => {
+    it.skipIf(!recordTimings)("records five equivalent warm workloads per scheduling policy at direct operation boundaries", async () => {
       const timingClaims: ClaimedRun[] = [];
       for (const policy of ["serial", "overlap"] as const) {
         for (let sample = 1; sample <= 5; sample += 1) {
-          const run = await runChild(policy, 1, undefined, { EVALS_PHASE7_TIMING_CHILD: "1" });
+          const run = await runChild(policy, 1, { EVALS_PAIRED_TIMING_CHILD: "1" });
           timingClaims.push(run.claimed);
           expect(run.stderr).toContain("image cache hit");
           expect(run.stderr).not.toContain("image build started");
@@ -464,7 +473,7 @@ if (!enabled) {
           const timings = correctedTimingRow(run.timing!);
           expect(timings.sdkBaselineMs).toBeGreaterThanOrEqual(0);
           expect(timings.sdkTreatmentMs).toBeGreaterThanOrEqual(0);
-          process.stdout.write(`PHASE7_TIMING policy=${policy} sample=${sample} ${JSON.stringify(timings)}\n`);
+          process.stdout.write(`PAIRED_TIMING policy=${policy} sample=${sample} ${JSON.stringify(timings)}\n`);
         }
       }
       expect(listIds("container")).toEqual(containersBefore);
@@ -480,7 +489,7 @@ if (!enabled) {
         const resourceIds = outcome.marker.resource === undefined
           ? outcome.entries.filter((entry) => entry.action === "create" && entry.event === "intent" && (entry.kind === "guest" || entry.kind === "network")).map((entry) => `${entry.kind}:${entry.name}`)
           : [`${outcome.marker.resourceKind ?? "network"}:${outcome.marker.resource}`];
-        process.stdout.write(`PHASE7_ABORT stage=${scenario} operationPid=${outcome.marker.operationPid ?? "cooperative-preparer"} resources=${resourceIds.join(",") || "none"}\n`);
+        process.stdout.write(`PAIRED_ABORT stage=${scenario} operationPid=${outcome.marker.operationPid ?? "cooperative-preparer"} resources=${resourceIds.join(",") || "none"}\n`);
         if (scenario === "preparation-abort") {
           expect(outcome.marker.resourceKind).toBe("network");
           expect(outcome.marker.resource).toMatch(/^eval-prep-abort-/);
@@ -672,8 +681,8 @@ if (!enabled) {
             expect(sealedAttestation.observed).toMatchObject({ source: "apple-container-guest", testDouble: false, hostBackedMounts: [], unexpectedWritableMounts: [] });
             const conditionRecord = JSON.parse(await readFile(join(dirname(run.receipt), condition.dir, "condition.json"), "utf8"));
             expect(conditionRecord.runtime.allowedTools).toEqual(["read", "write", "edit", "bash"]);
-            expect(conditionRecord.runtime.activeTools).toEqual(["read", "write", "edit", "bash"]);
-            expect(conditionRecord.runtime.mcpClientId).toBeUndefined();
+            expect(conditionRecord.runtime.activeTools).toEqual(["read", "write", "edit", "bash", "mcp"]);
+            expect(conditionRecord.runtime.mcpClientId).toBe(MCP_CLIENT_POLICY.id);
             expect(conditionRecord.runtime.seededMcpServers).toEqual([]);
             expect(allGuestNames.has(sealedAttestation.guestName)).toBe(false);
             expect(allNetworkNames.has(sealedAttestation.networkName)).toBe(false);
@@ -689,7 +698,7 @@ if (!enabled) {
             allSessionIds.add(header.id);
             expect(session.redactions.count).toBeGreaterThan(0);
             const native = JSON.stringify(session.entries);
-            expect(native).not.toContain(`phase5-synthetic-canary-${suiteId}`);
+            expect(native).not.toContain(`paired-synthetic-canary-${suiteId}`);
             expect(native).not.toContain("grader-only-token");
             expect(native).not.toContain("grader received a credential");
             const messages = session.entries as Array<{ message?: { content?: Array<{ id?: string; arguments?: { command?: string }; text?: string }>; isError?: boolean; toolCallId?: string } }>;
@@ -701,8 +710,8 @@ if (!enabled) {
             expect(boundaryResults).toHaveLength(1);
             const boundaryCall = boundaryCalls[0];
             const boundaryResult = boundaryResults[0]!.message;
-            expect(boundaryCall?.arguments?.command).toContain('test ! -e "$HOME/.phase5-fresh"');
-            expect(boundaryCall?.arguments?.command).toContain('test ! -e "$TMPDIR/phase5-fresh"');
+            expect(boundaryCall?.arguments?.command).toContain('test ! -e "$HOME/.paired-fresh"');
+            expect(boundaryCall?.arguments?.command).toContain('test ! -e "$TMPDIR/paired-fresh"');
             expect(boundaryCall?.arguments?.command).toContain("test ! -e oracle.json");
             expect(boundaryCall?.arguments?.command).toContain("test ! -e validator.ts");
             expect(boundaryResult?.isError).toBe(false);
@@ -726,64 +735,7 @@ if (!enabled) {
       expect(allSessionIds.size).toBe(6);
       expect(allGuestNames.size).toBe(6);
       expect(allNetworkNames.size).toBe(6);
+      for (const claim of [overlap!.claimed, serial!.claimed]) claim.expectationConfirmed = true;
     }, 60_000);
-
-    it("reproduces the L2 scripted pair from retained bytes after deleting its source case and skill", async () => {
-      const source = overlap!;
-      const sourceHashes = await chainedHashes(source.runDir);
-      const sourceReport = await buildRunReport(source.receipt);
-      const negativeHome = join(stateDir, `${suiteId}-repro-negative-home`);
-      await mkdir(negativeHome, { recursive: true });
-      const offlineEnv = buildAllowlistedEnv(negativeHome, { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` });
-      const dry = spawnSync(process.execPath, ["--experimental-strip-types", runScript, "--from", source.receipt, "--dry-run", "--quiet"], { cwd: process.cwd(), encoding: "utf8", env: offlineEnv, timeout: 30_000 });
-      expect(dry.status, dry.stderr).toBe(0);
-      expect(JSON.parse(dry.stdout)).toMatchObject({ dispatches: 0, supported: true });
-      const upgrade = spawnSync(process.execPath, ["--experimental-strip-types", runScript, "--from", source.receipt, "--quiet"], { cwd: process.cwd(), encoding: "utf8", env: offlineEnv, timeout: 30_000 });
-      expect(upgrade.status).toBe(1);
-      expect(upgrade.stderr).toContain("scripted Pi transport can only be reproduced through the guarded zero-paid-call test composition");
-      const conflict = spawnSync(process.execPath, ["--experimental-strip-types", runScript, "--from", source.receipt, "--mode", "fake"], { cwd: process.cwd(), encoding: "utf8", env: offlineEnv, timeout: 30_000 });
-      expect(conflict.status).toBe(1);
-      expect(conflict.stderr).toContain("conflicts with --from");
-      await rm(join(suiteDir, "eval.json"), { force: true });
-      await rm(join(suiteDir, "cases"), { recursive: true, force: true });
-      await rm(skillDir, { recursive: true, force: true });
-      const reproduced = await runChild("overlap", 1, source.receipt);
-      const report = await buildRunReport(reproduced.receipt);
-      expect(report.verification.ok).toBe(true);
-      expect(report.testDouble).toBe(true);
-      expect(report.summary).toMatchObject({ baselineMean: sourceReport.summary?.baselineMean, treatmentMean: sourceReport.summary?.treatmentMean, qualityDelta: sourceReport.summary?.qualityDelta, tokensDelta: sourceReport.summary?.tokensDelta });
-      expect(report.runId).not.toBe(sourceReport.runId);
-      expect(await chainedHashes(source.runDir)).toEqual(sourceHashes);
-      const provenance = JSON.parse(await readFile(join(reproduced.runDir, "inputs/reproduction.json"), "utf8"));
-      expect(provenance).toMatchObject({ sourceRunId: sourceReport.runId, resumed: false, preparerInvoked: false });
-      const sourceRuntime = sourceReport.pairs.flatMap((pair) => pair.conditions);
-      const reproRuntime = report.pairs.flatMap((pair) => pair.conditions);
-      expect(new Set(reproRuntime.map((condition) => condition.imageDigest))).toEqual(new Set(sourceRuntime.map((condition) => condition.imageDigest)));
-      const exactRuntime = async (receiptPath: string) => {
-        const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as { pairs: Array<{ conditions: Array<{ dir: string }> }> };
-        const resources: string[] = [];
-        const sessionIds: string[] = [];
-        const candidates: string[] = [];
-        for (const condition of receipt.pairs.flatMap((pair) => pair.conditions)) {
-          const record = JSON.parse(await readFile(join(dirname(receiptPath), condition.dir, "condition.json"), "utf8")) as { guestName: string; networkName: string };
-          resources.push(`guest:${record.guestName}`, `network:${record.networkName}`);
-          const session = await readNativeSession(receiptPath, condition.dir);
-          sessionIds.push((session.header as { id: string }).id);
-          candidates.push(JSON.stringify(await readCandidate(receiptPath, condition.dir)));
-        }
-        return { resources, sessionIds, candidates };
-      };
-      const sourceExact = await exactRuntime(source.receipt);
-      const reproExact = await exactRuntime(reproduced.receipt);
-      expect(new Set(reproExact.resources).size).toBe(reproExact.resources.length);
-      expect(reproExact.resources.every((identity) => !sourceExact.resources.includes(identity))).toBe(true);
-      expect(new Set(reproExact.sessionIds).size).toBe(reproExact.sessionIds.length);
-      expect(reproExact.sessionIds.every((id) => !sourceExact.sessionIds.includes(id))).toBe(true);
-      expect(reproExact.candidates).toEqual(sourceExact.candidates);
-      expect(listIds("container")).toEqual(containersBefore);
-      expect(listIds("network")).toEqual(networksBefore);
-      expect(listIds("image")).toEqual(imagesBefore);
-      for (const claim of [source.claimed, serial!.claimed, reproduced.claimed]) claim.expectationConfirmed = true;
-    }, 180_000);
   });
 }

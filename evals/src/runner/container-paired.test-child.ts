@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createPiHarness } from "../harnesses/pi/adapter.ts";
 import type { Harness } from "../harnesses/harness.ts";
 import { exportSessionFileToHtml, verifyExportedHtml } from "../harnesses/pi/export-viewer.ts";
@@ -16,16 +16,16 @@ import type { CasePreparer } from "../core/types.ts";
 import type { RunProgressEvent } from "./run.ts";
 import { runCli, type TestOnlyRunComposition } from "../../scripts/run.ts";
 
-const [suiteId, policy, repetitionsText, fromReceipt] = process.argv.slice(2);
+const [suiteId, policy, repetitionsText] = process.argv.slice(2);
 const fault = process.env.EVALS_TEST_FAULT;
 const allowedFaults = ["preparation", "export", "grading", "task-budget", "preparation-abort", "guest-preparation-abort", "tool-abort", "export-abort", "grading-abort"];
 if (fault !== undefined && !allowedFaults.includes(fault)) throw new Error(`unsupported EVALS_TEST_FAULT: ${fault}`);
 const abortStage = fault?.endsWith("-abort") ? fault.slice(0, -6) as "preparation" | "guest-preparation" | "tool" | "export" | "grading" : null;
 const repetitions = Number(repetitionsText);
 if (!suiteId || (policy !== "serial" && policy !== "overlap") || !Number.isInteger(repetitions) || repetitions < 1 || repetitions > 2) throw new Error("usage: child <suite> <serial|overlap> <1|2>");
-const secret = `phase5-synthetic-canary-${suiteId}`;
+const secret = `paired-synthetic-canary-${suiteId}`;
 const markerDir = process.env.EVALS_ABORT_MARKER_DIR;
-const timingEnabled = process.env.EVALS_PHASE7_TIMING_CHILD === "1";
+const timingEnabled = process.env.EVALS_PAIRED_TIMING_CHILD === "1";
 const measurements: Record<string, Array<{ label: string; ms: number }>> = {};
 const progress: RunProgressEvent[] = [];
 // This intentionally brackets the test child's wider invocation window, including
@@ -251,17 +251,15 @@ const composition: TestOnlyRunComposition = {
     return timingEnabled ? measuredHarness(harness) : harness;
   },
   createSandbox: (runId) => {
-    const sandbox = createAppleContainerSandbox({ runId, labels: { "eval-run": runId, "eval-test": "phase5" }, ...(cliPath === undefined ? {} : { cliPath }), commandTimeoutMs: 60_000, readyTimeoutMs: 60_000, supervisorMaxMs: 150_000 });
+    const sandbox = createAppleContainerSandbox({ runId, labels: { "eval-run": runId, "eval-test": "paired" }, ...(cliPath === undefined ? {} : { cliPath }), commandTimeoutMs: 60_000, readyTimeoutMs: 60_000, supervisorMaxMs: 150_000 });
     return timingEnabled ? measuredSandbox(sandbox) : sandbox;
   },
   createValidatorRunner: (runId) => {
-    const validator = createContainerValidatorRunner({ runId, labels: { "eval-run": runId, "eval-test": "phase5" }, ...(cliPath === undefined ? {} : { cliPath }), commandTimeoutMs: 60_000 });
+    const validator = createContainerValidatorRunner({ runId, labels: { "eval-run": runId, "eval-test": "paired" }, ...(cliPath === undefined ? {} : { cliPath }), commandTimeoutMs: 60_000 });
     return timingEnabled ? measuredValidator(validator) : validator;
   },
 };
-const outcome = await runCli(fromReceipt ? [
-  "--from", fromReceipt,
-] : [
+const outcome = await runCli([
   "--suite", suiteId,
   "--case", abortStage === "grading" ? "workspace/busy-validator" : fault === "grading" ? "workspace/bad-validator" : "workspace/paired-sdk",
   "--mode", "fake",
@@ -274,10 +272,10 @@ const outcome = await runCli(fromReceipt ? [
   "--scheduling", policy,
   "--repetitions", String(repetitions),
 ], composition);
-if (outcome.receiptPath !== null) process.stdout.write(`PHASE5_RECEIPT=${outcome.receiptPath}\n`);
-if (outcome.runDir !== null) process.stdout.write(`PHASE5_RUN_DIR=${outcome.runDir}\n`);
+if (outcome.receiptPath !== null) process.stdout.write(`PAIRED_RECEIPT=${outcome.receiptPath}\n`);
+if (outcome.runDir !== null) process.stdout.write(`PAIRED_RUN_DIR=${outcome.runDir}\n`);
 if (timingEnabled) {
-  process.stdout.write(`PHASE7_METRICS=${JSON.stringify({ measurements, progress, childInvocationWindowMs: Date.now() - childInvocationStartedAtMs })}\n`);
+  process.stdout.write(`PAIRED_METRICS=${JSON.stringify({ measurements, progress, childInvocationWindowMs: Date.now() - childInvocationStartedAtMs })}\n`);
 }
 if (fault !== undefined) process.exit(outcome.code);
 if (outcome.code !== 0 || outcome.receiptPath === null || outcome.runDir === null) process.exit(outcome.code || 1);
@@ -297,4 +295,4 @@ for (const condition of receipt.pairs[0]!.conditions) {
   htmlPaths.push(html);
 }
 if (!(await verifyRun(outcome.runDir)).ok) throw new Error("receipt changed while exporting derived HTML views");
-process.stdout.write(`PHASE5_BASELINE_HTML=${htmlPaths[0]}\nPHASE5_TREATMENT_HTML=${htmlPaths[1]}\n`);
+process.stdout.write(`PAIRED_BASELINE_HTML=${htmlPaths[0]}\nPAIRED_TREATMENT_HTML=${htmlPaths[1]}\n`);

@@ -37,6 +37,8 @@ export interface ScriptedTextStep {
   readonly text: string;
   readonly usage?: Usage;
   readonly stopReason?: StopReason;
+  /** Raw provider stop reason (e.g. MAX_TOKENS/STOP) preserved verbatim on the message. */
+  readonly rawStopReason?: string;
 }
 
 export interface ScriptedToolCallStep {
@@ -66,6 +68,8 @@ export interface ScriptedStopStep {
   readonly stopReason: StopReason;
   readonly text?: string;
   readonly usage?: Usage;
+  /** Raw provider stop reason (e.g. MAX_TOKENS/STOP) preserved verbatim on the message. */
+  readonly rawStopReason?: string;
 }
 
 export type ScriptedStep =
@@ -88,6 +92,11 @@ function generateToolCallId(): string {
   return `tool_call_${Date.now()}_${callCounter}`;
 }
 
+/**
+ * @notice Emulates provider streaming for deterministic tests without network requests.
+ * @param stepsOrDriver Fixed responses or a request-aware response generator.
+ * @returns An SDK-compatible streaming function with synthetic usage and stop reasons.
+ */
 export function createScriptedStreamSimple(stepsOrDriver: readonly ScriptedStep[] | ScriptedDriver) {
   const steps = Array.isArray(stepsOrDriver) ? [...stepsOrDriver] : undefined;
   const driver = typeof stepsOrDriver === "function" ? stepsOrDriver : undefined;
@@ -252,6 +261,7 @@ export function createScriptedStreamSimple(stepsOrDriver: readonly ScriptedStep[
             model: model.id,
             ...(step.usage === undefined ? {} : { usage: step.usage }),
             stopReason,
+            ...(step.rawStopReason === undefined ? {} : { rawStopReason: step.rawStopReason }),
             timestamp: Date.now(),
           } as unknown as AssistantMessage;
           stream.push({ type: "start", partial: { ...msg, content: [] } });
@@ -284,6 +294,7 @@ export function createScriptedStreamSimple(stepsOrDriver: readonly ScriptedStep[
           model: model.id,
           ...(step.usage === undefined ? {} : { usage: step.usage }),
           stopReason,
+          ...(step.rawStopReason === undefined ? {} : { rawStopReason: step.rawStopReason }),
           timestamp: Date.now(),
         } as unknown as AssistantMessage;
 

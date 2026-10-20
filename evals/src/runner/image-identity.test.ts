@@ -6,7 +6,7 @@
  * - Wrong image digest is rejected
  * - Warm matching image is reused
  * - Changed recipe identity selects a different image rather than silently reusing old environment
- * - Final run cleanup never deletes a shared cached image or another run's resources (Amendment 3)
+ * - Final run cleanup never deletes a shared cached image or another run's resources
  */
 
 import { readFile } from "node:fs/promises";

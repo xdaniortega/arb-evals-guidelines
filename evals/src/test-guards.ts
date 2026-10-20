@@ -1,7 +1,7 @@
 /**
  * Shared test guards for zero-paid-call test execution.
  *
- * Implements the zero-paid-call guard contract (see current-implementation.md):
+ * Implements the zero-paid-call guard contract:
  * - Tests must NEVER load real `evals/.env`, user agent homes, or developer credential files.
  * - Test child processes receive an allowlisted environment and temporary homes.
  * - Fail-fast guard against reaching real model completion transport fails BEFORE networking.

@@ -18,6 +18,7 @@ import { constants as fsConstants } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { EvalError } from "../core/types.ts";
 import type { GuardedSecret } from "../core/secret-scan.ts";
+import { secretNeedles } from "../core/secret-scan.ts";
 import { PROVIDER_CREDENTIAL_VARIABLES, type ProviderId } from "../core/types.ts";
 
 const KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -94,6 +95,53 @@ export function parseDotEnv(content: string): Record<string, string> {
   return result;
 }
 
+/**
+ * @notice Protects both configured credentials and the exact values used for authentication.
+ * @param parsed Isolated values parsed from the credential file.
+ * @returns Nonblank raw and trimmed secrets, deduplicated by value.
+ * @dev Quoted whitespace survives parsing, while provider authentication trims it. Provider-credential values (keys in PROVIDER_CREDENTIAL_VARIABLES) must satisfy the scanner's minimum length and fail closed when too short; unrelated short .env settings are skipped rather than aborting the load. Values long enough to scan safely are guarded (raw and trimmed, deduplicated).
+ */
+export function deriveGuardedSecrets(parsed: Readonly<Record<string, string>>): GuardedSecret[] {
+  const guardedSecrets: GuardedSecret[] = [];
+  const seen = new Set<string>();
+  // The scanner rejects anything below this length; mirror it here so we can decide
+  // whether a short value should fail closed (real credential) or be skipped (config).
+  const MIN_GUARDED_LENGTH = 8;
+  // Only actual provider credentials must fail closed when truncated. An unrelated short
+  // .env setting (e.g. LOG_LEVEL=debug, PORT=443) must never abort the whole load.
+  const credentialKeys = new Set<string>(Object.values(PROVIDER_CREDENTIAL_VARIABLES));
+
+  const register = (label: string, secretValue: string) => {
+    // Skip empty and whitespace-only values: a run of spaces would become a needle
+    // that false-positives on any artifact, and it can never be a real credential.
+    if (secretValue.trim() === "" || seen.has(secretValue)) {
+      return;
+    }
+    const secret = { label, value: secretValue };
+    if (credentialKeys.has(label)) {
+      // Fail closed for real provider credentials: secretNeedles throws a
+      // "secret-quarantine" EvalError (without the value) when a credential is too short.
+      secretNeedles(secret);
+    } else if (secretValue.length < MIN_GUARDED_LENGTH) {
+      // Non-credential config lines that are too short to scan safely are simply not
+      // guarded; they must not abort loading of the real credentials.
+      return;
+    }
+    seen.add(secretValue);
+    guardedSecrets.push(secret);
+  };
+
+  for (const [key, value] of Object.entries(parsed)) {
+    register(key, value);
+    const trimmed = value.trim();
+    if (trimmed !== "" && trimmed !== value) {
+      register(key, trimmed);
+    }
+  }
+
+  return guardedSecrets;
+}
+
 export interface LoadedCredentials {
   readonly credentials: Readonly<Record<string, string>>;
   readonly guardedSecrets: readonly GuardedSecret[];
@@ -142,13 +190,7 @@ export async function loadGuardedCredentials(envPath: string, repoRoot: string):
   }
 
   const parsed = parseDotEnv(content);
-  const guardedSecrets: GuardedSecret[] = [];
-
-  for (const [key, value] of Object.entries(parsed)) {
-    if (value !== "") {
-      guardedSecrets.push({ label: key, value });
-    }
-  }
+  const guardedSecrets = deriveGuardedSecrets(parsed);
 
   return {
     credentials: Object.freeze(parsed),

@@ -12,20 +12,21 @@
  * - Classifies provider errors, task limits, and protocol drift into stable structured outcomes.
  */
 
-import { mkdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, posix } from "node:path";
+import { scheduleTimeout, type DeadlineTimer } from "../../core/timing.ts";
+import { mkdirSync } from "node:fs";
+import { posix } from "node:path";
 import type { GuestStreamSession } from "../../sandboxes/sandbox.ts";
 import type { Api, Context, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { deriveMessagesFromNativeSession, deriveToolStepsFromNativeSession } from "../../artifacts/queries.ts";
 import { canonicalJson } from "../../core/experiment.ts";
 import { scanForSecrets } from "../../core/secret-scan.ts";
-import { assertNotAborted, CONDITION_CLEANUP_ALLOWANCE_MS, CONDITION_OPERATION_ALLOWANCE_MS, EvalError, SAFE_DEFAULT_LIMITS, toStructuredFailure } from "../../core/types.ts";
-import type { ConditionId, StructuredFailure } from "../../core/types.ts";
+import { assertNotAborted, CONDITION_OPERATION_ALLOWANCE_MS, EvalError, resolveGuestTimeouts, STOP_CAUSES } from "../../core/types.ts";
+import type { ConditionId, StopCause, StructuredFailure, TerminalClass } from "../../core/types.ts";
 import { validateTargetConfiguration } from "../../runner/models.ts";
 import type { Guest } from "../../sandboxes/sandbox.ts";
-import { sanitizeNativeSessionEntries, type NativeSessionEntry, type SanitizedNativeSessionResult } from "./export-viewer.ts";
+import { sanitizeNativeSessionEntries, type NativeSessionEntry } from "./export-viewer.ts";
 import type { ScriptedStep } from "./scripted-stream.ts";
+import { classifyTerminalState, failureCodeForTerminalClass } from "./terminal-classification.ts";
 import type {
   Harness,
   HarnessAttestation,
@@ -35,14 +36,12 @@ import type {
   HarnessRunResult,
   HarnessUsage,
   NormalizedMessage,
-  NormalizedToolStep,
   RuntimeIdentity,
 } from "../harness.ts";
 import {
   createPiSdkSession,
   type PiSdkSessionInstance,
 } from "./sdk-session.ts";
-import { buildAmbientTools } from "./ambient-tools.ts";
 import { MCP_CLIENT_POLICY, MCP_CLIENT_TOOL_NAME } from "./mcp-tools.ts";
 
 export const PI_HARNESS_ID = "pi";
@@ -116,13 +115,17 @@ function finiteNonNegative(value: unknown): value is number {
 }
 
 async function awaitRemoteExit(session: RemoteSession): Promise<void> {
-  if (session.stream.exitCode === undefined) throw new EvalError("protocol-drift", "guest SDK stream cannot verify process closure", { at: "pi.remote.exit" });
+  if (session.stream.exitCode === undefined || session.stream.termination === undefined) throw new EvalError("protocol-drift", "guest SDK stream cannot verify process closure", { at: "pi.remote.exit" });
   let timer: NodeJS.Timeout | null = null;
   try {
     const code = await Promise.race([
       session.stream.exitCode,
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EvalError("protocol-drift", "guest SDK did not close after result", { at: "pi.remote.exit" })), REMOTE_CLOSE_TIMEOUT_MS); }),
     ]);
+    // A forced settlement is not an observed close/error: it remains unresolved and
+    // must not be consumed as confirmed termination or as evidence of absence.
+    const termination = await session.stream.termination;
+    if (termination !== "confirmed") throw new EvalError("cleanup-failed", "guest SDK stream termination was forced without confirmed closure", { at: "pi.remote.exit" });
     if (code !== 0) throw new EvalError("protocol-drift", `guest SDK exited ${String(code)} after result`, { at: "pi.remote.exit" });
   } finally { if (timer !== null) clearTimeout(timer); }
 }
@@ -163,6 +166,11 @@ function truncateText(text: string): { text: string; truncated: boolean } {
   return { text, truncated: false };
 }
 
+/**
+ * @notice Creates isolated Pi sessions with attested runtime settings and task budgets.
+ * @param options Runtime dependencies and explicit test-only substitutions.
+ * @returns A harness that configures, executes, and disposes each arm independently.
+ */
 export function createPiHarness(options: PiHarnessOptions = {}): Harness {
   const scriptedBoundary = options.streamSimpleOverride !== undefined || options.streamSimpleOverrideFactory !== undefined || options.scriptedSteps !== undefined;
   if (options.faults?.simulateNativeSanitizerFailure && !scriptedBoundary) {
@@ -189,25 +197,21 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
   const sessions = new Map<ConditionId, PiSdkSessionInstance>();
   const remoteSessions = new Map<ConditionId, RemoteSession>();
 
-  const runtimeFor = (request: HarnessRequest): RuntimeIdentity => {
-    const declaredMcp = request.conditionId === "treatment" && (request.skillToolBundle?.servers.length ?? 0) > 0;
-    return {
-      harnessId: PI_HARNESS_ID,
-      harnessVersion: PI_PINNED_VERSION,
-      provider: request.target.provider,
-      model: request.target.model,
-      thinking: request.target.thinking,
-      allowedTools: [...request.allowedTools],
-      ambientTools: [...request.ambientTools],
-      activeTools: declaredMcp ? [...request.allowedTools, MCP_CLIENT_TOOL_NAME] : [...request.allowedTools],
-      ...(declaredMcp ? { mcpClientId: MCP_CLIENT_POLICY.id } : {}),
-      seededMcpServers: (declaredMcp ? request.skillToolBundle?.servers ?? [] : []).map((server) => server.name).sort(),
-      skillPaths: [...request.skillPaths],
-      ambientDiscoveryDisabled: true,
-      implicitRetryDisabled: true,
-      testDouble: isTestDouble,
-    };
-  };
+  const runtimeFor = (request: HarnessRequest): RuntimeIdentity => ({
+    harnessId: PI_HARNESS_ID,
+    harnessVersion: PI_PINNED_VERSION,
+    provider: request.target.provider,
+    model: request.target.model,
+    thinking: request.target.thinking,
+    allowedTools: [...request.allowedTools],
+    activeTools: [...request.allowedTools, MCP_CLIENT_TOOL_NAME],
+    mcpClientId: MCP_CLIENT_POLICY.id,
+    seededMcpServers: (request.conditionId === "treatment" ? request.skillToolBundle?.servers ?? [] : []).map((server) => server.name).sort(),
+    skillPaths: [...request.skillPaths],
+    ambientDiscoveryDisabled: true,
+    implicitRetryDisabled: true,
+    testDouble: isTestDouble,
+  });
 
   async function getOrCreateSession(guest: Guest, request: HarnessRequest): Promise<PiSdkSessionInstance> {
     validateTargetConfiguration(request.target);
@@ -260,7 +264,6 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       target: request.target,
       skillPath,
       allowedTools: request.allowedTools,
-      ambientTools: buildAmbientTools(request.ambientTools, workspaceDir),
       skillToolBundle: request.conditionId === "treatment" ? (request.skillToolBundle ?? null) : null,
       skillToolBundleSha256: request.conditionId === "treatment" ? request.skillToolBundleSha256 : null,
       streamSimpleOverride: options.streamSimpleOverrideFactory?.(request.conditionId) ?? options.streamSimpleOverride,
@@ -272,7 +275,11 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       signal: request.signal,
       deadlineAtMs: request.deadlineAtMs !== undefined && request.deadlineAtMs > Date.now()
         ? request.deadlineAtMs
-        : Date.now() + (request.limits.wallClockMs || SAFE_DEFAULT_LIMITS.wallClockMs),
+        // No request deadline: derive one from a finite arm wall clock, but leave it
+        // undefined (no arm deadline) when the arm is unlimited (wallClockMs === null).
+        : request.limits.wallClockMs !== null
+          ? Date.now() + request.limits.wallClockMs
+          : undefined,
       guardedSecrets: request.guardedSecrets,
     });
 
@@ -291,16 +298,21 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       throw new EvalError("parity-violation", "an in-process stream override cannot cross the guest boundary", { at: "pi.remote" });
     }
 
-    const armAllowanceMs = (request.limits?.wallClockMs && request.limits.wallClockMs > 0)
+    // A finite arm wall clock derives a bounded stream timeout; an unlimited arm
+    // (wallClockMs === null) has no wall-clock-derived stream timeout, so the guest stream
+    // is bounded only by an explicit finite request deadline or by cooperative cancellation.
+    const armAllowanceMs = (request.limits?.wallClockMs !== null && request.limits.wallClockMs > 0)
       ? request.limits.wallClockMs
-      : REMOTE_PROCESS_LIFETIME_MS;
+      : null;
     // Own setup + sibling setup/capture + both serial prompt allowances. The supervisor
     // starts before this stream and has a smaller shutdown margin (10s versus 30s).
-    const nominalStreamTimeoutMs = 3 * REMOTE_PRE_PROMPT_TIMEOUT_MS + armAllowanceMs +
-      Math.max(armAllowanceMs, REMOTE_PROCESS_LIFETIME_MS) + CONDITION_CLEANUP_ALLOWANCE_MS + REMOTE_CLEANUP_MARGIN_MS;
-    const streamTimeoutMs = request.deadlineAtMs !== undefined
-      ? Math.min(nominalStreamTimeoutMs, Math.max(1, request.deadlineAtMs - Date.now()))
-      : nominalStreamTimeoutMs;
+    const nominalStreamTimeoutMs = armAllowanceMs === null ? null : resolveGuestTimeouts(armAllowanceMs).streamMs;
+    const finiteDeadlineRemainingMs = request.deadlineAtMs !== undefined && Number.isFinite(request.deadlineAtMs)
+      ? Math.max(1, request.deadlineAtMs - Date.now())
+      : null;
+    const streamTimeoutMs = finiteDeadlineRemainingMs !== null
+      ? (nominalStreamTimeoutMs !== null ? Math.min(nominalStreamTimeoutMs, finiteDeadlineRemainingMs) : finiteDeadlineRemainingMs)
+      : (nominalStreamTimeoutMs ?? undefined);
     const stream = await guest.execStream({
       command: ["node", "/opt/eval/run-measured.mjs", "agent"],
       cwd: request.workspaceRoot,
@@ -430,7 +442,6 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       target: request.target,
       skillPath: request.skillPaths[0] ?? null,
       allowedTools: [...request.allowedTools],
-      ambientTools: [...request.ambientTools],
       skillToolBundle: request.conditionId === "treatment" ? (request.skillToolBundle ?? null) : null,
       skillToolBundleSha256: request.skillToolBundleSha256,
       processLifetimeMs: REMOTE_PROCESS_LIFETIME_MS,
@@ -441,6 +452,7 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
         maxOutputTokens: request.limits.maxOutputTokens,
       },
       credentialVariable: variable,
+      ...(request.captureReasoning !== undefined ? { captureReasoning: request.captureReasoning } : {}),
       ...(options.scriptedSteps === undefined ? {} : { scriptedSteps: options.scriptedSteps }),
     });
     return session;
@@ -488,28 +500,25 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
       if (!attestation || typeof attestation !== "object" || Array.isArray(attestation)) {
         throw new EvalError("parity-violation", "guest SDK readiness omitted attestation", { at: "pi.attestation" });
       }
-      exactFields(attestation, ["arm", "target", "modelId", "providerId", "thinkingLevel", "activeTools", "ambientCustomTools", "mcpClientId", "seededMcpServers", "skillToolBundleSha256", "loadedSkills", "agentsFilesCount", "extensionsCount", "promptsCount", "themesCount", "retryEnabled", "compactionEnabled"], "pi.attestation");
+      exactFields(attestation, ["arm", "target", "modelId", "providerId", "thinkingLevel", "activeTools", "mcpClientId", "seededMcpServers", "skillToolBundleSha256", "loadedSkills", "agentsFilesCount", "extensionsCount", "promptsCount", "themesCount", "retryEnabled", "compactionEnabled"], "pi.attestation");
       if (!attestation.target || typeof attestation.target !== "object" || Array.isArray(attestation.target)) throw new EvalError("parity-violation", "guest SDK readiness omitted target attestation", { at: "pi.attestation.target" });
       exactFields(attestation.target, ["provider", "model", "thinking"], "pi.attestation.target");
       if (attestation.arm !== request.conditionId || attestation.modelId !== request.target.model ||
           attestation.providerId !== request.target.provider || attestation.thinkingLevel !== request.target.thinking ||
           JSON.stringify(attestation.target) !== JSON.stringify(request.target) ||
-          JSON.stringify(attestation.ambientCustomTools) !== JSON.stringify([...request.ambientTools].sort()) ||
           attestation.agentsFilesCount !== 0 || attestation.extensionsCount !== 0 ||
           attestation.promptsCount !== 0 || attestation.themesCount !== 0 ||
           attestation.retryEnabled !== false || attestation.compactionEnabled !== false) {
         throw new EvalError("parity-violation", "guest SDK readiness did not attest the frozen runtime configuration", { at: "pi.attestation" });
       }
 
-      // MCP is treatment-only and exists only when the frozen manifest declares servers.
-      const declaredMcp = request.conditionId === "treatment" && (request.skillToolBundle?.servers.length ?? 0) > 0;
-      const expectedMcpClientId = declaredMcp ? MCP_CLIENT_POLICY.id : null;
-      const expectedActiveTools = declaredMcp ? [...request.allowedTools, MCP_CLIENT_TOOL_NAME] : [...request.allowedTools];
-      if (attestation.mcpClientId !== expectedMcpClientId ||
-          JSON.stringify(attestation.activeTools) !== JSON.stringify(expectedActiveTools)) {
-        throw new EvalError("parity-violation", "guest MCP client or effective tool set differs from condition configuration", { at: "pi.attestation.activeTools" });
+      // Server choices are agent behavior; only the shared interface and preparation
+      // seeds are attested here. Both arms expose exactly the same generic tool.
+      if (attestation.mcpClientId !== MCP_CLIENT_POLICY.id ||
+          JSON.stringify(attestation.activeTools) !== JSON.stringify([...request.allowedTools, MCP_CLIENT_TOOL_NAME])) {
+        throw new EvalError("parity-violation", "guest MCP client or effective tool set differs from shared policy", { at: "pi.attestation.activeTools" });
       }
-      const seededServers = (declaredMcp ? request.skillToolBundle?.servers ?? [] : []).map((server) => server.name).sort();
+      const seededServers = (request.conditionId === "treatment" ? request.skillToolBundle?.servers ?? [] : []).map((server) => server.name).sort();
       if (JSON.stringify(attestation.seededMcpServers) !== JSON.stringify(seededServers)) {
         throw new EvalError("parity-violation", "guest seeded MCP servers differ from condition configuration", { at: "pi.attestation.seededMcpServers" });
       }
@@ -574,12 +583,15 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
           catch (error: unknown) { closureError = error; }
           if (remote.failure !== null) throw remote.failure;
           if (closureError !== null) throw closureError;
-          const entries = sanitizeNativeSessionEntries(remote.records, request.guardedSecrets ?? []);
-          const messages = deriveMessagesFromNativeSession(entries.entries).map((message) => {
+          // remote.records already carries entries the guest redacted before sending
+          // each `record` frame (native-prefix.ts#record runs on that side); no second
+          // redaction pass is needed here.
+          const entries = remote.records;
+          const messages = deriveMessagesFromNativeSession(entries).map((message) => {
             const bounded = truncateText(message.text);
             return { ...message, text: bounded.text, truncated: bounded.truncated };
           });
-          const toolSteps = deriveToolStepsFromNativeSession(entries.entries);
+          const toolSteps = deriveToolStepsFromNativeSession(entries);
           const outcome = frame.outcome;
           if (outcome !== "completed" && outcome !== "task-limit" && outcome !== "infrastructure-failure") {
             throw new EvalError("protocol-drift", "guest SDK result carried an unknown outcome", { at: "pi.remote.result" });
@@ -600,8 +612,14 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
             throw new EvalError("protocol-drift", "guest SDK result carried invalid timing", { at: "pi.remote.result" });
           }
           if (!terminal || typeof terminal !== "object" || Array.isArray(terminal)) throw new EvalError("protocol-drift", "guest SDK result omitted terminal state", { at: "pi.remote.result" });
-          exactFields(terminal, ["stopReason", "classification", "semanticAbortCause", "error", "streamingStopped"], "pi.remote.result.terminal");
+          exactFields(terminal, ["stopReason", "rawStopReason", "classification", "stopCause", "semanticAbortCause", "error", "streamingStopped"], "pi.remote.result.terminal");
           const validClasses = ["completed", "task-limit", "interrupted", "execution-failure", "unexpected-abort"];
+          if (!(terminal.rawStopReason === null || typeof terminal.rawStopReason === "string")) {
+            throw new EvalError("protocol-drift", "guest SDK result carried an invalid raw provider stop reason", { at: "pi.remote.result" });
+          }
+          if (!(STOP_CAUSES as readonly string[]).includes(terminal.stopCause)) {
+            throw new EvalError("protocol-drift", "guest SDK result carried an unknown stop cause", { at: "pi.remote.result" });
+          }
           if (!validClasses.includes(terminal.classification) || terminal.streamingStopped !== true ||
               !(terminal.stopReason === null || typeof terminal.stopReason === "string") ||
               !(terminal.semanticAbortCause === null || terminal.semanticAbortCause === "external" || terminal.semanticAbortCause === "arm-budget") ||
@@ -612,13 +630,20 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
             throw new EvalError("protocol-drift", "guest SDK result carried inconsistent terminal state", { at: "pi.remote.result" });
           }
           const failures: StructuredFailure[] = outcome === "infrastructure-failure" ? [{
-            code: terminal.classification === "interrupted" ? "interrupted" : terminal.classification === "execution-failure" ? "provider-error" : "protocol-drift",
+            code: failureCodeForTerminalClass(terminal.classification as TerminalClass, terminal.error) ?? "protocol-drift",
             failureClass: "infrastructure",
             message: String(terminal.error ?? terminal.classification),
             at: "pi.remote.run",
           }] : [];
           return {
             outcome,
+            stopCause: terminal.stopCause as StopCause,
+            // Preserve the RAW provider stop reason (e.g. MAX_TOKENS/STOP). Fall back to the
+            // normalized reason only when no raw reason was captured, for backwards
+            // compatibility with responses that never carried one.
+            providerStopReason: typeof terminal.rawStopReason === "string"
+              ? terminal.rawStopReason
+              : typeof terminal.stopReason === "string" ? terminal.stopReason : null,
             messages,
             toolSteps,
             usage: {
@@ -632,10 +657,10 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
             timing,
             runtime: runtimeFor(request),
             failures,
-            nativeSessionEntries: entries.entries,
+            nativeSessionEntries: entries,
             nativeSessionRedactions: {
-              count: remote.redactionCount + entries.count,
-              entries: [...remote.redactions, ...entries.redactions],
+              count: remote.redactionCount,
+              entries: remote.redactions,
             },
           };
         } finally {
@@ -651,16 +676,18 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
 
       let taskLimitReason: string | null = null;
       let wallClockTimedOut = false;
-      let timeoutTimer: NodeJS.Timeout | null = null;
+      let timeoutTimer: DeadlineTimer | null = null;
 
-      // Watchdog 1: wall-clock timeout
-      if (request.limits.wallClockMs > 0) {
-        timeoutTimer = setTimeout(() => {
+      // Watchdog 1: wall-clock timeout. An unlimited arm (wallClockMs === null) arms no
+      // timeout, so it never collapses to an immediate or hidden finite deadline.
+      const armWallClockMs = request.limits.wallClockMs;
+      if (armWallClockMs !== null && armWallClockMs > 0) {
+        timeoutTimer = scheduleTimeout(() => {
           wallClockTimedOut = true;
-          taskLimitReason = `wall-clock deadline of ${request.limits.wallClockMs}ms elapsed`;
+          taskLimitReason = `wall-clock deadline of ${armWallClockMs}ms elapsed`;
           instance.session.abort();
-        }, request.limits.wallClockMs);
-        if (typeof timeoutTimer.unref === "function") timeoutTimer.unref();
+        }, armWallClockMs);
+        timeoutTimer.unref();
       }
 
       // Watchdog 2: cooperative cancellation via AbortSignal
@@ -678,18 +705,22 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
 
       const startedAt = new Date().toISOString();
       const promptStart = Date.now();
-      instance.setDeadline?.(promptStart + request.limits.wallClockMs);
+      // For a finite arm, set the prompt-relative deadline; for an unlimited arm, explicitly
+      // set deadline to Infinity so the MCP client budget does not cap at its default 180s.
+      if (request.limits.wallClockMs !== null) {
+        instance.setDeadline?.(promptStart + request.limits.wallClockMs);
+      } else {
+        instance.setDeadline?.(Number.POSITIVE_INFINITY);
+      }
       let executionError: unknown = null;
-      let executionFailed = false;
 
       try {
         try {
           await instance.runPrompt(request.prompt);
         } catch (err: unknown) {
           executionError = err;
-          executionFailed = true;
         } finally {
-          if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+          if (timeoutTimer !== null) timeoutTimer.cancel();
           request.signal?.removeEventListener("abort", onSignalAbort);
         }
 
@@ -713,11 +744,16 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
           );
         }
 
-        // Sanitize COPIES of actual entries (strips private reasoning/signatures, redacts secrets)
-        // If an unverifiable secret survives, sanitizeNativeSessionEntries throws EvalError("secret-quarantine")
+        // Sanitize COPIES of actual entries (the live entries reused for the next model turn
+        // are never touched). This is the only sanitization pass for the local path: the
+        // durable native-prefix capture wrote its own sanitized copy from the streamed
+        // structuredClone as each entry was appended, but never mutated these live entries.
+        // If an unverifiable secret survives, sanitizeNativeSessionEntries throws
+        // EvalError("secret-quarantine").
         const sanitizedResult = sanitizeNativeSessionEntries(
           rawEntries,
           request.guardedSecrets ?? [],
+          { captureReasoning: request.captureReasoning },
         );
 
         // Derive transcripts and tool step views from the sanitized copy
@@ -727,82 +763,82 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
         const allMessages = instance.session.messages;
         const lastMsg = allMessages.filter((m: any) => m.role === "assistant").pop() as any;
 
-      let infrastructureFailure: StructuredFailure | null = null;
-      if (lastMsg) {
-        if (lastMsg.stopReason === "length" && !taskLimitReason) {
-          taskLimitReason = "length limit reached";
-        } else if (lastMsg.stopReason === "error") {
-          const errorMsg = String(lastMsg.errorMessage ?? executionError ?? "model execution error");
-          if (errorMsg.includes("protocol-drift") || errorMsg.includes("drift_event")) {
-            infrastructureFailure = {
-              code: "protocol-drift",
-              failureClass: "infrastructure",
-              message: errorMsg,
-              at: "pi.run",
-            };
+        const semanticAbortForCause: "external" | "arm-budget" | null =
+          (wallClockTimedOut || (request.signal?.reason instanceof Error && request.signal.reason.name === "ArmBudgetExceeded"))
+            ? "arm-budget"
+            : request.signal?.aborted
+              ? "external"
+              : null;
+
+        const normalizedStopReason = typeof lastMsg?.stopReason === "string" ? lastMsg.stopReason : null;
+        const rawStopReason = typeof lastMsg?.rawStopReason === "string" ? lastMsg.rawStopReason : null;
+        const nativeErrorMessage = typeof lastMsg?.errorMessage === "string"
+          ? lastMsg.errorMessage
+          : executionError instanceof Error
+            ? executionError.message
+            : executionError !== null && executionError !== undefined
+              ? String(executionError)
+              : null;
+
+        const classification = classifyTerminalState({
+          stopReason: normalizedStopReason,
+          rawStopReason,
+          errorMessage: nativeErrorMessage,
+          semanticAbortCause: semanticAbortForCause,
+          taskLimitReason,
+          executionError,
+        });
+
+        // Bounded messages
+        const normalizedMessages: NormalizedMessage[] = derivedMessages.map((m) => {
+          const trunc = truncateText(m.text);
+          return {
+            index: m.index,
+            role: m.role,
+            text: trunc.text,
+            truncated: trunc.truncated,
+          };
+        });
+
+        const usage: HarnessUsage = {
+          inputTokens: budgetSnapshot.inputTokens,
+          outputTokens: budgetSnapshot.outputTokens,
+          cacheReadTokens: budgetSnapshot.cacheReadTokens,
+          cacheWriteTokens: budgetSnapshot.cacheWriteTokens,
+          providerRequests: budgetSnapshot.providerRequests,
+          toolSteps: budgetSnapshot.toolSteps,
+        };
+
+        if (classification.terminalClass === "interrupted") {
+          throw new EvalError("interrupted", `prompt cancelled: ${String(request.signal?.reason ?? "")}`);
+        }
+
+        const outcome: HarnessOutcome = classification.outcome;
+        const failures: StructuredFailure[] = [];
+
+        if (outcome === "infrastructure-failure") {
+          if (executionError instanceof EvalError) {
+            failures.push(executionError.toStructured());
           } else {
-            infrastructureFailure = {
-              code: "provider-error",
+            const formattedMessage = (executionError !== null && executionError !== undefined && !lastMsg?.errorMessage)
+              ? (executionError instanceof Error ? `${executionError.name}: ${executionError.message}` : String(executionError))
+              : (typeof lastMsg?.errorMessage === "string" ? lastMsg.errorMessage : classification.terminalClass);
+            failures.push({
+              code: classification.failureCode ?? "protocol-drift",
               failureClass: "infrastructure",
-              message: errorMsg,
+              message: formattedMessage.slice(0, 2_000),
               at: "pi.run",
-            };
+            });
           }
         }
-      }
 
-      const cancellationError = (request.signal?.aborted || wallClockTimedOut) &&
-        (executionError instanceof Error && executionError.name === "AbortError" ||
-         executionError instanceof EvalError && executionError.code === "interrupted");
-      if (!infrastructureFailure && executionFailed && !cancellationError) {
-        const errMsg = executionError instanceof Error ? executionError.message : String(executionError);
-        if (errMsg.includes("Thinking level") || errMsg.includes("400") || errMsg.includes("quota") || errMsg.includes("provider") || errMsg.includes("Synthetic upstream")) {
-          infrastructureFailure = {
-            code: "provider-error",
-            failureClass: "infrastructure",
-            message: errMsg,
-            at: "pi.run",
-          };
-        } else {
-          // Unknown SDK failures are infrastructure, never successful task completion.
-          infrastructureFailure = toStructuredFailure(executionError, "protocol-drift");
-        }
-      }
-
-      // Bounded messages
-      const normalizedMessages: NormalizedMessage[] = derivedMessages.map((m) => {
-        const trunc = truncateText(m.text);
-        return {
-          index: m.index,
-          role: m.role,
-          text: trunc.text,
-          truncated: trunc.truncated,
-        };
-      });
-
-      const usage: HarnessUsage = {
-        inputTokens: budgetSnapshot.inputTokens,
-        outputTokens: budgetSnapshot.outputTokens,
-        cacheReadTokens: budgetSnapshot.cacheReadTokens,
-        cacheWriteTokens: budgetSnapshot.cacheWriteTokens,
-        providerRequests: budgetSnapshot.providerRequests,
-        toolSteps: budgetSnapshot.toolSteps,
-      };
-
-      let outcome: HarnessOutcome = "completed";
-      const failures: StructuredFailure[] = [];
-
-      if (infrastructureFailure) {
-        outcome = "infrastructure-failure";
-        failures.push(infrastructureFailure);
-      } else if (request.signal?.aborted && !(request.signal.reason instanceof Error && request.signal.reason.name === "ArmBudgetExceeded")) {
-        throw new EvalError("interrupted", `prompt cancelled: ${String(request.signal.reason ?? "")}`);
-      } else if (taskLimitReason !== null || wallClockTimedOut || request.signal?.aborted) {
-        outcome = "task-limit";
-      }
+        const stopCause = classification.stopCause;
+        const providerStopReason = classification.providerStopReason;
 
       return {
         outcome,
+        stopCause,
+        providerStopReason,
         messages: normalizedMessages,
         toolSteps: derivedToolSteps,
         usage,

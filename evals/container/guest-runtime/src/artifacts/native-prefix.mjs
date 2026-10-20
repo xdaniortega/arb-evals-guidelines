@@ -278,7 +278,9 @@ export function createNativeSessionCapture(options) {
                         !Number.isSafeInteger(item?.count) || item.count <= 0)) {
                     throw evidenceInvalid("native prefix record has invalid guest redaction provenance", options.path);
                 }
-                const sanitized = sanitizeNativeSessionEntries([entry], secrets);
+                const sanitized = sanitizeNativeSessionEntries([entry], secrets, {
+                    captureReasoning: options.captureReasoning,
+                });
                 validateNativeRecord(sanitized.entries[0], "native prefix record", capturedEntries);
                 const envelope = {
                     schemaVersion: EVIDENCE_SCHEMA_VERSION,

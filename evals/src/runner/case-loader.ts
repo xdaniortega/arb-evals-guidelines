@@ -20,10 +20,11 @@ import {
   sha256Hex,
 } from "../core/experiment.ts";
 // Case discovery only ever reads authored source for a NEW run, so it decodes at the
-// fresh boundary: no authored collection mode, effective policy `workspace`. Retained
-// evidence is decoded by evals/src/runner/reproduction.ts instead.
+// fresh boundary: no authored collection mode, effective policy `workspace`.
 import { EvalError, WORKSPACE_OUTPUT_MARKER, decodeFreshCaseConfig, decodeSuiteConfig } from "../core/types.ts";
 import type { CaseConfig, DecodeConfigOptions, PreparedCaseData, RuntimeProfileId, SuiteConfig } from "../core/types.ts";
+import { decodeRubric } from "./rubric.ts";
+import type { Rubric } from "./rubric.ts";
 
 export const MAX_FIXTURE_FILES = 64;
 export const MAX_FIXTURE_FILE_BYTES = 1_048_576;
@@ -75,6 +76,9 @@ export interface FrozenCase {
   readonly validatorClosureSha256: string;
   readonly runtimeProfileId: RuntimeProfileId;
   readonly preparationProvenance: Readonly<Record<string, string>> | null;
+  readonly rubric?: Rubric;
+  readonly rubricBytes?: Buffer;
+  readonly rubricSha256?: string;
 }
 
 export interface ValidatorClosureResult {
@@ -342,16 +346,25 @@ export async function assertNoSymlinkedAncestor(root: string, relativePath: stri
  * symlinked root would be followed by readdir and an arbitrary tree would be frozen
  * into evidence and staged into a guest.
  */
-export async function assertRealDirectory(path: string, at: string): Promise<void> {
-  const stats = await lstat(path).catch((cause: unknown) => {
+export async function assertRealDirectory(
+  path: string,
+  at: string,
+  options: { readonly allowMissing?: boolean } = {},
+): Promise<boolean> {
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (cause: unknown) {
+    if (options.allowMissing && (cause as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw new EvalError("input-invalid", `${at} is not readable: ${path}`, { at, cause });
-  });
+  }
   if (stats.isSymbolicLink()) {
     throw new EvalError("path-unsafe", `${at} must not be a symlink: ${path}`, { at });
   }
   if (!stats.isDirectory()) {
     throw new EvalError("path-unsafe", `${at} must be a directory: ${path}`, { at });
   }
+  return true;
 }
 
 async function readJsonFile(path: string, at: string): Promise<unknown> {
@@ -364,7 +377,10 @@ async function readJsonFile(path: string, at: string): Promise<unknown> {
 }
 
 async function directoryEntries(path: string): Promise<readonly string[]> {
-  const entries = await readdir(path, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(path, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
   return entries
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .map((entry) => entry.name)
@@ -428,7 +444,14 @@ export async function discoverCases(suite: SuiteRef, options?: DecodeConfigOptio
 export async function discoverAuthoredCases(evalsRoot: string, options?: DecodeConfigOptions): Promise<readonly CaseRef[]> {
   const cases: CaseRef[] = [];
   const casesRoot = join(evalsRoot, "cases");
-  for (const name of await directoryEntries(casesRoot)) {
+  if (!(await assertRealDirectory(casesRoot, "evals/cases", { allowMissing: true }))) return cases;
+  let names: readonly string[];
+  try {
+    names = await directoryEntries(casesRoot);
+  } catch (cause: unknown) {
+    throw new EvalError("input-invalid", `evals/cases is not readable: ${casesRoot}`, { at: "evals/cases", cause });
+  }
+  for (const name of names) {
     const dir = containedPath(casesRoot, name, `evals/cases/${name}`);
     const configPath = join(dir, "case.json");
     const exists = await lstat(configPath).then(() => true).catch((error: NodeJS.ErrnoException) => {
@@ -455,8 +478,10 @@ export interface SetupSelection {
 }
 
 /**
- * Shared run/validation selection. Canonical setup is an in-memory adapter only;
- * legacy authored suites remain readable without altering historical receipts.
+ * @notice Resolves canonical cases or legacy suites for run and validation setup.
+ * @param input Explicit suite or case-and-skill selection.
+ * @param options Configuration decoding constraints, including allowed profiles.
+ * @returns Suite references without rewriting historical receipts.
  */
 export async function resolveSetupSuites(input: SetupSelection, options?: DecodeConfigOptions): Promise<readonly SuiteRef[]> {
   if (input.skillPath != null && input.suiteId != null) {
@@ -484,7 +509,7 @@ export async function resolveSetupSuites(input: SetupSelection, options?: Decode
   if (selected.length === 0) {
     throw new EvalError("input-invalid", input.suiteId == null
       ? "No legacy suite found. Select a treatment setup with --case <case-id> --skill <path>."
-      : `--suite ${input.suiteId} matched no suite. Use --case <case-id> --skill <path> for canonical cases, or --from <receipt> to reproduce retained runs.`,
+      : `--suite ${input.suiteId} matched no suite. Use --case <case-id> --skill <path> for canonical cases.`,
     { at: input.suiteId == null ? "--skill" : "--suite" });
   }
   return selected;
@@ -711,6 +736,25 @@ export async function freezeTask(
     assertSafeRelativePath(config.outputPath, `${at}/case.json#outputPath`);
   }
 
+  // Optional rubric.json: if present in the case directory, decode and freeze it
+  let rubric: Rubric | undefined;
+  let rubricBytes: Buffer | undefined;
+  let rubricSha256: string | undefined;
+  const rubricPath = containedPath(selected.dir, "rubric.json", `${at}/rubric.json`);
+  const hasRubric = await lstat(rubricPath).then((s) => !s.isSymbolicLink() && s.isFile()).catch(() => false);
+  if (hasRubric) {
+    await assertNoSymlinkedAncestor(selected.dir, "rubric.json", `${at}/rubric.json`);
+    rubricBytes = await readRegularFile(rubricPath, MAX_CASE_JSON_BYTES, `${at}/rubric.json`);
+    let rubricJson: unknown;
+    try {
+      rubricJson = JSON.parse(rubricBytes.toString("utf8")) as unknown;
+    } catch (cause: unknown) {
+      throw new EvalError("input-invalid", `${at}/rubric.json is not valid JSON`, { at: `${at}/rubric.json`, cause });
+    }
+    rubric = decodeRubric(rubricJson, `${at}/rubric.json`);
+    rubricSha256 = sha256Hex(rubricBytes);
+  }
+
   return {
     selector: selected.selector,
     caseDir: selected.dir,
@@ -729,5 +773,8 @@ export async function freezeTask(
     validatorClosureSha256: validatorClosure.closureSha256,
     runtimeProfileId: config.runtimeProfileId ?? fallbackProfileId,
     preparationProvenance: prepared?.provenance ?? null,
+    ...(rubric !== undefined && rubricBytes !== undefined && rubricSha256 !== undefined
+      ? { rubric, rubricBytes, rubricSha256 }
+      : {}),
   };
 }

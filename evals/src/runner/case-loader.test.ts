@@ -17,6 +17,7 @@ import {
   assertNoSymlinkedAncestor,
   assertRealDirectory,
   containedPath,
+  discoverAuthoredCases,
   discoverCases,
   discoverSuites,
   fixtureTreeHash,
@@ -164,7 +165,32 @@ describe("link rejection", () => {
     await mkdir(join(root, "real"));
     await symlink(join(root, "real"), join(root, "linked"));
     await expectEvalErrorAsync(assertRealDirectory(join(root, "linked"), "d"), "path-unsafe");
-    await expect(assertRealDirectory(join(root, "real"), "d")).resolves.toBeUndefined();
+    await expect(assertRealDirectory(join(root, "real"), "d")).resolves.toBe(true);
+  });
+
+  it("discoverAuthoredCases validates the canonical root", async () => {
+    const root = await tempRoot();
+    const target = join(root, "target");
+    await mkdir(join(target, "case-a"), { recursive: true });
+    await writeFile(join(target, "case-a", "case.json"), caseJson("case-a"), "utf8");
+    expect((await discoverAuthoredCases(root)).map((item) => item.config.id)).toEqual([]);
+    await rm(join(root, "cases"), { recursive: true, force: true });
+    await mkdir(join(root, "cases"), { recursive: true });
+    await writeFile(join(root, "cases", "case-a", "case.json"), caseJson("case-a"), "utf8").catch(async () => {
+      await mkdir(join(root, "cases", "case-a"), { recursive: true });
+      await writeFile(join(root, "cases", "case-a", "case.json"), caseJson("case-a"), "utf8");
+    });
+    expect((await discoverAuthoredCases(root)).map((item) => item.config.id)).toEqual(["case-a"]);
+    if (!(await canSymlink(root))) return;
+    for (const kind of ["directory", "dangling"] as const) {
+      await rm(join(root, "cases"), { recursive: true, force: true });
+      if (kind === "directory") await symlink(target, join(root, "cases"));
+      else await symlink(join(root, "missing-target"), join(root, "cases"));
+      await expectEvalErrorAsync(discoverAuthoredCases(root), "path-unsafe");
+    }
+    await rm(join(root, "cases"), { force: true });
+    await writeFile(join(root, "cases"), "file", "utf8");
+    await expectEvalErrorAsync(discoverAuthoredCases(root), "path-unsafe");
   });
 
   it("assertNoSymlinkedAncestor rejects a symlinked ancestor directory", async () => {
@@ -383,7 +409,7 @@ describe("freezeCase", () => {
     expect(frozen.runtimeProfileId).toBe("default");
   });
 
-  // Phase 1 / Section 2 generic case contract: permits absent initial output and empty fixture directory.
+  // The generic case contract permits absent initial output and empty fixture directory.
   it("permits an outputPath that is not in the frozen fixture", async () => {
     const root = await tempRoot();
     await buildSuite(root, "s1", { caseOverrides: { outputPath: "absent.json" } });

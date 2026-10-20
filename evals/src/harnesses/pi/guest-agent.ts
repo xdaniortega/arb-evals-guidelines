@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { scheduleTimeout, type DeadlineTimer } from "../../core/timing.ts";
 /**
  * Image-resident framed Pi SDK agent.
  *
@@ -16,9 +17,14 @@ import type { GuardedSecret, SecretRedaction } from "../../core/secret-scan.ts";
 import { redactSecrets, scanForSecrets } from "../../core/secret-scan.ts";
 import { canonicalJson, type Target } from "../../core/experiment.ts";
 import type { SkillToolBundle } from "../../core/skill-tools.ts";
-import { CONDITION_CLEANUP_ALLOWANCE_MS, CONDITION_OPERATION_ALLOWANCE_MS, MAX_ARM_WALL_CLOCK_MS, type Limits } from "../../core/types.ts";
+import {
+  CONDITION_OPERATION_ALLOWANCE_MS,
+  resolveGuestTimeouts,
+  type Limits,
+  EvalError,
+} from "../../core/types.ts";
+import { classifyTerminalState } from "./terminal-classification.ts";
 import { createPiSdkSession, type PiSdkSessionInstance } from "./sdk-session.ts";
-import { buildAmbientTools } from "./ambient-tools.ts";
 import { createScriptedStreamSimple, type ScriptedStep } from "./scripted-stream.ts";
 import { installCompletionTransportBlocker } from "../../transport-blocker.ts";
 
@@ -33,10 +39,6 @@ const MAX_PROCESS_LIFETIME_MS = 180_000;
 // barrier also allows its sibling's setup, serial prompt, capture and cleanup.
 const MAX_PRE_PROMPT_MS = CONDITION_OPERATION_ALLOWANCE_MS;
 const SYNTHETIC_KEY = "synthetic-scripted-eval-key";
-// Cancellation messages emitted by a provider or the SDK when an abort we requested
-// lands. Anchored at both ends so a decorated failure such as
-// "This operation was aborted: upstream failure" is NOT treated as a clean cancellation.
-const KNOWN_ABORT_MESSAGE = /^(?:abort(?:error)?: )?(?:this )?(?:operation|request|sdk prompt)(?: was)? aborted\.?$/i;
 
 type State = "empty" | "initializing" | "ready" | "prompting" | "settled" | "disposed";
 type InitFrame = {
@@ -47,18 +49,16 @@ type InitFrame = {
   target: Target;
   skillPath: string | null;
   allowedTools: string[];
-  ambientTools: string[];
   skillToolBundle: SkillToolBundle | null;
   skillToolBundleSha256: string;
   processLifetimeMs: number;
-  armWallClockMs: number;
+  /** Positive integer for a finite arm, or `null` for an unlimited arm (no wall-clock deadline). */
+  armWallClockMs: number | null;
   limits: Pick<Limits, "maxProviderRequests" | "maxToolSteps" | "maxOutputTokens">;
   credentialVariable: "GEMINI_API_KEY" | "ANTHROPIC_API_KEY";
+  captureReasoning?: boolean;
   scriptedSteps?: ScriptedStep[];
 };
-
-type PromptFrame = { type: "prompt"; prompt: string };
-type AbortFrame = { type: "abort"; reason?: string; cause: "external" | "arm-budget" };
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -111,8 +111,13 @@ function parseSteps(value: unknown): ScriptedStep[] {
   });
 }
 
+/**
+ * @notice Rejects invalid guest initialization before credentials or prompts are accepted.
+ * @param value Untrusted initialization frame received from the host.
+ * @returns A validated frame with canonical nullable task budgets.
+ */
 export function parseInit(value: Record<string, unknown>): InitFrame {
-  knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "ambientTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
+  knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "captureReasoning", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
   if (value.protocolVersion !== PROTOCOL_VERSION) throw new Error("unsupported guest agent protocolVersion");
   if (value.mode !== "measured" && value.mode !== "scripted") throw new Error("init.mode must be measured or scripted");
   if (value.arm !== "baseline" && value.arm !== "treatment") throw new Error("init.arm must be baseline or treatment");
@@ -126,14 +131,8 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
   if (!(value.skillPath === null || typeof value.skillPath === "string")) throw new Error("init.skillPath must be string or null");
   if (value.arm === "baseline" && value.skillPath !== null) throw new Error("baseline init must not carry a skillPath");
   if (value.arm === "treatment" && (typeof value.skillPath !== "string" || value.skillPath === "")) throw new Error("treatment init requires one skillPath");
-  if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => typeof tool !== "string" || tool === "")) throw new Error("init.allowedTools must be a string array");
-  if (!Array.isArray(value.ambientTools) || value.ambientTools.some((tool) => typeof tool !== "string" || !/^[a-z][a-z0-9_-]*$/.test(tool))) throw new Error("init.ambientTools must be an array of valid tool names");
-  const ambientToolSet = new Set<string>();
-  const allowedToolSet = new Set(value.allowedTools);
-  for (const tool of value.ambientTools) {
-    if (ambientToolSet.has(tool)) throw new Error("init.ambientTools contains duplicate entries");
-    ambientToolSet.add(tool);
-    if (!allowedToolSet.has(tool)) throw new Error(`init.ambientTools entry '${tool}' is not in allowedTools`);
+  if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => typeof tool !== "string" || !/^[a-z][a-z0-9_-]*$/.test(tool))) {
+    throw new EvalError("protocol-drift", "init.allowedTools must be an array of valid tool names", { at: "guest.init" });
   }
   if (typeof value.skillToolBundleSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.skillToolBundleSha256)) {
     throw new Error("init.skillToolBundleSha256 must be a 64-char lowercase hex digest");
@@ -195,14 +194,22 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
     }
   }
   if (!Number.isSafeInteger(value.processLifetimeMs) || (value.processLifetimeMs as number) <= 0 || (value.processLifetimeMs as number) > MAX_PROCESS_LIFETIME_MS) throw new Error("init.processLifetimeMs must be a bounded positive integer");
-  if (!Number.isSafeInteger(value.armWallClockMs) || (value.armWallClockMs as number) <= 0 || (value.armWallClockMs as number) > MAX_ARM_WALL_CLOCK_MS) throw new Error("init.armWallClockMs must be a positive integer no greater than 600000ms");
+  // `null` means unlimited (no per-arm wall-clock deadline). Any other value must be a
+  // positive integer; there is no fixed maximum arm duration.
+  if (value.armWallClockMs !== null && (!Number.isSafeInteger(value.armWallClockMs) || (value.armWallClockMs as number) <= 0)) throw new Error("init.armWallClockMs must be a positive integer or null (unlimited)");
   if (!object(value.limits)) throw new Error("init.limits must be an object");
   knownFields(value.limits, ["maxProviderRequests", "maxToolSteps", "maxOutputTokens"], "init.limits");
   for (const name of ["maxProviderRequests", "maxToolSteps", "maxOutputTokens"] as const) {
-    if (!Number.isSafeInteger(value.limits[name]) || (value.limits[name] as number) < 0) throw new Error(`init.limits.${name} must be a non-negative integer`);
+    // `null` means UNLIMITED (no harness cumulative cap); any other value must be a
+    // positive integer. The host normalizes 0/none to null before it reaches here.
+    const limitValue = value.limits[name];
+    if (limitValue !== null && (!Number.isSafeInteger(limitValue) || (limitValue as number) <= 0)) {
+      throw new Error(`init.limits.${name} must be a positive integer or null (unlimited)`);
+    }
   }
   const expectedVariable = target.provider === "google" ? "GEMINI_API_KEY" : target.provider === "anthropic" ? "ANTHROPIC_API_KEY" : null;
   if (expectedVariable === null || value.credentialVariable !== expectedVariable) throw new Error("credential variable does not match the selected provider");
+  if (value.captureReasoning !== undefined && typeof value.captureReasoning !== "boolean") throw new Error("init.captureReasoning must be a boolean");
   if (value.mode === "measured" && value.scriptedSteps !== undefined) throw new Error("measured init must not carry scriptedSteps");
   if (value.mode === "scripted" && value.scriptedSteps === undefined) throw new Error("scripted init requires scriptedSteps JSON data");
   return {
@@ -213,13 +220,13 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
     target: target as Target,
     skillPath: value.skillPath,
     allowedTools: [...value.allowedTools] as string[],
-    ambientTools: [...value.ambientTools] as string[],
     skillToolBundle: (value.arm === "treatment" ? structuredClone(value.skillToolBundle) : null) as SkillToolBundle | null,
     skillToolBundleSha256: value.skillToolBundleSha256 as string,
     processLifetimeMs: value.processLifetimeMs as number,
-    armWallClockMs: value.armWallClockMs as number,
+    armWallClockMs: value.armWallClockMs as number | null,
     limits: value.limits as InitFrame["limits"],
     credentialVariable: value.credentialVariable as InitFrame["credentialVariable"],
+    ...(value.captureReasoning !== undefined ? { captureReasoning: value.captureReasoning as boolean } : {}),
     ...(value.mode === "scripted" ? { scriptedSteps: parseSteps(value.scriptedSteps) } : {}),
   };
 }
@@ -293,8 +300,8 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
   let emittedRedactions = 0;
   let promptSettlement: Promise<void> | null = null;
   let semanticAbortCause: "external" | "arm-budget" | null = null;
-  let prePromptTimer: NodeJS.Timeout | null = null;
-  let lifetimeTimer: NodeJS.Timeout | null = null;
+  let prePromptTimer: DeadlineTimer | null = null;
+  let lifetimeTimer: DeadlineTimer | null = null;
   const pendingNative: Array<{ record: unknown; redactions: { count: number; entries: readonly SecretRedaction[] } }> = [];
 
   const emitFrame = (frame: Record<string, unknown>): void => {
@@ -316,11 +323,11 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
   const dispose = (): void => {
     if (state === "disposed") return;
     if (prePromptTimer !== null) {
-      clearTimeout(prePromptTimer);
+      prePromptTimer.cancel();
       prePromptTimer = null;
     }
     if (lifetimeTimer !== null) {
-      clearTimeout(lifetimeTimer);
+      lifetimeTimer.cancel();
       lifetimeTimer = null;
     }
     try { instance?.dispose(); } catch { /* terminal path */ }
@@ -345,12 +352,12 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
     process.exitCode = 1;
     process.stdin.pause();
     if (wasStreaming) {
-      setTimeout(() => { dispose(); process.exit(1); }, ABORT_SETTLE_MS).unref?.();
+      setTimeout(() => { dispose(); process.exit(1); }, ABORT_SETTLE_MS).unref();
     } else dispose();
   };
 
-  prePromptTimer = setTimeout(() => fail(new Error("guest agent exceeded its pre-prompt lifetime")), MAX_PRE_PROMPT_MS);
-  prePromptTimer.unref?.();
+  prePromptTimer = scheduleTimeout(() => fail(new Error("guest agent exceeded its pre-prompt lifetime")), MAX_PRE_PROMPT_MS);
+  prePromptTimer.unref();
 
   const emitNewNative = (): void => {
     if (!capture) return;
@@ -395,7 +402,11 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
     }
     await registerTaskProcess(options.controlSocket);
     const capturePath = join(tmpdir(), `pi-eval-native-${process.pid}.jsonl`);
-    capture = createNativeSessionCapture({ path: capturePath, guardedSecrets: secrets });
+    capture = createNativeSessionCapture({
+      path: capturePath,
+      guardedSecrets: secrets,
+      captureReasoning: init.captureReasoning,
+    });
     const recorder = {
       record(entry: Parameters<NativeSessionCapture["record"]>[0]): void {
         capture!.record(entry);
@@ -408,7 +419,6 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
       target: init.target,
       ...(init.skillPath === null ? {} : { skillPath: init.skillPath }),
       allowedTools: init.allowedTools,
-      ambientTools: buildAmbientTools(init.ambientTools, process.cwd()),
       skillToolBundle: init.skillToolBundle,
       skillToolBundleSha256: init.skillToolBundleSha256,
       guardedSecrets: secrets,
@@ -433,10 +443,13 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
     }
     const attestation = instance.attest();
     state = "ready";
-    if (prePromptTimer !== null) clearTimeout(prePromptTimer);
-    const prePromptMs = 2 * CONDITION_OPERATION_ALLOWANCE_MS + init.armWallClockMs + CONDITION_CLEANUP_ALLOWANCE_MS;
-    prePromptTimer = setTimeout(() => fail(new Error("guest agent exceeded its pre-prompt lifetime")), prePromptMs);
-    prePromptTimer.unref?.();
+    if (prePromptTimer !== null) prePromptTimer.cancel();
+    // An unlimited arm has no wall-clock-derived pre-prompt lifetime; do not arm the timer.
+    const prePromptMs = resolveGuestTimeouts(init.armWallClockMs).prePromptMs;
+    if (prePromptMs !== null) {
+      prePromptTimer = scheduleTimeout(() => fail(new Error("guest agent exceeded its pre-prompt lifetime")), prePromptMs);
+      prePromptTimer.unref();
+    }
     emitFrame({
       type: "ready",
       protocolVersion: PROTOCOL_VERSION,
@@ -455,49 +468,65 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
     if (!instance || !capture || !init) throw new Error("guest agent session is unavailable");
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
-    const lifetimeMs = Math.max(init.processLifetimeMs, init.armWallClockMs + ABORT_SETTLE_MS);
-    lifetimeTimer = setTimeout(() => fail(new Error("guest agent exceeded its maximum process lifetime")), lifetimeMs);
-    lifetimeTimer.unref?.();
-    instance.setDeadline?.(startedMs + init.armWallClockMs);
-    let armTimer: NodeJS.Timeout | null = setTimeout(() => {
-      semanticAbortCause = "arm-budget";
-      instance?.session.abort();
-    }, init.armWallClockMs);
-    armTimer.unref?.();
+    // A finite arm caps guest lifetime and arms a wall-clock watchdog. An unlimited arm
+    // arms neither: it runs until it completes or is cancelled, with no hidden finite cap.
+    let armTimer: DeadlineTimer | null = null;
+    if (init.armWallClockMs !== null) {
+      const armWallClockMs = init.armWallClockMs;
+      const lifetimeMs = Math.max(init.processLifetimeMs, armWallClockMs + ABORT_SETTLE_MS);
+      lifetimeTimer = scheduleTimeout(() => fail(new Error("guest agent exceeded its maximum process lifetime")), lifetimeMs);
+      lifetimeTimer.unref();
+      instance.setDeadline?.(startedMs + armWallClockMs);
+      armTimer = scheduleTimeout(() => {
+        semanticAbortCause = "arm-budget";
+        instance?.session.abort();
+      }, armWallClockMs);
+      armTimer.unref();
+    } else {
+      instance.setDeadline?.(Number.POSITIVE_INFINITY);
+    }
     let executionError: unknown = null;
     try { await instance.runPrompt(prompt); } catch (error) { executionError = error; }
     finally {
-      if (armTimer !== null) { clearTimeout(armTimer); armTimer = null; }
-      if (lifetimeTimer !== null) { clearTimeout(lifetimeTimer); lifetimeTimer = null; }
+      if (armTimer !== null) { armTimer.cancel(); armTimer = null; }
+      if (lifetimeTimer !== null) { lifetimeTimer.cancel(); lifetimeTimer = null; }
     }
     if (instance.session.isStreaming) throw new Error("SDK prompt returned while the session was still streaming");
     await stopTaskDescendants(options.controlSocket);
-    const usage = instance.getBudgetSnapshot();
+    const snapshot = instance.getBudgetSnapshot();
+    // The wire usage frame is EXACTLY the seven-field transport contract the host adapter
+    // validates. The internal clamp-attribution diagnostic (outputClampBoundLastRequest)
+    // stays in-process; its effect is already folded into taskLimitReason and stopCause.
+    const usage = {
+      providerRequests: snapshot.providerRequests,
+      toolSteps: snapshot.toolSteps,
+      inputTokens: snapshot.inputTokens,
+      outputTokens: snapshot.outputTokens,
+      cacheReadTokens: snapshot.cacheReadTokens,
+      cacheWriteTokens: snapshot.cacheWriteTokens,
+      taskLimitReason: snapshot.taskLimitReason,
+    };
     const last = instance.session.messages.filter((message) => message.role === "assistant").at(-1) as Record<string, unknown> | undefined;
     const nativeStopReason = typeof last?.stopReason === "string" ? last.stopReason : null;
-    const expectedAbortError = executionError instanceof Error && executionError.name === "AbortError";
+    // The RAW provider stop reason (e.g. MAX_TOKENS/STOP), preserved verbatim and
+    // independently of the normalized `stopReason` used for semantic classification.
+    // Absent for legacy/unmanaged responses, in which case it is null.
+    const rawStopReason = typeof last?.rawStopReason === "string" ? last.rawStopReason : null;
     const nativeErrorMessage = typeof last?.errorMessage === "string" ? last.errorMessage : null;
-    const knownAbortMessage = nativeErrorMessage !== null && KNOWN_ABORT_MESSAGE.test(nativeErrorMessage.trim());
-    // Some providers report a cancellation we requested as a plain error rather than an
-    // abort. Normalize it only when THIS harness initiated the abort, so an unsolicited
-    // provider-side abort error still classifies as a genuine failure.
-    const stopReason = nativeStopReason === "error" && semanticAbortCause !== null && knownAbortMessage
-      ? "aborted"
-      : nativeStopReason;
-    const aborted = stopReason === "aborted";
-    // A budget-terminal message is the harness's own doing, not an arbitrary failure.
-    const nativeArbitraryFailure = aborted && nativeErrorMessage !== null && !knownAbortMessage && usage.taskLimitReason === null;
-    const arbitraryExecutionFailure = nativeArbitraryFailure || (executionError !== null && !(semanticAbortCause !== null && expectedAbortError));
-    const terminalClass = arbitraryExecutionFailure || stopReason === "error"
-      ? "execution-failure"
-      : semanticAbortCause === "external"
-        ? "interrupted"
-        : semanticAbortCause === "arm-budget" || usage.taskLimitReason !== null || stopReason === "length"
-          ? "task-limit"
-          : aborted
-            ? "unexpected-abort"
-            : "completed";
-    const outcome = terminalClass === "completed" ? "completed" : terminalClass === "task-limit" ? "task-limit" : "infrastructure-failure";
+
+    const classification = classifyTerminalState({
+      stopReason: nativeStopReason,
+      rawStopReason,
+      errorMessage: nativeErrorMessage,
+      semanticAbortCause,
+      taskLimitReason: usage.taskLimitReason,
+      executionError,
+    });
+    const terminalClass = classification.terminalClass;
+    const outcome = classification.outcome;
+    const stopCause = classification.stopCause;
+    const stopReason = classification.normalizedStopReason;
+
     capture.finish(terminalClass === "completed", terminalClass === "completed" ? null : executionError === null ? terminalClass : safeError(executionError));
     state = "settled";
     emitFrame({
@@ -507,7 +536,7 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
       outcome,
       usage,
       timing: { startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startedMs },
-      terminal: { stopReason, classification: terminalClass, semanticAbortCause, error: executionError === null ? null : safeError(executionError), streamingStopped: true },
+      terminal: { stopReason, rawStopReason, classification: terminalClass, stopCause, semanticAbortCause, error: executionError === null ? null : safeError(executionError), streamingStopped: true },
       redactions: capture.snapshot().redactions,
     });
     dispose();
@@ -522,7 +551,7 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
       const prompt = nonEmptyString(raw.prompt, "prompt.prompt");
       state = "prompting";
       if (prePromptTimer !== null) {
-        clearTimeout(prePromptTimer);
+        prePromptTimer.cancel();
         prePromptTimer = null;
       }
       promptSettlement = settlePrompt(prompt).catch(fail);

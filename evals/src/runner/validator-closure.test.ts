@@ -1,5 +1,5 @@
 /**
- * Phase 1: Bounded frozen validator dependency closure regressions (L0).
+ * Bounded frozen validator dependency closure regressions (L0).
  *
  * Enforces:
  * - Deterministic static ESM import/re-export/side-effect closure traversal using TypeScript parser.
@@ -168,7 +168,7 @@ async function runSupervisorValidate(
   return { code, stdout, stderr, json, materialized };
 }
 
-describe("Phase 1: Validator dependency closure", () => {
+describe("Validator dependency closure", () => {
   it("supports nested imports, ../ within case root, re-exports, and dependency cycles", async () => {
     const root = await makeTempDir("val-deps-");
     await setupSuite(root, "test-suite", "complex-case", {
@@ -289,7 +289,7 @@ export function computePoints() { return 1.0; }
     expect(result.outcome.status).toBe("graded");
     expect(result.outcome.score).toBe(1.0);
 
-    // Verify snapshot reproduction without original source
+    // Verify snapshot reconstructs its hashes without original source
     const verified = await verifyFrozenInputSnapshot(scratchDir);
     expect(verified.ok).toBe(true);
   });
@@ -529,7 +529,7 @@ export function validateSnapshot() {
     syncBuiltinESMExports();
     const harness = createFakeHarness();
     const runPrompt = harness.run.bind(harness);
-    const observed: Array<{ prompt: string; budget: number }> = [];
+    const observed: Array<{ prompt: string; budget: number | null }> = [];
     harness.run = async (guest, request) => {
       observed.push({ prompt: request.prompt, budget: request.limits.wallClockMs });
       return runPrompt(guest, request);

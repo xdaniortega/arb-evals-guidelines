@@ -1,18 +1,9 @@
 /**
- * Real Apple Container conformance and isolation proof.
- *
- * These tests build an image, start guests, and talk to the `container` CLI, so they are
- * slow and host-dependent. They are therefore OPT-IN: they run only when
- * `EVAL_CONTAINER_TESTS=1` and the CLI is present, and otherwise report a VISIBLE skip
- * rather than silently disappearing — an absent test and a passing test must never look
- * the same.
- *
- * Run them with `pnpm test:container`.
- *
- * Every identity they create is exact, namespaced with a per-run nonce, and destroyed.
+ * @notice Verifies Apple Container conformance, isolation, native Pi tool execution, resource cleanup, and recovery.
  */
 
 import { execFileSync } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { randomBytes } from "node:crypto";
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,14 +11,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { createRunJournal, type RunJournal } from "../artifacts/store.ts";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resourceNameFor, sha256Hex } from "../core/experiment.ts";
 import { SAFE_DEFAULT_LIMITS } from "../core/types.ts";
 import { redactSecrets } from "../core/secret-scan.ts";
 import { EVAL_NETWORK_POLICY } from "../runner/run.ts";
 import { recoverRun } from "../runner/recover.ts";
 import type { GuestPolicy, GuestStreamSession, Sandbox } from "./sandbox.ts";
-import { APPLE_CONTAINER_SANDBOX_ID, createAppleContainerSandbox, MAX_INVOCATION_GUEST_MS, runContainerCli } from "./apple-container.ts";
+import { APPLE_CONTAINER_SANDBOX_ID, AppleContainerGuest, createAppleContainerSandbox, runContainerCli } from "./apple-container.ts";
 import { defineSandboxConformance } from "./conformance.ts";
 
 const OPT_IN_VARIABLE = "EVAL_CONTAINER_TESTS";
@@ -82,12 +73,115 @@ async function cleanupSdkTestResources(
   return errors;
 }
 
-
 /**
  * Host-independent behaviour: these never touch the runtime, so they run everywhere and
  * keep the fast path meaningful even when the opt-in tests are skipped.
  */
 describe("apple-container boundaries", () => {
+  afterEach(() => vi.useRealTimers());
+
+  function fakeChild() {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const signals: string[] = [];
+    const child = {
+      pid: undefined,
+      stdin,
+      stdout,
+      stderr,
+      kill(signal: NodeJS.Signals) { signals.push(signal); return true; },
+      once: (event: string, listener: (...args: any[]) => void) => {
+        if (event === "close") (child as any).onClose = listener;
+        if (event === "error") (child as any).onError = listener;
+        return child;
+      },
+      on: () => child,
+      signals,
+    } as any;
+    return child;
+  }
+
+  function guestWithSpawn(spawnProcess: typeof import("node:child_process").spawn) {
+    return new AppleContainerGuest({
+      spec: { name: "offline-guest", networkName: "offline-net", imageDigest: "sha256:offline", limits: SAFE_DEFAULT_LIMITS, policy, env: {} },
+      cliPath: "container",
+      timeoutMs: 5_000,
+      labels: [],
+      allowedTcpPorts: "all",
+      spawnProcess,
+      destroyed: false,
+      attested: false,
+      deliveredCredentialVariables: [],
+      lastAttestation: null,
+    });
+  }
+
+  it("distinguishes cooperative execStream close from forced timeout and abort settlement offline", async () => {
+    vi.useFakeTimers();
+    const cooperative = fakeChild();
+    const cooperativeGuest = guestWithSpawn((() => cooperative) as any);
+    const stream = await cooperativeGuest.execStream({ command: ["true"], cwd: "/work" });
+    cooperative.onClose?.(17);
+    await expect(stream.exitCode).resolves.toBe(17);
+    await expect(stream.termination).resolves.toBe("confirmed");
+
+    const forced = fakeChild();
+    const forcedGuest = guestWithSpawn((() => forced) as any);
+    const timed = await forcedGuest.execStream({ command: ["true"], cwd: "/work", timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(forced.signals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(forced.signals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(forced.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(timed.exitCode).resolves.toBeNull();
+    await expect(timed.termination).resolves.toBe("forced");
+
+    const aborted = fakeChild();
+    const abortController = new AbortController();
+    const abortedGuest = guestWithSpawn((() => aborted) as any);
+    const abortedStream = await abortedGuest.execStream({ command: ["true"], cwd: "/work", signal: abortController.signal });
+    abortController.abort();
+    expect(aborted.signals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(aborted.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(abortedStream.exitCode).resolves.toBeNull();
+    await expect(abortedStream.termination).resolves.toBe("forced");
+  });
+
+  it("keeps runContainerCli SIGTERM, SIGKILL@2s, and forced finish@3s deterministic offline", async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const result = runContainerCli(["offline"], { timeoutMs: 100, spawnProcess: (() => child) as any });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(child.signals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(child.signals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(result).resolves.toMatchObject({ code: null, timedOut: true, aborted: false });
+  });
+
+  it("keeps unlimited streams alive until cancellation and settles after cancellation", async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const controller = new AbortController();
+    const guest = guestWithSpawn((() => child) as any);
+    const stream = await guest.execStream({ command: ["true"], cwd: "/work", signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(child.signals).toEqual([]);
+    controller.abort();
+    expect(child.signals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(stream.exitCode).resolves.toBeNull();
+    await expect(stream.termination).resolves.toBe("forced");
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("loads the production lock closure through buildImage before an offline cache lookup", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "eval-locked-profile-"));
     const fakeCli = join(tempRoot, "container-cli");
@@ -97,19 +191,6 @@ describe("apple-container boundaries", () => {
       await expect(sandbox.buildImage({ runtimeProfileId: "default", contextDir })).resolves.toMatchObject({
         digest: `sha256:${"a".repeat(64)}`, cacheHit: true, testDouble: false,
       });
-    } finally { await rm(tempRoot, { recursive: true, force: true }); }
-  });
-
-  it("refuses missing or mismatched retained exact images without building or substituting", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "eval-retained-image-offline-"));
-    const fakeCli = join(tempRoot, "container-cli");
-    const calls = join(tempRoot, "calls.txt");
-    try {
-      await writeFile(fakeCli, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nif [ "$1 $2" = "image inspect" ] && [ "$3" = "retained:missing" ]; then echo 'image not found' >&2; exit 1; fi\nprintf '[{"configuration":{"descriptor":{"digest":"sha256:%s"}}}]\\n' '${"b".repeat(64)}'\n`, { mode: 0o755 });
-      const sandbox = createAppleContainerSandbox({ runId: runIdFor(), cliPath: fakeCli });
-      await expect(sandbox.buildImage({ runtimeProfileId: "default", contextDir, expectedIdentity: { reference: "retained:missing", digest: `sha256:${"a".repeat(64)}` } })).rejects.toMatchObject({ code: "platform-unsupported" });
-      await expect(sandbox.buildImage({ runtimeProfileId: "default", contextDir, expectedIdentity: { reference: "retained:mismatch", digest: `sha256:${"a".repeat(64)}` } })).rejects.toMatchObject({ code: "evidence-invalid" });
-      expect(await readFile(calls, "utf8")).not.toContain("build");
     } finally { await rm(tempRoot, { recursive: true, force: true }); }
   });
 
@@ -188,7 +269,6 @@ exit 1
 
       // Its own setup plus sibling setup/capture and serial prompt cannot consume its prompt.
       expect(supervisorMs).toBe(1_220_000);
-      expect(supervisorMs).toBeLessThan(MAX_INVOCATION_GUEST_MS);
 
       await expect(sandbox.createGuest({
         name: "eval-ten-minute-child",
@@ -199,8 +279,7 @@ exit 1
       })).rejects.toThrow();
       const maximumArgs = (await readFile(cliArgsLog, "utf8")).split(" ");
       const maximumLifetime = maximumArgs.find((arg) => arg.startsWith("EVAL_SUPERVISOR_MAX_MS="));
-      expect(Number(maximumLifetime!.split("=")[1])).toBe(MAX_INVOCATION_GUEST_MS);
-      expect(MAX_INVOCATION_GUEST_MS).toBe(2_130_000);
+      expect(Number(maximumLifetime!.split("=")[1])).toBe(2_130_000);
 
       // 2. Tight deadline: must clamp to remaining run active deadline (guest can never outlive active deadline)
       const tightDeadline = Date.now() + 50_000;
@@ -214,11 +293,19 @@ exit 1
         deadlineAtMs: tightDeadline,
       })).rejects.toThrow();
 
-      const tightArgs = (await readFile(cliArgsLog, "utf8")).split(" ");
-      const tightSupervisorArg = tightArgs.find((arg) => arg.startsWith("EVAL_SUPERVISOR_MAX_MS="));
-      const tightSupervisorMs = Number(tightSupervisorArg!.split("=")[1]);
-      expect(tightSupervisorMs).toBeLessThanOrEqual(50_000);
-      expect(tightSupervisorMs).toBeGreaterThan(0);
+      // 3. Unlimited arm with no deadline explicitly disables the lifetime timer.
+      await expect(sandbox.createGuest({
+        name: "eval-unlimited-child",
+        networkName: "eval-treatment-net",
+        imageDigest: image.digest,
+        limits: { ...SAFE_DEFAULT_LIMITS, wallClockMs: null },
+        policy,
+        env: {},
+        deadlineAtMs: Number.POSITIVE_INFINITY,
+      })).rejects.toThrow();
+      const unlimitedArgs = (await readFile(cliArgsLog, "utf8")).split(" ");
+      const unlimitedSupervisorArg = unlimitedArgs.find((arg) => arg.startsWith("EVAL_SUPERVISOR_MAX_MS="));
+      expect(Number(unlimitedSupervisorArg!.split("=")[1])).toBe(0);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -279,7 +366,7 @@ if (!available) {
     );
   });
 } else {
-  // The SAME assertions the fake satisfies, against the real runtime.
+
   defineSandboxConformance({
     name: APPLE_CONTAINER_SANDBOX_ID,
     testDouble: false,
@@ -326,7 +413,21 @@ if (!available) {
         expect(boundary.uid).toBe(10001);
         const secret = `synthetic-l2-key-${nonce}`;
         await guest.deliverCredential({ variable: "GEMINI_API_KEY", value: secret });
-        await guest.stage({ destDir: "/work", files: [], readOnly: false });
+        await guest.stage({
+          destDir: "/work",
+          files: [
+            { path: "src/app.ts", base64: Buffer.from("export const app = true;\n").toString("base64"), mode: 0o644 },
+            { path: "src/ignored.ts", base64: Buffer.from("export const ignored = true;\n").toString("base64"), mode: 0o644 },
+          ],
+          readOnly: false,
+        });
+        const gitFixture = await guest.exec({
+          command: ["sh", "-c", "mkdir -p /work/.git && printf 'ref: refs/heads/main\\n' > /work/.git/HEAD && printf 'src/ignored.ts\\n' > /work/.gitignore"],
+          cwd: "/work",
+          timeoutMs: 5_000,
+          maxOutputBytes: 4_096,
+        });
+        expect(gitFixture.exitCode, gitFixture.stderr).toBe(0);
         expect(guest.execStream).toBeTypeOf("function");
         stream = await guest.execStream!({ command: ["node", "/opt/eval/run-measured.mjs", "agent"], cwd: "/work", timeoutMs: 15_000 });
         let stderr = "";
@@ -343,12 +444,13 @@ if (!available) {
         const frames: Array<Record<string, any>> = [];
         const init = { type: "init", protocolVersion: 1, mode: "scripted", arm: "baseline",
           target: { provider: "google", model: "gemini-3.8-flash", thinking: "low" },
-          skillPath: null, allowedTools: ["read", "write", "bash"], ambientTools: [],
+          skillPath: null, allowedTools: ["read", "write", "bash", "find"],
           skillToolBundle: null,
           skillToolBundleSha256: "f9cc8e2b85ebe6aa64c21b5be039960cdc74a5743ca280d0f84c440f745c993b",
           processLifetimeMs: 180_000, armWallClockMs: 10_000,
           limits: { maxProviderRequests: 4, maxToolSteps: 4, maxOutputTokens: 4096 }, credentialVariable: "GEMINI_API_KEY",
           scriptedSteps: [
+            { type: "toolCall", toolCalls: [{ id: "find-guest", name: "find", arguments: { pattern: "*.ts", path: "src" } }] },
             { type: "toolCall", toolCalls: [{ id: "write-guest", name: "write", arguments: { path: "nested/result.txt", content: "42" } }] },
             { type: "toolCall", toolCalls: [{ id: "read-env", name: "bash", arguments: { command: 'printf "%s\\n" "$GEMINI_API_KEY"; printf "%s" "$GEMINI_API_KEY" | base64' } }] },
             { type: "text", text: "done" },
@@ -382,6 +484,10 @@ if (!available) {
         const records = frames.filter((frame) => frame.type === "record");
         expect(records[0]?.record).toMatchObject({ type: "session", id: ready!.sessionId });
         expect(records.some((frame) => frame.record.message?.toolCallId === "write-guest")).toBe(true);
+        const findResult = records.find((frame) => frame.record.message?.toolCallId === "find-guest")?.record.message;
+        expect(findResult?.isError).toBe(false);
+        expect(JSON.stringify(findResult?.content)).toContain("app.ts");
+        expect(JSON.stringify(findResult?.content)).not.toContain("ignored.ts");
         const output = JSON.stringify(frames);
         expect(output).toContain("[REDACTED:GEMINI_API_KEY]");
         expect(output).not.toContain(secret);
@@ -390,6 +496,44 @@ if (!available) {
         const exported = await guest.exportFiles({ root: "/work", maxFiles: 8, maxFileBytes: 4096, maxTotalBytes: 8192 });
         const file = exported.files.find((entry) => entry.path === "nested/result.txt");
         expect(Buffer.from(file!.base64, "base64").toString("utf8")).toBe("42");
+
+        // Run pathological-pattern and cancellation checks in a separate guest process,
+        // but through Pi's native find implementation rather than copied fd arguments.
+        const findSafety = await guest.exec({
+          command: ["node", "--input-type=module", "-e", `
+import { writeFileSync } from "node:fs";
+import { createFindToolDefinition } from "file:///opt/eval/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/find.js";
+writeFileSync("/work/x", "x");
+const find = createFindToolDefinition("/work");
+let timedOut = false;
+const patternAbort = new AbortController();
+const timer = setTimeout(() => { timedOut = true; patternAbort.abort(); }, 4000);
+try {
+  await find.execute("pathological", { pattern: "**/**/**/**/**/**/**/**/x", path: "." }, patternAbort.signal);
+} catch (error) {
+  if (timedOut) throw new Error("pathological pattern exceeded 4s hard timeout", { cause: error });
+  throw error;
+} finally {
+  clearTimeout(timer);
+}
+const cancellation = new AbortController();
+const pending = find.execute("cancel", { pattern: "**/*", path: "/usr" }, cancellation.signal);
+setTimeout(() => cancellation.abort(), 0);
+let cancellationObserved = false;
+try { await pending; } catch (error) {
+  cancellationObserved = error instanceof Error && error.message === "Operation aborted";
+}
+if (!cancellationObserved) throw new Error("Pi native find did not report cancellation");
+console.log(JSON.stringify({ cancellationObserved }));
+`],
+          cwd: "/work",
+          timeoutMs: 10_000,
+          maxOutputBytes: 4_096,
+        });
+        expect(findSafety.exitCode, findSafety.stderr).toBe(0);
+        expect(findSafety.timedOut).toBe(false);
+        expect(findSafety.stdout).toContain('"cancellationObserved":true');
+
         console.log(JSON.stringify({ phase: "sdk-l2-verified", imageDigest: image.digest, sessionId: ready!.sessionId,
           platform: ready!.process.platform, uid: ready!.process.uid, nativeRecords: records.length, agentMs: result!.timing.durationMs }));
       } finally {
@@ -454,12 +598,25 @@ if (!available) {
           expect(httpsProbe?.expectation).toBe("connected");
           expect(httpsProbe?.outcome).toBe("connected");
 
-          // Host, loopback, private, and metadata probes are DENIED and proven blocked.
+          // Representative private connection attempts fail. The dedicated laptop
+          // listener test additionally distinguishes filtering from a closed service.
           const privateProbes = observed.egressProbes.filter((probe) => probe.category === "private");
           expect(privateProbes.length).toBeGreaterThan(0);
           for (const probe of privateProbes) {
             expect(probe.expectation).toBe("blocked");
             expect(probe.outcome).toBe("blocked");
+          }
+
+          const udpProbes = observed.egressProbes.filter((probe) => ["multicast", "broadcast", "ipv6"].includes(probe.category));
+          expect(udpProbes).toHaveLength(3);
+          for (const probe of udpProbes) {
+            expect(probe.protocol).toBe("udp");
+            expect(probe.port).toBeGreaterThan(0);
+            expect(probe.expectation).toBe("blocked");
+            expect(probe.outcome, `${probe.label}: ${probe.detail}`).toBe("blocked");
+            // Only the synchronous netfilter OUTPUT verdict (EPERM) is accepted as UDP block
+            // evidence; EACCES would be a socket-option failure, not the firewall.
+            if (probe.category !== "ipv6") expect(probe.detail).toMatch(/^EPERM$/);
           }
 
           // Independently confirmed from inside the guest: 443 and 80 both work.

@@ -245,7 +245,7 @@ class FakeGuest implements Guest {
     const egressProbes: readonly ObservedEgressProbe[] = [
       probe("metadata", "private", "169.254.169.254", 80),
       probe("private-10", "private", "10.0.0.1", 80),
-      probe("loopback-host", "private", "127.0.0.1", 22),
+      probe("guest-loopback", "private", "127.0.0.1", 22),
       probe("public-443", "public", "1.1.1.1", 443),
       probe("public-80", "public", "1.1.1.1", 80),
     ];
@@ -372,6 +372,11 @@ function faultMatches(selectors: readonly string[] | undefined, kind: ResourceKi
   return selectors.includes(name) || selectors.includes(`${kind}:${name}`);
 }
 
+/**
+ * @notice Simulates sandbox resource lifecycles without creating real containers.
+ * @param options Fault injection and resource behavior for deterministic tests.
+ * @returns A sandbox explicitly marked as a test double.
+ */
 export function createFakeSandbox(options: FakeSandboxOptions = {}): FakeSandbox {
   const networks = new Map<string, NetworkIdentity>();
   /** Declared policy per network, so an attestation echo cannot invent its own. */
@@ -416,11 +421,6 @@ export function createFakeSandbox(options: FakeSandboxOptions = {}): FakeSandbox
     },
     async buildImage(spec: ImageSpec): Promise<ImageIdentity> {
       assertNotAborted(spec.signal, "buildImage");
-      if (spec.expectedIdentity !== undefined) {
-        const retained: ImageIdentity = { reference: spec.expectedIdentity.reference, digest: spec.expectedIdentity.digest, runtimeProfileId: spec.runtimeProfileId, testDouble: true, cacheHit: true };
-        images.set(retained.digest, retained);
-        return retained;
-      }
       let recipe: unknown = { sandbox: FAKE_SANDBOX_ID, profile: spec.runtimeProfileId };
       if (spec.contextDir) {
         try {

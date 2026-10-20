@@ -15,8 +15,6 @@ export interface ImageSpec {
   readonly onBuildStarted?: () => void;
   readonly signal?: AbortSignal;
   readonly deadlineAtMs?: number;
-  /** Reproduction-only: acquire exactly this retained immutable image or refuse; never build/substitute. */
-  readonly expectedIdentity?: { readonly reference: string; readonly digest: string };
 }
 
 export interface ImageIdentity {
@@ -137,11 +135,13 @@ export interface ObservedResolver {
  */
 export interface ObservedEgressProbe {
   readonly label: string;
-  readonly category: "private" | "public";
+  readonly category: "private" | "public" | "multicast" | "broadcast" | "ipv6";
+  /** Missing only in historical evidence or older synthetic fixtures. */
+  readonly protocol?: "tcp" | "udp";
   readonly host: string;
   readonly port: number;
   readonly expectation: "blocked" | "connected";
-  readonly outcome: "blocked" | "connected";
+  readonly outcome: "blocked" | "connected" | "inconclusive";
   readonly detail: string;
   readonly durationMs: number;
 }
@@ -242,6 +242,8 @@ export interface GuestStreamSession {
   readonly stderr?: Readable;
   kill(signal?: NodeJS.Signals): void;
   readonly exitCode?: Promise<number | null>;
+  /** Whether exit was observed from the process or only forced by the bounded fallback. */
+  readonly termination?: Promise<"confirmed" | "forced">;
 }
 
 export interface GuestStreamRequest {

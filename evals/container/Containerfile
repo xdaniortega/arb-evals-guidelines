@@ -8,14 +8,16 @@
 # The base is pinned by digest in evals/container/image-lock.json; the tag below is the
 # human-readable spelling of that same identity. Debian (not Alpine) is required: the
 # privilege drop uses util-linux `setpriv --reuid`, which busybox does not implement.
-FROM docker.io/library/node:24-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0
+FROM docker.io/library/node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
 
 # iptables/ip6tables and ip(8) are absent from the base image and are required by the
-# egress lock. They are installed once at build time so the guest never needs network
+# egress lock. fd-find provides the native find executable (fdfind) for Pi 0.85.0.
+# They are installed once at build time so the guest never needs network
 # tooling at runtime and never installs anything while a task is running.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends iptables iproute2 \
+ && apt-get install -y --no-install-recommends iptables iproute2 fd-find \
  && rm -rf /var/lib/apt/lists/*
+RUN fdfind --version
 
 # The Pi agent runtime at pinned version 0.85.0. Installed globally at build time so
 # the guest never fetches dependencies at runtime. ESM does not honor NODE_PATH, so
@@ -43,7 +45,14 @@ RUN groupadd --gid 10001 evaluser \
 
 COPY configure-egress.sh /opt/eval/configure-egress.sh
 COPY run-measured.mjs /opt/eval/run-measured.mjs
-COPY guest-runtime /opt/eval/guest-runtime
+COPY guest-runtime/artifact-lock.json /opt/eval/guest-runtime/artifact-lock.json
+COPY guest-runtime/src/core/types.mjs guest-runtime/src/core/timing.mjs guest-runtime/src/core/experiment.mjs guest-runtime/src/core/secret-scan.mjs /opt/eval/guest-runtime/src/core/
+COPY guest-runtime/src/transport-blocker.mjs /opt/eval/guest-runtime/src/transport-blocker.mjs
+COPY guest-runtime/src/runner/models.mjs /opt/eval/guest-runtime/src/runner/models.mjs
+COPY guest-runtime/src/artifacts/native-prefix.mjs /opt/eval/guest-runtime/src/artifacts/native-prefix.mjs
+COPY guest-runtime/src/harnesses/pi/export-viewer.mjs guest-runtime/src/harnesses/pi/scripted-stream.mjs guest-runtime/src/harnesses/pi/mcp-http-client.mjs guest-runtime/src/harnesses/pi/mcp-tools.mjs guest-runtime/src/harnesses/pi/sdk-session.mjs guest-runtime/src/harnesses/pi/terminal-classification.mjs guest-runtime/src/harnesses/pi/guest-agent.mjs /opt/eval/guest-runtime/src/harnesses/pi/
+# verify copied runtime files before caching the image
+RUN node --input-type=module -e 'import { readFileSync } from "node:fs"; import { createHash } from "node:crypto"; const root = "/opt/eval/"; const lock = JSON.parse(readFileSync(root + "guest-runtime/artifact-lock.json", "utf8")); for (const [path, expected] of Object.entries(lock.artifacts)) { const actual = "sha256:" + createHash("sha256").update(readFileSync(root + path)).digest("hex"); if (actual !== expected) throw new Error("Guest artifact mismatch: " + path); } const agent = await import(root + "guest-runtime/src/harnesses/pi/guest-agent.mjs"); if (typeof agent.runGuestAgent !== "function") throw new Error("Missing guest agent entry point");'
 RUN chmod 0555 /opt/eval/configure-egress.sh /opt/eval/run-measured.mjs \
  && find /opt/eval/guest-runtime -type d -exec chmod 0555 {} + \
  && find /opt/eval/guest-runtime -type f -exec chmod 0444 {} +

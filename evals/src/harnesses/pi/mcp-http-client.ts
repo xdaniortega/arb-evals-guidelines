@@ -1,7 +1,6 @@
 /**
  * Minimal MCP client over streamable HTTP.
  *
- * Implements Amendment 9 Slice S3:
  * - Pure streamable-HTTP JSON-RPC 2.0 client for Model Context Protocol.
  * - Enforces zero-credential invariant: NEVER sends an Authorization header,
  *   API keys, or credentials, and never reads process.env.

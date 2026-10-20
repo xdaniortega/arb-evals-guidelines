@@ -9,22 +9,27 @@
 
 import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runIdFor } from "../src/core/experiment.ts";
 import { EvalError, toStructuredFailure } from "../src/core/types.ts";
 import { createAppleContainerSandbox } from "../src/sandboxes/apple-container.ts";
 import { formatRecoveryResult, recoverRun } from "../src/runner/recover.ts";
 import { formatDoctorReport, runReadinessDoctor } from "../src/runner/doctor.ts";
 
-const USAGE = "usage: eval:doctor OR eval:recover --run <exact-run-id>";
+const USAGE = "usage: eval:doctor [--model <id>] [--provider <google|anthropic>] [--thinking <level>] OR eval:recover --run <exact-run-id>";
 
 type DoctorCommand =
   | { mode: "recover"; runId: string }
-  | { mode: "doctor"; provider?: string; model?: string };
+  | { mode: "doctor"; provider?: string; model?: string; thinking?: string };
 
-function parseArgs(argv: readonly string[]): DoctorCommand {
+/**
+ * @notice Selects recovery or readiness and retains the requested readiness target.
+ * @param argv Command-line options, excluding the package-manager separator.
+ * @returns An exact-run recovery request or target-specific readiness request.
+ */
+export function parseDoctorArgs(argv: readonly string[]): DoctorCommand {
   let runId: string | null = null;
-  let isDoctor = false;
+  const target: { provider?: string; model?: string; thinking?: string } = {};
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -33,15 +38,17 @@ function parseArgs(argv: readonly string[]): DoctorCommand {
       process.exit(0);
     }
     if (flag === "--doctor" || flag === "--readiness") {
-      isDoctor = true;
       continue;
     }
-    if (flag === "--run") {
+    if (flag === "--run" || flag === "--model" || flag === "--provider" || flag === "--thinking") {
       const value = argv[index + 1];
-      if (value === undefined || value.startsWith("--")) {
-        throw new EvalError("input-invalid", `--run requires a value. ${USAGE}`, { at: "--run" });
+      if (value === undefined || value.trim() === "" || value.startsWith("--")) {
+        throw new EvalError("input-invalid", `${flag} requires a value. ${USAGE}`, { at: flag });
       }
-      runId = value;
+      if (flag === "--run") runId = value;
+      else if (flag === "--model") target.model = value;
+      else if (flag === "--provider") target.provider = value;
+      else target.thinking = value;
       index += 1;
       continue;
     }
@@ -49,14 +56,17 @@ function parseArgs(argv: readonly string[]): DoctorCommand {
   }
 
   if (runId !== null) {
+    if (Object.keys(target).length > 0) {
+      throw new EvalError("input-invalid", "readiness target options cannot be combined with --run recovery", { at: "--run" });
+    }
     return { mode: "recover", runId };
   }
 
-  return { mode: "doctor" };
+  return { mode: "doctor", ...target };
 }
 
 async function main(): Promise<number> {
-  const command = parseArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
+  const command = parseDoctorArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
   const evalsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const repoRoot = resolve(evalsRoot, "..");
 
@@ -66,7 +76,7 @@ async function main(): Promise<number> {
     const sandbox = createAppleContainerSandbox({ runId: command.runId });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("recovery invocation deadline elapsed")), 120_000);
-    timer.unref?.();
+    timer.unref();
     const probe = await sandbox.probe(controller.signal);
     if (!probe.ready) {
       clearTimeout(timer);
@@ -90,18 +100,24 @@ async function main(): Promise<number> {
   const report = await runReadinessDoctor({
     evalsRoot,
     repoRoot,
+    model: command.model,
+    provider: command.provider,
+    thinking: command.thinking,
   });
   process.stdout.write(`${formatDoctorReport(report)}\n`);
   return report.ready ? 0 : 1;
 }
 
-main().then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (error: unknown) => {
-    const failure = toStructuredFailure(error, "input-invalid");
-    process.stderr.write(`FAIL [${failure.code}] at ${failure.at ?? "(unknown)"}: ${failure.message}\n`);
-    process.exitCode = 1;
-  },
-);
+const isDirectInvocation = process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+if (isDirectInvocation) {
+  main().then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      const failure = toStructuredFailure(error, "input-invalid");
+      process.stderr.write(`FAIL [${failure.code}] at ${failure.at ?? "(unknown)"}: ${failure.message}\n`);
+      process.exitCode = 1;
+    },
+  );
+}
