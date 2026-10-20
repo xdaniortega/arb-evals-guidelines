@@ -214,8 +214,8 @@ describe("skill presence is the only difference", () => {
     expect(networkCase).toEqual(docsCase);
     const docsSkill = await readRecord(docs.runDir, "inputs/skill-snapshot.json");
     const networkSkill = await readRecord(network.runDir, "inputs/skill-snapshot.json");
-    expect(docsSkill.sourcePath).toBe("src/test-fixtures/skills/mcp-skill");
-    expect(networkSkill.sourcePath).toBe("src/test-fixtures/skills/plain-skill");
+    expect(docsSkill.sourcePath).toBe("skills/mcp-skill");
+    expect(networkSkill.sourcePath).toBe("skills/plain-skill");
     expect(networkSkill.treeSha256).not.toBe(docsSkill.treeSha256);
     expect((networkSkill.files as { path: string }[]).some((file) => file.path === "SKILL.md")).toBe(true);
     for (const { result, runDir } of [docs, network]) {

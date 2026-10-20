@@ -35,7 +35,8 @@ function parseArgs(argv: readonly string[]): { suiteId: string | null; caseSelec
     }
     if (flag === "--skill") {
       if (skillPath !== null) throw new EvalError("input-invalid", "--skill accepts exactly one treatment skill; multiple skills are not supported yet", { at: "--skill" });
-      skillPath = value;
+      // Resolved against the working directory so the skill may live outside this repository.
+      skillPath = resolve(value);
     } else if (flag === "--suite") suiteId = value;
     else caseSelector = value;
     index += 1;

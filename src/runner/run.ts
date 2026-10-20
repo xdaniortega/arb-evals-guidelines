@@ -906,6 +906,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
     snapshot = await createSkillSnapshot({
       repoRoot: options.repoRoot,
       skillPath: frozen.suite.skillPath,
+      ...(options.skillPath != null ? { skillDir: options.skillPath } : {}),
       snapshotDir: join(options.workDir, "skill-snapshot"),
     });
 

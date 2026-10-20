@@ -642,6 +642,20 @@ Some historical notes.
     expect(currentContent).toBe(initialContent);
   });
 
+  it("refuses an explicit skill directory that is missing or a symlink", async () => {
+    const runResult = await sealRun();
+    const base = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(base);
+    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: join(base, "absent") }))
+      .rejects.toThrow(/skill directory does not exist/);
+    const real = join(base, "real");
+    await mkdir(real);
+    const link = join(base, "link");
+    await symlink(real, link);
+    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: link }))
+      .rejects.toThrow(/real directory, not a symlink/);
+  });
+
   it("refuses to publish a legacy run that has no frozen rubric v0.2", async () => {
     const runResult = await sealRun();
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));

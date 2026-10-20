@@ -15,7 +15,8 @@ import { EvalError, toStructuredFailure } from "../src/core/types.ts";
 import { publishRun } from "../src/artifacts/publish.ts";
 
 const USAGE =
-  "usage: eval:publish --receipt <path to receipt.json> [--pair <pair-id|rNNN>] [--checks] [--repo-root <path>]\n" +
+  "usage: eval:publish --receipt <path to receipt.json> [--pair <pair-id|rNNN>] [--checks] [--repo-root <path> | --skill-dir <path>]\n" +
+  "  --skill-dir <path> writes EVALS.md into that skill directory (e.g. a ../arbitrum-skills-evals checkout).\n" +
   "  Verifies run evidence, derives destination skill, and updates bounded EVALS.md section.\n" +
   "  Without --pair: a single-pair run publishes that pair; a multi-pair run publishes the\n" +
   "  mean over every pair. With --pair <id>: publishes that one named pair (full pair ID or\n" +
@@ -26,6 +27,7 @@ interface Args {
   readonly receiptPath: string;
   readonly checks: boolean;
   readonly repoRoot?: string;
+  readonly targetSkillDir?: string;
   readonly pairId?: string;
 }
 
@@ -33,6 +35,7 @@ function parseArgs(argv: readonly string[]): Args {
   let receiptPath: string | undefined;
   let checks = false;
   let repoRoot: string | undefined;
+  let targetSkillDir: string | undefined;
   let pairId: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -58,6 +61,12 @@ function parseArgs(argv: readonly string[]): Args {
       }
       repoRoot = resolve(value);
       index += 1;
+    } else if (flag === "--skill-dir") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new EvalError("input-invalid", `--skill-dir requires a value. ${USAGE}`, { at: "--skill-dir" });
+      }
+      targetSkillDir = resolve(value);
+      index += 1;
     } else if (flag === "--pair") {
       if (pairId !== undefined) {
         throw new EvalError("input-invalid", `--pair given twice. ${USAGE}`, { at: "--pair" });
@@ -76,7 +85,11 @@ function parseArgs(argv: readonly string[]): Args {
     throw new EvalError("input-invalid", `--receipt is required. ${USAGE}`, { at: "--receipt" });
   }
 
-  return { receiptPath, checks, repoRoot, ...(pairId !== undefined ? { pairId } : {}) };
+  if (repoRoot !== undefined && targetSkillDir !== undefined) {
+    throw new EvalError("input-invalid", `--repo-root conflicts with --skill-dir. ${USAGE}`, { at: "--skill-dir" });
+  }
+
+  return { receiptPath, checks, repoRoot, ...(targetSkillDir !== undefined ? { targetSkillDir } : {}), ...(pairId !== undefined ? { pairId } : {}) };
 }
 
 async function main(): Promise<number> {

@@ -84,7 +84,7 @@ const USAGE =
   `  --details adds operational metadata to human table/Markdown output; JSON is unchanged.\n` +
   `  --capture-reasoning retains model reasoning when we specifically want to analyze the model's reasoning; off by default because reasoning substantially increases session artifact size.\n` +
   `  Scheduling defaults to overlap after both-ready; --serial retains the same readiness barrier.\n` +
-  `  --skill selects one complete treatment skill relative to the repository; baseline receives none.\n` +
+  `  --skill selects one complete treatment skill directory (a path relative to the working directory, or absolute, possibly outside this repository); baseline receives none.\n` +
   `  --suite <id> remains available only for existing legacy eval.json suites; it conflicts with --skill.\n` +
   `  The four task budgets (wallClockMs, maxOutputTokens, maxToolSteps, maxProviderRequests)\n` +
   `  are UNLIMITED by default: a fresh run imposes no harness cumulative cap on time,\n` +
@@ -203,7 +203,8 @@ export function parseArgs(argv: readonly string[]): Args {
     if (flag === "--suite") suiteId = value;
     else if (flag === "--skill") {
       if (skillPath !== undefined) throw new EvalError("input-invalid", "--skill accepts exactly one treatment skill; multiple skills are not supported yet", { at: "--skill" });
-      skillPath = value;
+      // Resolved against the working directory so the skill may live outside this repository.
+      skillPath = resolve(value);
     }
     else if (flag === "--case") caseSelector = value;
     else if (flag === "--mode") {

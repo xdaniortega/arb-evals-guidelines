@@ -92,7 +92,7 @@ export function resolvePublicationTarget(input: DestinationResolutionInput): Res
 /**
  * Validates and resolves the destination EVALS.md path fail-closed.
  *
- * For production publication (no test-only targetSkillDir override):
+ * Default publication (no targetSkillDir):
  * - skillSourcePath must be a normalized repository-relative path;
  *   rejects absolute paths, empty/dot, traversal (..), and resolution outside repo root.
  * - Destination must remain inside canonical real repo root.
@@ -101,7 +101,9 @@ export function resolvePublicationTarget(input: DestinationResolutionInput): Res
  * - Existing EVALS.md must be a regular file, rejecting symlinks and non-regular files.
  * - Refuses missing directory without creating arbitrary directories (no mkdir).
  *
- * targetSkillDir is an isolated test-only seam for unit tests using temporary directories.
+ * targetSkillDir (`--skill-dir`) names the destination skill directory directly, for skills
+ * checked out outside this repository. It skips the repo-relative derivation but still
+ * refuses a symlinked or non-regular existing EVALS.md.
  */
 export async function validateAndResolveDestination(
   skillSourcePath: string,
@@ -109,10 +111,25 @@ export async function validateAndResolveDestination(
 ): Promise<ResolvedDestination> {
   const repoRoot = options.repoRoot ? resolve(options.repoRoot) : resolveDefaultRepoRoot();
 
-  // Test-only bypass seam: isolated for testing with temporary directories
+  // Explicit destination directory (external skills checkout, or temporary directories in tests)
   if (options.targetSkillDir) {
     const targetDir = resolve(options.targetSkillDir);
     const targetPath = join(targetDir, "EVALS.md");
+
+    const dirStat = await lstat(targetDir).catch((cause: unknown) => {
+      throw new EvalError(
+        "evidence-invalid",
+        `Publication refused: skill directory does not exist: ${targetDir}`,
+        { at: targetDir, cause },
+      );
+    });
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      throw new EvalError(
+        "evidence-invalid",
+        `Publication refused: skill directory must be a real directory, not a symlink: ${targetDir}`,
+        { at: targetDir },
+      );
+    }
 
     let fileStat;
     try {

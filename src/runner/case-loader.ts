@@ -10,7 +10,7 @@
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { isBuiltin } from "node:module";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import {
   assertSafeRelativePath,
@@ -389,7 +389,7 @@ async function directoryEntries(path: string): Promise<readonly string[]> {
 
 /** Repository-root directories that are never legacy suites. */
 const LEGACY_SCAN_SKIP: ReadonlySet<string> = new Set([
-  "src", "scripts", "container", "cases", "eval-cases", "node_modules", "arbitrum-skill-evals", "dist", "docs",
+  "src", "scripts", "container", "cases", "eval-cases", "node_modules", "dist", "docs",
 ]);
 
 /** Directory holding authored cases as `eval-cases/<skill>/<case-id>/`. */
@@ -508,8 +508,48 @@ export interface SetupSelection {
   /** Legacy authored suite selector; retained evidence keeps this namespace field. */
   readonly suiteId?: string | null;
   readonly caseSelector?: string | null;
-  /** Repository-relative path to exactly one treatment skill. */
+  /**
+   * Directory of exactly one treatment skill. Absolute, or relative to `repoRoot` (the CLI
+   * resolves it against the working directory first). It may live outside this repository.
+   */
   readonly skillPath?: string | null;
+}
+
+/** Where a skill directory lives and the stable, host-independent name recorded for it. */
+export interface SkillDirLocation {
+  /** Absolute skill directory. Host-specific: never written to evidence. */
+  readonly dir: string;
+  /** Directory whose descendants are checked for symlinks: the checkout holding `skills/<name>`, else the parent. */
+  readonly root: string;
+  /** `dir` relative to `root`: `skills/<name>` or `<name>`. */
+  readonly relative: string;
+  /** Stable path recorded in evidence; equal to `relative`. */
+  readonly sourcePath: string;
+}
+
+/**
+ * @notice Resolves a skill directory path to its absolute location and stable recorded name.
+ * @param base Directory that relative paths resolve against.
+ * @param input Absolute or relative skill directory path.
+ * @returns The location. The recorded `sourcePath` is `skills/<name>` when the directory sits under a `skills/` folder, otherwise `<name>`; the absolute host path is never part of it.
+ */
+export function locateSkillDir(base: string, input: string): SkillDirLocation {
+  if (typeof input !== "string" || input === "" || input.includes("\0")) {
+    throw new EvalError("path-unsafe", "--skill must be a non-empty directory path", { at: "--skill" });
+  }
+  const dir = resolve(base, input);
+  const name = basename(dir);
+  const parent = dirname(dir);
+  const underSkills = basename(parent) === "skills" && dirname(parent) !== parent;
+  const root = underSkills ? dirname(parent) : parent;
+  const relative = underSkills ? `skills/${name}` : name;
+  return { dir, root, relative: assertSafeRelativePath(relative, "--skill"), sourcePath: assertSafeRelativePath(relative, "--skill") };
+}
+
+/** Proves the skill directory is real and no directory between its checkout root and it is a symlink. */
+export async function assertSkillDirSafe(location: SkillDirLocation, at: string): Promise<void> {
+  await assertNoSymlinkedAncestor(location.root, location.relative, at);
+  await assertRealDirectory(location.dir, at);
 }
 
 /**
@@ -523,12 +563,10 @@ export async function resolveSetupSuites(input: SetupSelection, options?: Decode
     throw new EvalError("input-invalid", "--suite conflicts with --skill; select a canonical case with --case <id> --skill <path>", { at: "--suite" });
   }
   if (input.skillPath != null) {
-    const skillPath = assertSafeRelativePath(input.skillPath, "--skill");
-    const repoRoot = input.repoRoot ?? input.evalsRoot;
-    await assertNoSymlinkedAncestor(repoRoot, skillPath, "--skill");
-    const skillRoot = containedPath(repoRoot, skillPath, "--skill");
-    await assertRealDirectory(skillRoot, "--skill");
-    await readRegularFile(join(skillRoot, "SKILL.md"), 1_048_576, "--skill/SKILL.md");
+    const location = locateSkillDir(input.repoRoot ?? input.evalsRoot, input.skillPath);
+    const skillPath = location.sourcePath;
+    await assertSkillDirSafe(location, "--skill");
+    await readRegularFile(join(location.dir, "SKILL.md"), 1_048_576, "--skill/SKILL.md");
     const discovered = await discoverAuthoredCases(input.evalsRoot, options);
     const selected = input.caseSelector == null ? discovered : [resolveCaseSelector(discovered, input.caseSelector)];
     if (selected.length === 0) throw new EvalError("input-invalid", `no authored case found under ${input.evalsRoot}`, { at: "--case" });

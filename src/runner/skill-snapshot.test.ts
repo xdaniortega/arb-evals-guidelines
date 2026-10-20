@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EvalError } from "../core/types.ts";
+import { locateSkillDir } from "./case-loader.ts";
 import { createSkillSnapshot } from "./skill-snapshot.ts";
 
 const created: string[] = [];
@@ -181,5 +182,80 @@ describe("createSkillSnapshot", () => {
       createSkillSnapshot({ repoRoot, skillPath: "skills/empty", snapshotDir: join(repoRoot, "snap") }),
       "input-invalid",
     );
+  });
+
+  describe("external skill directory", () => {
+    it("snapshots a skill outside the repository and records only the stable name", async () => {
+      const repoRoot = await tempRoot();
+      const external = await tempRoot();
+      await buildSkill(external);
+      const snapshot = await createSkillSnapshot({
+        repoRoot,
+        skillPath: "skills/example",
+        skillDir: join(external, "skills", "example"),
+        snapshotDir: join(repoRoot, "snap"),
+      });
+      expect(snapshot.sourcePath).toBe("skills/example");
+      expect(JSON.stringify(snapshot.files)).not.toContain(external);
+      expect(snapshot.files.map((file) => file.path)).toEqual(["SKILL.md", "agents/notes.md"]);
+      expect(await readFile(join(repoRoot, "snap", "SKILL.md"), "utf8")).toBe("# skill\n");
+    });
+
+    it("resolves a relative skill path against the given base", async () => {
+      const external = await tempRoot();
+      await buildSkill(external);
+      const snapshot = await createSkillSnapshot({
+        repoRoot: join(external, "elsewhere"),
+        skillPath: "skills/example",
+        skillDir: "../skills/example",
+        snapshotDir: join(external, "snap"),
+      });
+      expect(snapshot.files.length).toBe(2);
+    });
+
+    it("rejects a symlinked skill directory and a symlinked skills folder outside the repository", async () => {
+      const repoRoot = await tempRoot();
+      const external = await tempRoot();
+      if (!(await canSymlink(external))) return;
+      await buildSkill(external);
+      await symlink(join(external, "skills", "example"), join(external, "skills", "aliased"));
+      await expectEvalErrorAsync(
+        createSkillSnapshot({ repoRoot, skillPath: "skills/aliased", skillDir: join(external, "skills", "aliased"), snapshotDir: join(repoRoot, "snap") }),
+        "path-unsafe",
+      );
+      await symlink(join(external, "skills"), join(external, "linked"));
+      await mkdir(join(external, "checkout"), { recursive: true });
+      await symlink(join(external, "skills"), join(external, "checkout", "skills"));
+      await expectEvalErrorAsync(
+        createSkillSnapshot({ repoRoot, skillPath: "skills/example", skillDir: join(external, "checkout", "skills", "example"), snapshotDir: join(repoRoot, "snap2") }),
+        "path-unsafe",
+      );
+    });
+
+    it("rejects a symlinked file inside an external skill", async () => {
+      const repoRoot = await tempRoot();
+      const external = await tempRoot();
+      if (!(await canSymlink(external))) return;
+      await buildSkill(external);
+      await writeFile(join(external, "outside.md"), "x", "utf8");
+      await symlink(join(external, "outside.md"), join(external, "skills", "example", "linked.md"));
+      await expectEvalErrorAsync(
+        createSkillSnapshot({ repoRoot, skillPath: "skills/example", skillDir: join(external, "skills", "example"), snapshotDir: join(repoRoot, "snap") }),
+        "path-unsafe",
+      );
+    });
+  });
+
+  describe("locateSkillDir", () => {
+    it("records skills/<name> under a skills folder and <name> otherwise, never the host path", () => {
+      expect(locateSkillDir("/base", "/x/repo/skills/arbitrum-docs/").sourcePath).toBe("skills/arbitrum-docs");
+      expect(locateSkillDir("/base", "../repo/skills/arbitrum-docs").dir).toBe("/repo/skills/arbitrum-docs");
+      expect(locateSkillDir("/base", "/x/mine/my-skill").sourcePath).toBe("my-skill");
+      expect(locateSkillDir("/base", "/x/mine/my-skill").root).toBe("/x/mine");
+    });
+
+    it("refuses names that are not safe path segments", () => {
+      expect(() => locateSkillDir("/base", "/x/skills/bad name")).toThrow(EvalError);
+    });
   });
 });

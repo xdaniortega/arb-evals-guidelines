@@ -8,7 +8,7 @@ import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { dirname, sep } from "node:path";
 import { assertSafeRelativePath, canonicalJsonSha256, sha256Hex } from "../core/experiment.ts";
 import { EvalError } from "../core/types.ts";
-import { assertNoSymlinkedAncestor, assertRealDirectory, containedPath, readRegularFile } from "./case-loader.ts";
+import { assertNoSymlinkedAncestor, assertRealDirectory, assertSkillDirSafe, containedPath, locateSkillDir, readRegularFile } from "./case-loader.ts";
 
 export const MAX_SKILL_FILES = 200;
 export const MAX_SKILL_FILE_BYTES = 1_048_576;
@@ -53,7 +53,10 @@ function isEexist(cause: unknown): boolean {
  */
 export async function createSkillSnapshot(input: {
   readonly repoRoot: string;
+  /** Stable name recorded as `sourcePath`; also the repo-relative location unless `skillDir` is given. */
   readonly skillPath: string;
+  /** Skill directory (absolute or relative to `repoRoot`), possibly outside the repository. */
+  readonly skillDir?: string;
   readonly snapshotDir: string;
 }): Promise<SkillSnapshot> {
   const at = `skill ${input.skillPath}`;
@@ -61,9 +64,18 @@ export async function createSkillSnapshot(input: {
   // The containment check below is purely lexical: resolve() does not resolve symlinks.
   // Without these two assertions a symlinked `skills/` or a symlinked skill directory
   // would cause an arbitrary tree to be snapshotted and staged as the evaluated skill.
-  await assertNoSymlinkedAncestor(input.repoRoot, input.skillPath, "eval.json#skillPath");
-  const sourceRoot = containedPath(input.repoRoot, input.skillPath, "eval.json#skillPath");
-  await assertRealDirectory(sourceRoot, "eval.json#skillPath");
+  let sourceRoot: string;
+  if (input.skillDir !== undefined) {
+    // External or in-repo skill directory chosen with --skill: checked inside its own
+    // checkout root, and only the stable name is recorded.
+    const location = locateSkillDir(input.repoRoot, input.skillDir);
+    await assertSkillDirSafe(location, "--skill");
+    sourceRoot = location.dir;
+  } else {
+    await assertNoSymlinkedAncestor(input.repoRoot, input.skillPath, "eval.json#skillPath");
+    sourceRoot = containedPath(input.repoRoot, input.skillPath, "eval.json#skillPath");
+    await assertRealDirectory(sourceRoot, "eval.json#skillPath");
+  }
 
   const files: SnapshotFile[] = [];
   // Every directory this function creates, so the read-only pass can be applied
