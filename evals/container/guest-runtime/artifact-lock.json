@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "compiler": {
+    "package": "typescript",
+    "version": "5.9.3"
+  },
+  "sources": {
+    "evals/src/core/types.ts": "sha256:c7ba867296bbc8f6f253ba6b04699fa30f6599e66ee7655f2d389902076debc3",
+    "evals/src/core/experiment.ts": "sha256:6a3294714fdad8729317737da2b934ebd06f0555ae7dbc34a71466965d864724",
+    "evals/src/core/secret-scan.ts": "sha256:3b5cf8cbe91eb4a49cfd908ab9669b3816d1e6e668ddaa476b41016cda193595",
+    "evals/src/transport-blocker.ts": "sha256:c2d69fec78cf18115a1c1494a9b1f654102c52538d5e3836475094df747257e6",
+    "evals/src/runner/models.ts": "sha256:c2ea4b9729a8160e33fbf714be98bf655c2ad445cd40f76cb5a5d0f222b9d8dd",
+    "evals/src/artifacts/native-prefix.ts": "sha256:bc0242956a581c86babdcb95ed8be55f82d4d719125a81b3f9d3388067121244",
+    "evals/src/harnesses/pi/export-viewer.ts": "sha256:7e7cd03ee9f65dabbb9fb59fc6d3e0da7c6611bff5abd604c6a3d4c6f0f2913c",
+    "evals/src/harnesses/pi/scripted-stream.ts": "sha256:32f2ad3c5be540489fe1ead6db1d1a73425ea21e4d81443eff008d9967450708",
+    "evals/src/harnesses/pi/ambient-tools.ts": "sha256:b8a7a6f5576d246a24bf6d990cf318af1c6886ea841942e9de81ff4a02463104",
+    "evals/src/harnesses/pi/mcp-http-client.ts": "sha256:a44e0df67f01ba48b8cadc72a0c2007b2cf5c96ab5c7a3d662945d4b2c81a419",
+    "evals/src/harnesses/pi/mcp-tools.ts": "sha256:8fb611b4f324cf5ecce4e0a30bbe885454e454c9c5b9041078d56ec5aa36b10e",
+    "evals/src/harnesses/pi/sdk-session.ts": "sha256:45b84fd3f1d2bc79136528557e62f4ccd0062be4aa2779e8623ea45b6add1fda",
+    "evals/src/harnesses/pi/guest-agent.ts": "sha256:e3a0731d1820c419688cc3632d3dc624a105a7e3872e85c0211092926d0d95c3"
+  },
+  "artifacts": {
+    "guest-runtime/src/core/types.mjs": "sha256:dda5683ffcb5d4d5bdad9f57734ef47bc7e3f91e282f4f716a99f597160b4675",
+    "guest-runtime/src/core/experiment.mjs": "sha256:701282537b8d0b7a3d7e44644ef0b92a734ee840622a47cec74381404cd8f676",
+    "guest-runtime/src/core/secret-scan.mjs": "sha256:7bd85be67db733c8649dd20b9d23c140591da5d02e550db563246e78a4308482",
+    "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
+    "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
+    "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:296c54b210a13340d7335290dd4d7a016356102e55545c328aaa36ddb1582096",
+    "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:cfc09ddcb9e93d1615d8a1691a876eab42d03a7d76ebaac4e3bc65a3e726ef51",
+    "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:b52a7697dd09bc8f251242af578d4814b1bed0684ba509f3ab8bbbcae5a2867a",
+    "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:5fd7ad17134a9913fa49c65c79c1ca50551c3ed04a6b7122b8360bd702430039",
+    "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:5a9b238674aae2ce773d301da71e4011eedd1d1548b474cb7dc5f07228355f84",
+    "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
+    "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:4341e9c80245f88da684c614d9ae593353e83ff3a36b7c56400f8284a70958d0",
+    "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:bcca9ebd96bc694287044832495d7d068e67542ed40b426215730f521122ddf0"
+  }
+}

@@ -1,0 +1,55 @@
+# Allowlisted guest image for the `default` runtime profile.
+#
+# WHY this file is deliberately small: the build context is the ONLY thing that can leak
+# host or answer material into a guest, so it carries only the guest policy/supervisor and
+# the locked compiled SDK runtime. No skill, fixture, oracle, validator, test, answer, or
+# credential is copied or reachable (see the deny-by-default .dockerignore).
+#
+# The base is pinned by digest in evals/container/image-lock.json; the tag below is the
+# human-readable spelling of that same identity. Debian (not Alpine) is required: the
+# privilege drop uses util-linux `setpriv --reuid`, which busybox does not implement.
+FROM docker.io/library/node:24-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0
+
+# iptables/ip6tables and ip(8) are absent from the base image and are required by the
+# egress lock. They are installed once at build time so the guest never needs network
+# tooling at runtime and never installs anything while a task is running.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iptables iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# The Pi agent runtime at pinned version 0.85.0. Installed globally at build time so
+# the guest never fetches dependencies at runtime. ESM does not honor NODE_PATH, so
+# expose the three directly imported scoped packages at the image-resident agent's
+# normal node_modules lookup location, resolving them from npm's actual global root.
+RUN npm install -g --save-exact @earendil-works/pi-coding-agent@0.85.0 \
+ && pi_root="$(npm root -g)/@earendil-works/pi-coding-agent" \
+ && npm install --prefix "$pi_root" --omit=dev --save-exact \
+      @earendil-works/pi-agent-core@0.85.0 @earendil-works/pi-ai@0.85.0 \
+      @earendil-works/pi-server@0.85.0 \
+ && mkdir -p /opt/eval/node_modules/@earendil-works \
+ && ln -s "$pi_root" /opt/eval/node_modules/@earendil-works/pi-coding-agent \
+ && for package in pi-agent-core pi-ai; do \
+      dependency="$pi_root/node_modules/@earendil-works/$package"; \
+      test -d "$dependency"; \
+      ln -s "$dependency" "/opt/eval/node_modules/@earendil-works/$package"; \
+    done \
+ && node -e 'const fs=require("fs"); for(const name of ["pi-coding-agent","pi-agent-core","pi-ai"]) { const p=JSON.parse(fs.readFileSync("/opt/eval/node_modules/@earendil-works/"+name+"/package.json")); if(p.version!=="0.85.0") throw new Error("Pi dependency pin mismatch: "+name); } const peer=JSON.parse(fs.readFileSync("/opt/eval/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-server/package.json")); if(peer.version!=="0.85.0") throw new Error("Pi SDK peer pin mismatch");'
+
+# The fixed non-root identity every guest process runs as. It is a constant, not a
+# parameter: attestation asserts this exact uid/gid, so a drift in the image is caught by
+# the host rather than silently accepted.
+RUN groupadd --gid 10001 evaluser \
+ && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin evaluser
+
+COPY configure-egress.sh /opt/eval/configure-egress.sh
+COPY run-measured.mjs /opt/eval/run-measured.mjs
+COPY guest-runtime /opt/eval/guest-runtime
+RUN chmod 0555 /opt/eval/configure-egress.sh /opt/eval/run-measured.mjs \
+ && find /opt/eval/guest-runtime -type d -exec chmod 0555 {} + \
+ && find /opt/eval/guest-runtime -type f -exec chmod 0444 {} +
+
+# The entrypoint is root PID 1 only long enough to install the egress lock; it then execs
+# the supervisor as uid/gid 10001 with no-new-privileges and no supplementary groups, in
+# the SAME process, so nothing privileged survives the handover.
+ENTRYPOINT ["/opt/eval/configure-egress.sh"]
+CMD ["node", "/opt/eval/run-measured.mjs", "supervise"]

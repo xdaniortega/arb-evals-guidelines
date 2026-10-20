@@ -1,0 +1,32 @@
+# Deny by default.
+#
+# The contract forbids the repository root, the evaluated skill, the fixture, the oracle,
+# the validator, tests, answers, and credential files from being reachable in a build
+# context. An allowlist is the only spelling of that rule that stays correct when a new
+# file is added to this directory: anything not named below is invisible to the build.
+*
+
+!Containerfile
+!configure-egress.sh
+!run-measured.mjs
+!guest-runtime/
+!guest-runtime/artifact-lock.json
+!guest-runtime/src/
+!guest-runtime/src/core/
+!guest-runtime/src/core/types.mjs
+!guest-runtime/src/core/experiment.mjs
+!guest-runtime/src/core/secret-scan.mjs
+!guest-runtime/src/transport-blocker.mjs
+!guest-runtime/src/runner/
+!guest-runtime/src/runner/models.mjs
+!guest-runtime/src/artifacts/
+!guest-runtime/src/artifacts/native-prefix.mjs
+!guest-runtime/src/harnesses/
+!guest-runtime/src/harnesses/pi/
+!guest-runtime/src/harnesses/pi/export-viewer.mjs
+!guest-runtime/src/harnesses/pi/scripted-stream.mjs
+!guest-runtime/src/harnesses/pi/ambient-tools.mjs
+!guest-runtime/src/harnesses/pi/mcp-http-client.mjs
+!guest-runtime/src/harnesses/pi/mcp-tools.mjs
+!guest-runtime/src/harnesses/pi/sdk-session.mjs
+!guest-runtime/src/harnesses/pi/guest-agent.mjs
