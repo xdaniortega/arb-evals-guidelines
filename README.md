@@ -5,6 +5,8 @@ Does a skill help an agent do a task better? The Arbitrum evals guidelines compa
 
 Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
 
+The skills under test live in [arbitrum-skill-evals](<ARBITRUM_SKILL_EVALS_URL>). This repository holds the runner, the eval cases and the sealed run evidence. The skills repository is pinned here as the `arbitrum-skill-evals/` git submodule.
+
 ## 1. What is an eval?
 
 An evaluation, or **eval**, is a task with a defined way to judge the answer. Here, each comparison runs that task twice:
@@ -28,41 +30,116 @@ For a measured evaluation, you need:
 
 - **Apple-silicon macOS**, with Apple Container installed and running. Check with `container system status`.
 - **Node.js 24.21.0**, the selected evaluation baseline, and **pnpm 10.33.2**.
-- This repository and its dependencies, installed with `pnpm install --frozen-lockfile`.
-- An API key for the selected provider in the git-ignored `evals/.env` file: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
-## 2. Quick start
-### Set up once
+- This repository, cloned with `--recurse-submodules` (or run `git submodule update --init` afterwards), and its dependencies, installed with `pnpm install --frozen-lockfile`.
+- An API key for the selected provider in the git-ignored `.env` file at the repository root: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
+## 2. Quick start (How to add your eval)
+
+The steps below use the existing case, `network-config-01`, as the worked example. Replace the names with your own skill and case id.
+
+### Step 1: Set up once
 
 ```bash
 pnpm install --frozen-lockfile
+git submodule update --init
 
 # Create the credential file if it does not already exist
-cp -n evals/.env.example evals/.env
+cp -n .env.example .env
 ```
 
-Edit `evals/.env` and fill in the key for your chosen provider. For the example below, use `GEMINI_API_KEY`. Keep credentials out of command arguments and committed files.
+Edit `.env` and fill in the key for your chosen provider. For the example below, use `GEMINI_API_KEY`. Keep credentials out of command arguments and committed files.
 
-### Check readiness, then run one pair
+### Step 2: Choose the skill
+
+Pick a skill in [arbitrum-skill-evals](<ARBITRUM_SKILL_EVALS_URL>). It must have a pinned body (the registry `commit` and `digest`). Check out the submodule at that commit, then confirm the digest, which is the sha256 of `SKILL.md`:
+
+```bash
+git -C arbitrum-skill-evals checkout <pinned-commit>
+shasum -a 256 arbitrum-skill-evals/skills/arbitrum-docs/SKILL.md   # must equal the registry digest
+```
+
+### Step 3: Create the case folder
+
+Create `eval-cases/<skill>/<case-id>/`, for example `eval-cases/arbitrum-docs/network-config-01/`. The folder name must equal the case id, and case ids are unique across all skills. The `<skill>` folder names the skill the case was written for. It does not bind `--skill`.
+
+### Step 4: Write the case data
+
+- `case.json`: `id`, `version`, `prompt`, `outputPath`, `allowedTools` and `validator`.
+- `fixture/`: the starting workspace shared by both arms.
+- `oracle.json`: the expected answers, as `sources[{url, locator, fields, verifiedAt}]`. It stays hidden from the agent.
+- `rubric.json`: rubric v0.2. Outcome checks total 80 points and constraint checks total 20.
+
+### Step 5: Write the validator and its tests
+
+Write `validator.ts` (deterministic checks) and `validator.test.ts` (node:test, with wrong-answer and accepted-variant cases). Run them:
+
+```bash
+pnpm test:eval-cases
+```
+
+### Step 6: Document the case
+
+Write the case `README.md` as described in [section 7](#7-documenting-a-case).
+
+### Step 7: Check the inputs offline
+
+```bash
+pnpm eval:validate -- --case network-config-01 --skill arbitrum-skill-evals/skills/arbitrum-docs
+```
+
+### Step 8: Check readiness
 
 ```bash
 # Check environment readiness; sends no completion requests
 pnpm eval:doctor -- --model gemini-3.8-flash --thinking low
+```
 
+### Step 9: Run one pair
+
+```bash
 # Run one baseline/treatment pair with paid provider requests
 pnpm eval -- --case network-config-01 \
-  --skill skills/arbitrum-docs \
+  --skill arbitrum-skill-evals/skills/arbitrum-docs \
   --model gemini-3.8-flash \
   --limit wallClockMs=300000
 ```
 The `wallClockMs=300000` limit gives each arm five minutes, starting when its prompt begins.
 
+### Step 10: Inspect the run
 
-Other Options for `pnpm eval`:
+Follow [section 5](#5-how-to-inspect-a-run). Inspection sends no model requests.
+
+### Step 11: Repeat
+
+Run again with `--repetitions N` to see how consistent the difference is. The guidelines set no minimum number of pairs.
+
+### Step 12: Publish
+
+```bash
+pnpm eval:publish -- --receipt "<receipt-path>" --checks
+```
+
+This writes `arbitrum-skill-evals/skills/<skill>/EVALS.md` for the digest that was evaluated. Commit that change inside the submodule on a new branch and push it:
+
+```bash
+git -C arbitrum-skill-evals switch -c evals/arbitrum-docs-network-config-01
+git -C arbitrum-skill-evals add skills/arbitrum-docs/EVALS.md
+git -C arbitrum-skill-evals commit -m "evals: arbitrum-docs network-config-01"
+git -C arbitrum-skill-evals push -u origin HEAD
+```
+
+### Step 13: Submit for review
+
+Open a pull request to arbitrum-skill-evals with the `EVALS.md` change, and a pull request to this repository with the case (and its evidence, if the owners ask for it). DevRel reviews both.
+
+
+### Options
+
+Options for `pnpm eval`:
 
 | Option | What it does |
 |---|---|
 | `--case <id>` | Case to run. Required. |
-| `--skill <path>` | Treatment skill, relative to the repository. The baseline arm receives none. Required, unless you use the legacy `--suite` flag. |
+| `--skill <path>` | Treatment skill folder, relative to this repository, for example `arbitrum-skill-evals/skills/arbitrum-docs`. URLs are not accepted. The baseline arm receives none. Required, unless you use the legacy `--suite` flag. |
 | `--model <id>` | Model to call. Required for a measured run. The provider is inferred from the model id. |
 | `--provider <google\|anthropic>` | Asserts or disambiguates the provider when the model id alone is not enough. |
 | `--thinking <level>` | Reasoning effort. Default `low`. Names are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; a model may reject some of them. |
@@ -71,7 +148,7 @@ Other Options for `pnpm eval`:
 | `--limit <key>=<value>` | Overrides one budget. Repeat the flag for several keys. Task budgets (`wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests`) take a positive integer, or `0` / `none` for unlimited. Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, `maxExportedFiles`, `maxExportedFileBytes`, `maxWorkspaceBytes`) stay finite. |
 
 
-The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](evals/cases/network-config-01/case.json) and [starting configuration](evals/cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
+The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](eval-cases/arbitrum-docs/network-config-01/case.json) and [starting configuration](eval-cases/arbitrum-docs/network-config-01/fixture/config.json) to understand the task before interpreting its score.
 
 ## 3. How scoring works
 
@@ -134,7 +211,7 @@ Cost and latency:
 
 limits    per arm: time=300s, output tokens=unlimited, tool steps=unlimited, provider requests=unlimited
 elapsed   5m13s wall time
-receipt   evals/cases/network-config-01/runs/20261002T101500Z-3f9a1c2d/receipt.json
+receipt   eval-cases/arbitrum-docs/network-config-01/runs/20261002T101500Z-3f9a1c2d/receipt.json
 inspect   pnpm eval:inspect --receipt <receipt> --pair r001 --condition treatment --view session --export both
 publish   pnpm eval:publish --receipt <receipt> --checks
 ```
@@ -168,7 +245,7 @@ This prints two paths: a `.jsonl` file (Pi's native session, one JSON record per
 
 Repeat with `--condition baseline` to see the same task without the skill, and compare the two transcripts side by side.
 
-> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `evals/cases/<case-id>/runs/<run-id>/` directory (git-ignored) and is never uploaded anywhere by the runner. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
+> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `eval-cases/<skill>/<case-id>/runs/<run-id>/` directory and is never uploaded anywhere by the runner. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
 >
 > The `--capture-reasoning` CLI flag exists so that model reasoning can be retained when we specifically want to analyze the model's reasoning; it is off by default because reasoning substantially increases session artifact size.
 
@@ -219,7 +296,7 @@ pnpm eval:publish -- --receipt "<receipt-path>" [--checks]
 
 The publish command:
 - Verifies run evidence first (`verifyRun`); refuses to publish if verification fails.
-- Derives the destination skill from `inputs/skill-snapshot.json.sourcePath` (e.g. `skills/arbitrum-docs`).
+- Derives the destination skill from `inputs/skill-snapshot.json.sourcePath` (e.g. `arbitrum-skill-evals/skills/arbitrum-docs`). Runs recorded before the layout change carry `skills/<name>`; republish them with `--repo-root arbitrum-skill-evals`.
 - Updates a bounded generated results section delimited by `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->` in `<skillSourcePath>/EVALS.md`.
 - Idempotently replaces the generated block on subsequent runs while preserving all authored coverage notes verbatim outside the markers.
 - Includes an AF-Evaluation status badge (`<status> · <treatment accuracy>%`; describes execution/grading status, non-certifying).
@@ -227,40 +304,45 @@ The publish command:
 - Keeps the receipt path and operational footer outside `EVALS.md`.
 - Ordinary `eval` and `eval:report` commands never modify `EVALS.md`.
 
-Evidence is stored locally in `evals/cases/<case-id>/runs/<run-id>/`. A receipt and manifest record hashes of the retained files; `eval:report` and `eval:inspect` verify that chain before trusting the result, so editing a sealed file invalidates verification. Session exports (`views/*.jsonl`, `views/*.html`) are generated read-only views outside that chain and never change the sealed evidence.
+Evidence is stored in `eval-cases/<skill>/<case-id>/runs/<run-id>/`. The generated `views/` folder is git-ignored; whether the sealed run evidence itself is committed is still an open owner decision. A receipt and manifest record hashes of the retained files; `eval:report` and `eval:inspect` verify that chain before trusting the result, so editing a sealed file invalidates verification. Session exports (`views/*.jsonl`, `views/*.html`) are generated read-only views outside that chain and never change the sealed evidence.
 
 If an interrupted run leaves containers or networks behind, clean up its recorded resources with `pnpm eval:recover -- --run <run-id>`.
 
 ## 6. Project layout
 
 ```text
-README.md                    # Human guide to running and understanding evals
-package.json                 # Scripts and dependencies
-skills/                      # Skills under test and their published EVALS.md
-evals/
-├── .env.example             # Credential template; copy locally to .env
-├── tsconfig.json            # Evaluation TypeScript configuration
-├── container/               # Guest image, network setup and locked runtime
-├── src/
-│   ├── core/                # Schemas, comparison rules, limits and redaction
-│   ├── runner/              # Setup, case loading and paired-run orchestration
-│   ├── harnesses/           # Agent execution through Pi or test doubles
-│   ├── sandboxes/           # Container lifecycle and test doubles
-│   └── artifacts/           # Saved evidence, verification and report readers
-├── scripts/                 # Command-line entrypoints
-└── cases/
-    └── network-config-01/   # Application configuration migration case
-        ├── case.json        # Task prompt, output path and allowed tools
-        ├── fixture/         # Starting workspace shared by both arms
-        ├── oracle.json      # Hidden expected answers and their sources
-        ├── validator.ts     # Deterministic checks, run in a separate container
-        ├── validator.test.ts # Wrong-answer and accepted-variant tests
-        └── runs/            # Local, git-ignored evidence created by runs
+README.md  AGENTS.md  REVIEW.md      # Human guide, agent guide, reviewer guide
+package.json  pnpm-lock.yaml         # Scripts and dependencies
+tsconfig.json  vitest.config.ts      # TypeScript and unit-test configuration
+.env.example                         # Credential template; copy locally to .env
+.gitignore  .gitmodules
+.github/workflows/ci.yml             # Lock check, typecheck, tests, offline case validation
+arbitrum-skill-evals/                # Git submodule (pinned): skills under test and their EVALS.md
+container/                           # Guest image, network setup, locked runtime and image lock
+scripts/                             # Command-line entrypoints and the guest runtime build
+src/
+├── core/                            # Schemas, comparison rules, limits and redaction
+├── runner/                          # Setup, case loading and paired-run orchestration
+├── harnesses/                       # Agent execution through Pi or test doubles
+├── sandboxes/                       # Container lifecycle and test doubles
+├── artifacts/                       # Saved evidence, verification and report readers
+└── test-fixtures/skills/            # Synthetic skills used only by tests
+eval-cases/
+└── arbitrum-docs/                   # One folder per skill the cases were written for
+    └── network-config-01/           # Application configuration migration case
+        ├── README.md                # Full explanation of the case
+        ├── case.json                # Task prompt, output path and allowed tools
+        ├── fixture/                 # Starting workspace shared by both arms
+        ├── oracle.json              # Hidden expected answers and their sources
+        ├── rubric.json              # Scoring rubric v0.2
+        ├── validator.ts             # Deterministic checks, run in a separate container
+        ├── validator.test.ts        # Wrong-answer and accepted-variant tests
+        └── runs/                    # Sealed evidence created by runs (views/ is git-ignored)
 ```
 
-Skill coverage and result summaries live alongside the evaluated skill; the published copies are in the arbitrum-agent-skills repository (root `EVALS.md` and `skills/*/EVALS.md`). For example, [skills/arbitrum-docs/EVALS.md](skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
+Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skill-evals](<ARBITRUM_SKILL_EVALS_URL>), for example [`skills/arbitrum-docs/EVALS.md`](<ARBITRUM_SKILL_EVALS_URL>/blob/<ref>/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
 
-To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks.
+To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need the submodule.
 
 ## 7. Documenting a case
 
@@ -273,4 +355,53 @@ Each case README should answer these questions; the validator defines the actual
 - **Preservation** — what must remain unchanged and which constraint checks enforce it.
 - **Score endpoints** — the expected score and pass result for correct, unchanged, malformed and missing answers.
 
-See the [network-config-01 README](evals/cases/network-config-01/README.md) for an example.
+See the [network-config-01 README](eval-cases/arbitrum-docs/network-config-01/README.md) for an example.
+
+## 8. How eval results reach the registry
+
+> This section describes the intended integration. The registry owner should review the wording, because the registry schema does not carry an `evals` field yet.
+
+### Eval results linked to EVALS.md
+
+- Each skill's `EVALS.md` is the full report.
+- The registry entry carries an `evals` summary that is generated from that report, not typed by hand. It holds:
+  - the digest that was evaluated
+  - the eval case and its version
+  - the agent harness and model
+  - the number of pairs
+  - accuracy, tokens and latency without the skill, with it, and the change
+  - a link to `EVALS.md` at that digest
+- The badge is just `evals`. It is present when a report exists and absent otherwise.
+- There is no pass or fail. Reports are non-certifying and define no threshold. The numbers sit next to the badge.
+- The summary resets when the pinned digest changes.
+- DevRel provides this repository as a reference. Teams may use it but do not have to, and submitted evals are reviewed. Having no badge is not a failure.
+
+Caveats:
+
+- Compare skills only within the same case and model.
+- Latency is the agent's wall-clock time to finish the task. It is not the speed of the skill's API or transactions, which would need a separate benchmark.
+- Only entries with a pinned body can be scanned or evaluated. Metadata-only `external` entries stay `listed`, with neither.
+
+### Capabilities grouped for display
+
+| Group | Capabilities |
+|---|---|
+| Read-only | `ecosystem-data`, `market-data`, `read-chain` |
+| Offchain API | `offchain-api` (external services, including credentials or payment) |
+| Onchain transactions | `prepare-tx` (prepares value-moving transactions) |
+
+A trading skill can be scan-clean and reviewed and still prepare onchain transactions. Users see both.
+
+### GitHub labels on pull requests
+
+CI applies these labels to each submission pull request:
+
+- `category: <slug>`
+- `tier: listed|identity-verified|reviewed`
+- `capabilities: read-only|offchain-api|onchain-tx`
+- `scan: clean` or `scan: findings`
+- `evals`
+- `needs-review`, on any pull request that changes the digest of a `reviewed` entry
+
+<!-- TODO(registry owner): the label list was cut off in the source brief; add the remaining labels and confirm whether the `arbitrum-maintained` tier needs one. -->
+

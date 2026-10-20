@@ -13,6 +13,19 @@ Run `git log --oneline` here. Each replay commit body names the original hash.
 
 Replay commits are snapshots of each stage's tree, so they do not include the intermediate source commits (`878387b`, `6d28efd`, `ca40669`, `9d191fb` and others) or later fixes. Use the final sync commit for the authoritative state.
 
+## Layout change (flat layout)
+
+The history below describes the original tree. At HEAD the layout is flat and the skills moved out:
+
+| Before | After |
+|---|---|
+| `evals/{container,scripts,src,tsconfig.json,.env.example,AGENTS.md}` | same names at the repository root |
+| `evals/cases/<case-id>/` (including `runs/`) | `eval-cases/<skill>/<case-id>/` |
+| `skills/arbitrum-docs`, `skills/arbitrum-network` | `arbitrum-skill-evals/skills/...` (git submodule) |
+| `skills/arbitrum-onchain` (test path fixture) | `src/test-fixtures/skills/plain-skill/` (synthetic) |
+
+Commits: pure `git mv` (renames show as `R100`; the tree is broken at that commit), path fixes, guest runtime relock, skills removal, docs. Sealed run evidence moved byte-for-byte. The relock changes the image digest, so new receipts carry a different image digest from the September runs.
+
 ## 1. Foundation (`089b45f`)
 Paired-arm design (baseline vs treatment), core types and experiment definition, runner, artifact store and sealing, sandboxes (fake and Apple container), the Pi harness, and the secret scan.
 What to check:
@@ -41,7 +54,7 @@ Mean-of-pairs publication into `skills/*/EVALS.md` and committed evidence for tw
 What to check:
 - `evals/src/artifacts/publish.ts`: fail-closed destination checks, bounded marker block.
 - `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md`.
-- Evidence runs `20260924T151721Z-bfb34c20` and `20260924T170734Z-b115674e`: `pnpm eval:report --receipt evals/cases/network-config-01/runs/<run>/receipt.json`.
+- Evidence runs `20260924T151721Z-bfb34c20` and `20260924T170734Z-b115674e`: `pnpm eval:report --receipt eval-cases/arbitrum-docs/network-config-01/runs/<run>/receipt.json`.
 
 ## Final sync and scaffolding
 - `package.json`, `vitest.config.ts`, CI, `.gitignore`.
@@ -55,4 +68,4 @@ What to check:
 - `evals/README.md` moved to the root `README.md`; the logo and score SVGs under `evals/assets/` were removed.
 
 ## Verification run on the final state
-`pnpm typecheck`, `pnpm test:evals`, `pnpm test:eval-cases`, `node evals/scripts/build-guest-runtime.mjs --check`, `pnpm eval:validate`. `pnpm test:container` is opt-in and needs macOS Apple Container, so it was not run.
+`pnpm typecheck`, `pnpm test:evals`, `pnpm test:eval-cases`, `node scripts/build-guest-runtime.mjs --check`, `pnpm eval:validate`. `pnpm test:container` is opt-in and needs macOS Apple Container, so it was not run.

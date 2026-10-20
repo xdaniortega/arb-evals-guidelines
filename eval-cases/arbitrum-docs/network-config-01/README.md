@@ -1,22 +1,104 @@
 # network-config-01: Network Configuration Migration
 
-Case ID: `network-config-01`  
-Case Version: `10`  
-Scoring Standard: Rubric v0.2 (`rubric.json`)
+| | |
+|---|---|
+| Case ID | `network-config-01` |
+| Case version | `10` |
+| Scoring standard | Rubric v0.2 (`rubric.json`) |
+| Skill folder | `arbitrum-docs` (this case has also been published against `arbitrum-network`) |
 
-## Overview
+## 1. Why this case exists
 
-This case evaluates an agent's ability to migrate an application's production and staging network configuration in `config.json` from Ethereum (Mainnet and Sepolia) to Arbitrum (Arbitrum One and Arbitrum Sepolia). The agent must update network identities, public RPC and explorer endpoints, sequencer routing and submission policy, withdrawal finality and force-inclusion settings, canonical bridge onboarding settings, and WETH/USDC token identities, while preserving unrelated application settings and configuration structure.
+It measures whether a skill, and the documentation MCP server that the skill declares, helps an agent migrate an application's network configuration correctly. Both arms use the same model and thinking level. The baseline has no skill. The treatment has a frozen copy of the skill. The score difference is the observed effect of the skill on this one task. It is not a general quality rating of the skill.
 
-## Scoring (Rubric v0.2)
+## 2. The task
 
-Accuracy = **Outcome correctness and completeness** (80 points, 16 checks: 8 topics &times; 2 environments, 5 each) + **Constraints and preservation** (20 points: `json-shape`, `preservation`, 10 each).
+The agent receives this prompt, verbatim from `case.json`:
 
-Unhappy-path coverage inside Outcome:
-- The two `legacy-fallback` checks: the starting config points at retired Goerli endpoints (invalid input); the agent must remove them rather than migrate them.
-- Staging `USDC.e` must stay `null` (a nonexistent token must not be invented; scored inside `staging-token-identity`).
+> Migrate this app’s production and staging network configuration in config.json from Ethereum to Arbitrum. Production should target Arbitrum One and staging should target Arbitrum Sepolia. Update the network identities, public RPC and explorer endpoints, sequencer routing and submission policy, withdrawal finality and force-inclusion settings, canonical bridge onboarding settings, and WETH/USDC token identities needed for the migration. Preserve unrelated application settings and configuration structure.
 
-Score endpoints: correct answer 100/100 (PASS); unchanged fixture 20/100; malformed or missing `config.json` 0/100.
+- **Allowed tools:** `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+- **Output:** the edited `config.json` in the workspace (`outputPath`).
+- **Starting files:** `fixture/config.json`, a treasury console configuration. Under `networkConfig.environments.production` and `.staging` it holds `chain`, `rpcPolicy`, `contracts`, `tokens`, `assetOnboarding` and `finalityPolicy`, all pointing at Ethereum Mainnet and Ethereum Sepolia. Outside `networkConfig` it holds unrelated settings (`application`, `wallet`, `retry`).
+
+## 3. Provenance
+
+The reference answers in `oracle.json` come from these sources. The oracle stays hidden from the agent.
+
+| Source | Fields | Checked on |
+|---|---|---|
+| [Arbitrum chain info](https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info): Arbitrum One and Arbitrum Sepolia chain, RPC, sequencer behavior, finality parameters, WETH and bridge configuration | `chainIdentity`, `rpcPolicy`, `legacyNetworkFallback`, `sequencerPolicy`, `finalityPolicy`, `wrappedNativeTokens`, `bridgeOnboarding` | 2026-08-31 |
+| [Circle USDC contract addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses): Arbitrum One and Arbitrum Sepolia | `nativeUsdcTokens` | 2026-08-04 |
+| [USDC on Arbitrum One](https://docs.arbitrum.io/arbitrum-bridge/usdc-arbitrum-one): USDC vs USDC.e table | `bridgedUsdcEToken` | 2026-08-04 |
+
+## 4. Checks and weights
+
+Accuracy = **Outcome correctness and completeness** (80 points, 16 checks: 8 topics &times; 2 environments, 5 points each) + **Constraints and preservation** (20 points: `json-shape` and `preservation`, 10 points each). The full table follows in [Rubric Checks](#rubric-checks-18-checks).
+
+## 5. Unhappy paths
+
+- The two `legacy-fallback` checks: the starting config points at retired Goerli endpoints (invalid input). The agent must remove them rather than migrate them.
+- Staging `USDC.e` must stay `null`. A nonexistent token must not be invented. It is scored inside `staging-token-identity`.
+
+## 6. Accepted variants
+
+These differences are harmless and still pass:
+
+- Bridge contract addresses at any of the accepted alias paths, as long as every populated alias agrees with the oracle (see [Alias-Tolerant Bridge Addresses](#alias-tolerant-bridge-addresses-vs-strict-json-shape)).
+- Trailing slashes on URLs.
+- Address letter case (EIP-55 checksums are accepted, not required).
+- `preferredRoute` spelled `"canonicalBridge"` or `"canonical-bridge"`.
+- `deprecatedGoerliFallbackUrl` set to `null` or removed.
+- Key order and whitespace.
+
+These must stay exact: chain ids and names, token addresses, the accepted sequencer method set, the finality numbers, and the canonical key names under `assetOnboarding.canonicalBridge.contracts` (needed for `json-shape`).
+
+## 7. Preservation
+
+Everything outside the mutable paths must keep its fixture value: `application.*`, `wallet.*`, `retry.*`, `networkConfig.defaultEnvironment` and `environments.*.contracts.multicall3`. The mutable paths are listed under [Scope of Preservation Checks](#scope-of-preservation-checks). The `preservation` and `json-shape` checks enforce this.
+
+## 8. Score endpoints
+
+See [Expected Scoring Endpoints](#expected-scoring-endpoints): correct answer 100/100 (PASS), unchanged fixture 20/100, malformed or missing `config.json` 0/100.
+
+## 9. How to run it
+
+From the repository root, with the submodule initialised and credentials in `.env`:
+
+```bash
+pnpm test:eval-cases   # validator tests
+pnpm eval:validate -- --case network-config-01 --skill arbitrum-skill-evals/skills/arbitrum-docs
+pnpm eval:doctor -- --model gemini-3.8-flash --thinking low
+pnpm eval -- --case network-config-01 \
+  --skill arbitrum-skill-evals/skills/arbitrum-docs \
+  --model gemini-3.8-flash --limit wallClockMs=300000
+```
+
+Swap the `--skill` path to `arbitrum-skill-evals/skills/arbitrum-network` to evaluate the other skill. The root README explains inspecting and publishing a run.
+
+## 10. Results
+
+- Published reports sit next to each skill in arbitrum-skill-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (<ARBITRUM_SKILL_EVALS_URL>).
+- Sealed evidence kept in this folder:
+  - `runs/20260924T151721Z-bfb34c20`: `arbitrum-docs`, 3 pairs.
+  - `runs/20260924T170734Z-b115674e`: `arbitrum-network`, 3 pairs.
+- Verify a run with `pnpm eval:report -- --receipt eval-cases/arbitrum-docs/network-config-01/runs/<run-id>/receipt.json`.
+
+Both runs were recorded before the repository layout changed, so their frozen skill path reads `skills/<name>`. Republish them with `--repo-root arbitrum-skill-evals`. Never edit files under `runs/`: that breaks verification.
+
+## 11. Maintenance
+
+- Bump `version` in `case.json` on any change to the prompt, fixture, oracle, validator or rubric, and re-verify the sources in the provenance table.
+- Editing this README does not change the frozen inputs, so it does not need a version bump.
+- Keep the check ids and weights here in step with `rubric.json` and `validator.ts`.
+
+## 12. Limitations
+
+- One task, so the result says nothing about the skill on other tasks.
+- Single-pair and few-pair records do not establish a statistical result. The model's answers vary between attempts.
+- Only the captured `config.json` is graded. The case does not assess permission boundaries, runtime access controls or external security guarantees.
+- Results compare a skill against no skill for one model. Compare skills only within the same case and model.
+- Latency is the agent's wall-clock time on the task, not the speed of the skill's API or transactions.
 
 ## Rubric Checks (18 Checks)
 
