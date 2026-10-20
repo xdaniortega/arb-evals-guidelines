@@ -3,7 +3,7 @@
  *
  * This module owns identifiers, schemas, limits, and structured errors. It must stay
  * free of filesystem, process, container, provider, harness, and suite-specific
- * concerns (see evals/docs/ARCHITECTURE.md sections 1-2).
+ * concerns (see docs/ARCHITECTURE.md sections 1-2).
  */
 export const INPUT_SCHEMA_VERSION = 1;
 /**
@@ -142,7 +142,7 @@ export function resolveGuestTimeouts(wallClockMs) {
 }
 /**
  * Allowlisted runtime profiles. A profile identifier maps through
- * evals/container/image-lock.json to a pinned base identity; that lock file is added
+ * container/image-lock.json to a pinned base identity; that lock file is added
  * with the container sandbox implementation and is not required to resolve a profile.
  */
 export const RUNTIME_PROFILES = {

@@ -5,7 +5,7 @@
 # the locked compiled SDK runtime. No skill, fixture, oracle, validator, test, answer, or
 # credential is copied or reachable (see the deny-by-default .dockerignore).
 #
-# The base is pinned by digest in evals/container/image-lock.json; the tag below is the
+# The base is pinned by digest in container/image-lock.json; the tag below is the
 # human-readable spelling of that same identity. Debian (not Alpine) is required: the
 # privilege drop uses util-linux `setpriv --reuid`, which busybox does not implement.
 FROM docker.io/library/node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
