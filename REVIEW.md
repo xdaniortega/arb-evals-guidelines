@@ -21,7 +21,7 @@ The history below describes the original tree. At HEAD the layout is flat and th
 |---|---|
 | `evals/{container,scripts,src,tsconfig.json,.env.example,AGENTS.md}` | same names at the repository root |
 | `evals/cases/<case-id>/` (including `runs/`) | `eval-cases/<skill>/<case-id>/` |
-| `skills/arbitrum-docs`, `skills/arbitrum-network` | `arbitrum-skill-evals/skills/...` (git submodule) |
+| `skills/arbitrum-docs`, `skills/arbitrum-network` | an external repository, <https://github.com/xdaniortega/arbitrum-skills-evals> (`skills/...`), passed to `--skill` by path |
 | `skills/arbitrum-onchain` (test path fixture) | `src/test-fixtures/skills/plain-skill/` (synthetic) |
 
 Commits: pure `git mv` (renames show as `R100`; the tree is broken at that commit), path fixes, guest runtime relock, skills removal, docs. Sealed run evidence moved byte-for-byte. The relock changes the image digest, so new receipts carry a different image digest from the September runs.

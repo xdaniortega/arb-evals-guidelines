@@ -29,7 +29,7 @@ It is **not** part of the published CLI, MCP server or package, and it is not a 
 | `src/test-fixtures/` | Synthetic skills used only by tests. They are not real skills. |
 | `eval-cases/<skill>/<case-id>/` | Case data: `case.json`, `rubric.json`, `README.md`, `fixture/`, `oracle.json`, `validator.ts`, and tests. Case ids are unique across skills. |
 | `eval-cases/<skill>/<case-id>/runs/` | Sealed evidence. Its `views/` folder is git-ignored; whether the runs themselves are committed is open item A7. |
-| `arbitrum-skill-evals/` | Git submodule (pinned), read-only input: the skills under test. Only `skills/<skill>/EVALS.md` is written, by `eval:publish`. |
+| external skills checkout | Not in this repo (<https://github.com/xdaniortega/arbitrum-skills-evals>, branch `feat/evals-guidelines`; clone it anywhere and pass the skill directory to `--skill`). Read-only input; only `EVALS.md` is written there, by `eval:publish --skill-dir`. |
 | `.state/` | Ignored exact-ID journals. |
 
 Dependency direction: `scripts → runner → core`. The runner uses harness, sandbox and artifacts, and case data feeds the runner. Environment and argv are parsed **once** at the process boundary. Limits resolve in the order CLI > case > suite > profile > default and are frozen before dispatch.
@@ -38,15 +38,15 @@ Dependency direction: `scripts → runner → core`. The runner uses harness, sa
 
 ```bash
 pnpm eval:doctor --model <id>                       # readiness; no completion requests
-pnpm eval --case network-config-01 --skill arbitrum-skill-evals/skills/arbitrum-docs --model <id> [--repetitions N] [--checks]
+pnpm eval --case network-config-01 --skill ../arbitrum-skills-evals/skills/arbitrum-docs --model <id> [--repetitions N] [--checks]
 pnpm eval:history --latest --case network-config-01 # receipts and pair IDs
 pnpm eval:report --receipt <receipt.json> [--format table|markdown|json] [--checks]
 pnpm eval:inspect --receipt <receipt.json> --pair <full-pair-id> --condition treatment --view session --export both
-pnpm eval:publish --receipt <receipt.json> [--pair <pair-id|rNNN>] [--checks]
+pnpm eval:publish --receipt <receipt.json> [--pair <pair-id|rNNN>] [--checks] [--skill-dir <path>]
 pnpm eval:recover --run <exact-run-id>
 ```
 
-Never edit files under `eval-cases/*/*/runs/`: they are sealed. Tests must not depend on the `arbitrum-skill-evals/` submodule; use `src/test-fixtures/skills/`.
+Never edit files under `eval-cases/*/*/runs/`: they are sealed. Tests must not depend on an external skills checkout; use `src/test-fixtures/skills/`.
 
 Development checks: `pnpm typecheck:evals`, `pnpm test:evals`, `pnpm test:eval-cases`, `pnpm test:container`, `pnpm eval:validate`. After changing guest runtime sources, run `pnpm build:eval-guest`.
 

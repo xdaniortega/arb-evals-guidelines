@@ -63,28 +63,28 @@ See [Expected Scoring Endpoints](#expected-scoring-endpoints): correct answer 10
 
 ## 9. How to run it
 
-From the repository root, with the submodule initialised and credentials in `.env`:
+From the repository root, with the skills repository cloned next to this one (`../arbitrum-skills-evals`, see the root README) and credentials in `.env`:
 
 ```bash
 pnpm test:eval-cases   # validator tests
-pnpm eval:validate -- --case network-config-01 --skill arbitrum-skill-evals/skills/arbitrum-docs
+pnpm eval:validate -- --case network-config-01 --skill ../arbitrum-skills-evals/skills/arbitrum-docs
 pnpm eval:doctor -- --model gemini-3.8-flash --thinking low
 pnpm eval -- --case network-config-01 \
-  --skill arbitrum-skill-evals/skills/arbitrum-docs \
+  --skill ../arbitrum-skills-evals/skills/arbitrum-docs \
   --model gemini-3.8-flash --limit wallClockMs=300000
 ```
 
-Swap the `--skill` path to `arbitrum-skill-evals/skills/arbitrum-network` to evaluate the other skill. The root README explains inspecting and publishing a run.
+Swap the `--skill` path to `../arbitrum-skills-evals/skills/arbitrum-network` to evaluate the other skill. The root README explains inspecting and publishing a run.
 
 ## 10. Results
 
-- Published reports sit next to each skill in arbitrum-skill-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (https://github.com/xdaniortega/arbitrum-skills-evals).
+- Published reports sit next to each skill in arbitrum-skills-evals: `skills/arbitrum-docs/EVALS.md` and `skills/arbitrum-network/EVALS.md` (https://github.com/xdaniortega/arbitrum-skills-evals).
 - Sealed evidence kept in this folder:
   - `runs/20260924T151721Z-bfb34c20`: `arbitrum-docs`, 3 pairs.
   - `runs/20260924T170734Z-b115674e`: `arbitrum-network`, 3 pairs.
 - Verify a run with `pnpm eval:report -- --receipt eval-cases/arbitrum-docs/network-config-01/runs/<run-id>/receipt.json`.
 
-Both runs were recorded before the repository layout changed, so their frozen skill path reads `skills/<name>`. Republish them with `--repo-root arbitrum-skill-evals`. Never edit files under `runs/`: that breaks verification.
+Both runs were recorded before the repository layout changed, so their frozen skill path reads `skills/<name>`. Publish them with `--skill-dir ../arbitrum-skills-evals/skills/<name>`. Never edit files under `runs/`: that breaks verification.
 
 ## 11. Maintenance
 

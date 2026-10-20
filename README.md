@@ -5,7 +5,7 @@ Does a skill help an agent do a task better? The Arbitrum evals guidelines compa
 
 Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
 
-The skills under test live in [arbitrum-skill-evals](https://github.com/xdaniortega/arbitrum-skills-evals). This repository holds the runner, the eval cases and the sealed run evidence. The skills repository is pinned here as the `arbitrum-skill-evals/` git submodule.
+The skills under test live in a separate repository, [arbitrum-skills-evals](https://github.com/xdaniortega/arbitrum-skills-evals) (branch `feat/evals-guidelines`). This repository holds the runner, the eval cases and the sealed run evidence. You clone the skills repository separately, anywhere you like, and pass the path of one skill directory to `--skill`.
 
 ## 1. What is an eval?
 
@@ -30,7 +30,8 @@ For a measured evaluation, you need:
 
 - **Apple-silicon macOS**, with Apple Container installed and running. Check with `container system status`.
 - **Node.js 24.21.0**, the selected evaluation baseline, and **pnpm 10.33.2**.
-- This repository, cloned with `--recurse-submodules` (or run `git submodule update --init` afterwards), and its dependencies, installed with `pnpm install --frozen-lockfile`.
+- This repository and its dependencies, installed with `pnpm install --frozen-lockfile`.
+- A checkout of the [skills repository](https://github.com/xdaniortega/arbitrum-skills-evals), for example in `../arbitrum-skills-evals` (see step 2).
 - An API key for the selected provider in the git-ignored `.env` file at the repository root: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
 ## 2. Quick start (How to add your eval)
 
@@ -40,7 +41,6 @@ The steps below use the existing case, `network-config-01`, as the worked exampl
 
 ```bash
 pnpm install --frozen-lockfile
-git submodule update --init
 
 # Create the credential file if it does not already exist
 cp -n .env.example .env
@@ -50,12 +50,15 @@ Edit `.env` and fill in the key for your chosen provider. For the example below,
 
 ### Step 2: Choose the skill
 
-Pick a skill in [arbitrum-skill-evals](https://github.com/xdaniortega/arbitrum-skills-evals). It must have a pinned body (the registry `commit` and `digest`). Check out the submodule at that commit, then confirm the digest, which is the sha256 of `SKILL.md`:
+Clone the [skills repository](https://github.com/xdaniortega/arbitrum-skills-evals) next to this one and pick a skill. It must have a pinned body (the registry `commit` and `digest`). Check out that commit, then confirm the digest, which is the sha256 of `SKILL.md`:
 
 ```bash
-git -C arbitrum-skill-evals checkout <pinned-commit>
-shasum -a 256 arbitrum-skill-evals/skills/arbitrum-docs/SKILL.md   # must equal the registry digest
+git clone -b feat/evals-guidelines https://github.com/xdaniortega/arbitrum-skills-evals.git ../arbitrum-skills-evals
+git -C ../arbitrum-skills-evals checkout <pinned-commit>
+shasum -a 256 ../arbitrum-skills-evals/skills/arbitrum-docs/SKILL.md   # must equal the registry digest
 ```
+
+The skill directory path (`../arbitrum-skills-evals/skills/arbitrum-docs` below) is what you pass to `--skill`.
 
 ### Step 3: Create the case folder
 
@@ -83,7 +86,7 @@ Write the case `README.md` as described in [section 7](#7-documenting-a-case).
 ### Step 7: Check the inputs offline
 
 ```bash
-pnpm eval:validate -- --case network-config-01 --skill arbitrum-skill-evals/skills/arbitrum-docs
+pnpm eval:validate -- --case network-config-01 --skill ../arbitrum-skills-evals/skills/arbitrum-docs
 ```
 
 ### Step 8: Check readiness
@@ -98,7 +101,7 @@ pnpm eval:doctor -- --model gemini-3.8-flash --thinking low
 ```bash
 # Run one baseline/treatment pair with paid provider requests
 pnpm eval -- --case network-config-01 \
-  --skill arbitrum-skill-evals/skills/arbitrum-docs \
+  --skill ../arbitrum-skills-evals/skills/arbitrum-docs \
   --model gemini-3.8-flash \
   --limit wallClockMs=300000
 ```
@@ -115,21 +118,22 @@ Run again with `--repetitions N` to see how consistent the difference is. The gu
 ### Step 12: Publish
 
 ```bash
-pnpm eval:publish -- --receipt "<receipt-path>" --checks
+pnpm eval:publish -- --receipt "<receipt-path>" --checks \
+  --skill-dir ../arbitrum-skills-evals/skills/arbitrum-docs
 ```
 
-This writes `arbitrum-skill-evals/skills/<skill>/EVALS.md` for the digest that was evaluated. Commit that change inside the submodule on a new branch and push it:
+This writes `EVALS.md` into that skill directory for the digest that was evaluated. Commit the change in your skills checkout on a new branch and push it:
 
 ```bash
-git -C arbitrum-skill-evals switch -c evals/arbitrum-docs-network-config-01
-git -C arbitrum-skill-evals add skills/arbitrum-docs/EVALS.md
-git -C arbitrum-skill-evals commit -m "evals: arbitrum-docs network-config-01"
-git -C arbitrum-skill-evals push -u origin HEAD
+git -C ../arbitrum-skills-evals switch -c evals/arbitrum-docs-network-config-01
+git -C ../arbitrum-skills-evals add skills/arbitrum-docs/EVALS.md
+git -C ../arbitrum-skills-evals commit -m "evals: arbitrum-docs network-config-01"
+git -C ../arbitrum-skills-evals push -u origin HEAD
 ```
 
 ### Step 13: Submit for review
 
-Open a pull request to arbitrum-skill-evals with the `EVALS.md` change, and a pull request to this repository with the case (and its evidence, if the owners ask for it). DevRel reviews both.
+Open a pull request to arbitrum-skills-evals with the `EVALS.md` change, and a pull request to this repository with the case (and its evidence, if the owners ask for it). DevRel reviews both.
 
 
 ### Options
@@ -139,7 +143,7 @@ Options for `pnpm eval`:
 | Option | What it does |
 |---|---|
 | `--case <id>` | Case to run. Required. |
-| `--skill <path>` | Treatment skill folder, relative to this repository, for example `arbitrum-skill-evals/skills/arbitrum-docs`. URLs are not accepted. The baseline arm receives none. Required, unless you use the legacy `--suite` flag. |
+| `--skill <path>` | Treatment skill directory: an absolute path, or one relative to the current directory, that may live outside this repository, for example `../arbitrum-skills-evals/skills/arbitrum-docs`. It must contain `SKILL.md`; symlinks in the skill tree, or between the skill and its checkout root, are refused. Evidence records only `skills/<name>` (or `<name>` when the folder is not under `skills/`), never the host path. URLs are not accepted. The baseline arm receives none. Required, unless you use the legacy `--suite` flag. |
 | `--model <id>` | Model to call. Required for a measured run. The provider is inferred from the model id. |
 | `--provider <google\|anthropic>` | Asserts or disambiguates the provider when the model id alone is not enough. |
 | `--thinking <level>` | Reasoning effort. Default `low`. Names are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; a model may reject some of them. |
@@ -291,13 +295,13 @@ pnpm eval:report -- --receipt "<receipt-path>" --format table
 After verifying evaluation evidence, publish the scored report to the evaluated skill's `EVALS.md`:
 
 ```bash
-pnpm eval:publish -- --receipt "<receipt-path>" [--checks]
+pnpm eval:publish -- --receipt "<receipt-path>" [--checks] [--skill-dir <skill-dir>]
 ```
 
 The publish command:
 - Verifies run evidence first (`verifyRun`); refuses to publish if verification fails.
-- Derives the destination skill from `inputs/skill-snapshot.json.sourcePath` (e.g. `arbitrum-skill-evals/skills/arbitrum-docs`). Runs recorded before the layout change carry `skills/<name>`; republish them with `--repo-root arbitrum-skill-evals`.
-- Updates a bounded generated results section delimited by `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->` in `<skillSourcePath>/EVALS.md`.
+- Writes to the skill directory given by `--skill-dir <path>` (the checkout of the skills repository, e.g. `../arbitrum-skills-evals/skills/arbitrum-docs`); it must exist and not be a symlink. Without `--skill-dir` it derives the destination from `inputs/skill-snapshot.json.sourcePath` (`skills/<name>`) relative to the repository root, or to `--repo-root <path>` (e.g. `--repo-root ../arbitrum-skills-evals`). Sealed evidence never contains the absolute path of the skill.
+- Updates a bounded generated results section delimited by `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->` in the skill's `EVALS.md`.
 - Idempotently replaces the generated block on subsequent runs while preserving all authored coverage notes verbatim outside the markers.
 - Includes an AF-Evaluation status badge (`<status> · <treatment accuracy>%`; describes execution/grading status, non-certifying).
 - Refuses single-pair runs where either arm is ungraded; re-run the case instead of publishing `n/a`.
@@ -315,9 +319,8 @@ README.md  AGENTS.md  REVIEW.md      # Human guide, agent guide, reviewer guide
 package.json  pnpm-lock.yaml         # Scripts and dependencies
 tsconfig.json  vitest.config.ts      # TypeScript and unit-test configuration
 .env.example                         # Credential template; copy locally to .env
-.gitignore  .gitmodules
+.gitignore
 .github/workflows/ci.yml             # Lock check, typecheck, tests, offline case validation
-arbitrum-skill-evals/                # Git submodule (pinned): skills under test and their EVALS.md
 container/                           # Guest image, network setup, locked runtime and image lock
 scripts/                             # Command-line entrypoints and the guest runtime build
 src/
@@ -340,9 +343,9 @@ eval-cases/
         └── runs/                    # Sealed evidence created by runs (views/ is git-ignored)
 ```
 
-Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skill-evals](https://github.com/xdaniortega/arbitrum-skills-evals), for example [`skills/arbitrum-docs/EVALS.md`](https://github.com/xdaniortega/arbitrum-skills-evals/blob/feat/evals-guidelines/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
+Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skills-evals](https://github.com/xdaniortega/arbitrum-skills-evals), for example [`skills/arbitrum-docs/EVALS.md`](https://github.com/xdaniortega/arbitrum-skills-evals/blob/feat/evals-guidelines/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
 
-To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need the submodule.
+To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need the skills repository.
 
 ## 7. Documenting a case
 
