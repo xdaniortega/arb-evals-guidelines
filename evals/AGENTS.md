@@ -1,6 +1,6 @@
 # AGENTS.md — `evals/`
 
-Entry point for coding agents working in the developer-only evaluation subsystem. This condenses [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the owner-controlled contract) and [`docs/open-items.md`](docs/open-items.md) (everything unsettled). When this file and the contract disagree, **the contract wins**. Operator how-to lives in [`README.md`](README.md).
+Entry point for coding agents working in the developer-only evaluation subsystem. This condenses [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the owner-controlled contract) and [`docs/open-items.md`](docs/open-items.md) (everything unsettled). When this file and the contract disagree, **the contract wins**. Operator how-to lives in [`README.md`](../README.md).
 
 > `evals/docs/` is **local-only** (git-ignored). It exists in the owner's working copy but not in clones, and this file is the tracked summary of it. If `docs/` is missing, treat the rules below as the contract and ask the owner before changing any guarantee.
 
@@ -51,7 +51,7 @@ Development checks: `pnpm typecheck:evals`, `pnpm test:evals`, `pnpm test:eval-c
 - **Budgets:** `wallClockMs`, `maxOutputTokens`, `maxToolSteps` and `maxProviderRequests` default to **unlimited** (`null`, which is also what `none` and `0` select). A finite cap applies only when explicitly opted in, and `wallClockMs` starts at each arm's own prompt. Stop causes separate harness-budget exhaustion from provider-native truncation.
 - **Scheduling:** Both arms reach a readiness barrier before either is prompted. They overlap by default, and `--serial` keeps the barrier. At most one pair runs at a time, and its cleanup is verified before the next pair starts.
 - **Candidate:** Every fresh run grades the bounded final workspace. `file` projection is refused at preflight and survives only in historical evidence.
-- **Scoring (rubric v0.2):** Each check belongs to `outcome` (sums to 80) or `constraints` (sums to 20). The framework scores centrally at seal time with `scoreWithRubric`, and any validator scalar is advisory. A full pass requires every check. Evidence without a v0.2 frozen rubric is **legacy** and is never reweighted.
+- **Scoring (rubric v0.2):** Each check belongs to `outcome` (sums to 80) or `constraints` (sums to 20). The runner scores centrally at seal time with `scoreWithRubric`, and any validator scalar is advisory. A full pass requires every check. Evidence without a v0.2 frozen rubric is **legacy** and is never reweighted.
 - **Failures:** Task failures are gradeable and may score 0. Infrastructure failures have `score: null`, and the two are never mixed. No delta is computed for a pair that is not gradeable.
 - **Publication:** Evidence is verified first. The destination skill comes from `inputs/skill-snapshot.json.sourcePath`, and only the `<!-- AF-EVAL:BEGIN/END generated -->` block of `skills/<skill>/EVALS.md` is replaced, idempotently.
   - A single-pair run publishes that pair.

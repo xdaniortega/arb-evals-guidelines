@@ -1,6 +1,6 @@
 # Review guide
 
-This repo is the evals framework extracted from `arbitrum-agent-skills` (branch `feat/evals`, source HEAD `65a761f`). It has no shared history with the source. The first four feature commits below replay the source stages (`evals/` tree and the skills under test only). The last commit syncs the repo to the final state and adds standalone scaffolding.
+This repo holds the Arbitrum evals guidelines and runner, extracted from `arbitrum-agent-skills` (branch `feat/evals`, source HEAD `65a761f`). It has no shared history with the source. The first four feature commits below replay the source stages (`evals/` tree and the skills under test only). The last commit syncs the repo to the final state and adds standalone scaffolding.
 
 Run `git log --oneline` here. Each replay commit body names the original hash.
 
@@ -47,6 +47,12 @@ What to check:
 - `package.json`, `vitest.config.ts`, CI, `.gitignore`.
 - `skills/arbitrum-onchain/` is included only because a runner test uses it as a path fixture.
 - `evals/docs/` (local-only contract) is intentionally not included.
+
+## Not carried over (discarded by decision)
+- `fix/generate-eval-guest-runtime` (`c7fc82d`): on-demand guest runtime build.
+- `evals/docs/` (`ARCHITECTURE.md`, open items): stays local-only.
+- `fee-estimation-01` case (`eval/fee-estimation`).
+- `evals/README.md` moved to the root `README.md`; the logo and score SVGs under `evals/assets/` were removed.
 
 ## Verification run on the final state
 `pnpm typecheck`, `pnpm test:evals`, `pnpm test:eval-cases`, `node evals/scripts/build-guest-runtime.mjs --check`, `pnpm eval:validate`. `pnpm test:container` is opt-in and needs macOS Apple Container, so it was not run.

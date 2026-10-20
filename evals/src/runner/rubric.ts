@@ -4,12 +4,12 @@
  * Host-side only: this module defines the rubric data structures, fail-closed
  * decoding of rubric.json files, and the authoritative weighted scoring function.
  *
- * Rubric v0.2 has two accuracy groups with fixed, framework-owned weights:
+ * Rubric v0.2 has two accuracy groups with fixed, runner-owned weights:
  * - `outcome` (80 points): outcome correctness and completeness. Happy-path and
  *   unhappy-path checks are both outcome checks; they are not scored separately.
  * - `constraints` (20 points): constraints and preservation.
  *
- * Group labels and points are framework constants; a case only declares checks
+ * Group labels and points are runner constants; a case only declares checks
  * (and optional topics). Any other rubric version fails to decode, so a sealed run
  * frozen under an earlier rubric is reported through the legacy branch.
  */
@@ -30,7 +30,7 @@ export interface RubricGroupDefinition {
   readonly points: number;
 }
 
-/** Fixed accuracy pillars: labels and weights are owned by the framework, not by cases. */
+/** Fixed accuracy pillars: labels and weights are owned by the runner, not by cases. */
 export const ACCURACY_GROUPS: Readonly<Record<RubricGroupId, RubricGroupDefinition>> = {
   outcome: { label: "Outcome correctness and completeness", points: OUTCOME_POINTS },
   constraints: { label: "Constraints and preservation", points: CONSTRAINT_POINTS },

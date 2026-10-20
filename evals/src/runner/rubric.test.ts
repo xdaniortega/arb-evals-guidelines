@@ -31,7 +31,7 @@ const results = (failing: readonly string[] = []) =>
 
 describe("rubric v0.2 scoring and validation", () => {
   describe("decodeRubric", () => {
-    it("decodes a valid v0.2 rubric; group labels and weights are framework constants", () => {
+    it("decodes a valid v0.2 rubric; group labels and weights are runner constants", () => {
       const rubric = decodeRubric(rubricJson);
       expect(rubric.rubricVersion).toBe("v0.2");
       expect(rubric.checks).toHaveLength(5);

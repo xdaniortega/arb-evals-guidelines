@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.33.2",
-  "description": "Isolated paired evaluation framework for agent skills (extracted from arbitrum-agent-skills).",
+  "description": "Arbitrum evals guidelines: isolated paired evals for agent skills (extracted from arbitrum-agent-skills).",
   "type": "module",
   "license": "MIT",
   "engines": {

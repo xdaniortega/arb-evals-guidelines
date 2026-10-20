@@ -1,11 +1,7 @@
-# Arbitrum Evaluation Framework
-
-<p align="center">
-  <img src="assets/arbitrum-evaluation-framework.svg" alt="Arbitrum Agent Skills"">
-</p>
+# Evals Guidelines
 
 
-Does a skill help an agent do a task better? This framework compares the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
+Does a skill help an agent do a task better? The Arbitrum evals guidelines compare the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
 
 Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
 
@@ -75,13 +71,13 @@ Other Options for `pnpm eval`:
 | `--limit <key>=<value>` | Overrides one budget. Repeat the flag for several keys. Task budgets (`wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests`) take a positive integer, or `0` / `none` for unlimited. Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, `maxExportedFiles`, `maxExportedFileBytes`, `maxWorkspaceBytes`) stay finite. |
 
 
-The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](cases/network-config-01/case.json) and [starting configuration](cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
+The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](evals/cases/network-config-01/case.json) and [starting configuration](evals/cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
 
 ## 3. How scoring works
 
 ### A shared scoring rubric
 
-The framework standardizes how we score; each case defines what a correct outcome means.
+The guidelines standardize how we score; each case defines what a correct outcome means.
 
 | Pillar | Common definition | What each case supplies |
 |---|---|---|
@@ -172,7 +168,7 @@ This prints two paths: a `.jsonl` file (Pi's native session, one JSON record per
 
 Repeat with `--condition baseline` to see the same task without the skill, and compare the two transcripts side by side.
 
-> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `evals/cases/<case-id>/runs/<run-id>/` directory (git-ignored) and is never uploaded anywhere by this framework. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
+> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `evals/cases/<case-id>/runs/<run-id>/` directory (git-ignored) and is never uploaded anywhere by the runner. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
 >
 > The `--capture-reasoning` CLI flag exists so that model reasoning can be retained when we specifically want to analyze the model's reasoning; it is off by default because reasoning substantially increases session artifact size.
 
@@ -238,8 +234,10 @@ If an interrupted run leaves containers or networks behind, clean up its recorde
 ## 6. Project layout
 
 ```text
+README.md                    # Human guide to running and understanding evals
+package.json                 # Scripts and dependencies
+skills/                      # Skills under test and their published EVALS.md
 evals/
-├── README.md                # Human guide to running and understanding evals
 ├── .env.example             # Credential template; copy locally to .env
 ├── tsconfig.json            # Evaluation TypeScript configuration
 ├── container/               # Guest image, network setup and locked runtime
@@ -260,9 +258,9 @@ evals/
         └── runs/            # Local, git-ignored evidence created by runs
 ```
 
-Skill coverage and result summaries live alongside the evaluated skill, for example [skills/arbitrum-docs/EVALS.md](../skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
+Skill coverage and result summaries live alongside the evaluated skill; the published copies are in the arbitrum-agent-skills repository (root `EVALS.md` and `skills/*/EVALS.md`). For example, [skills/arbitrum-docs/EVALS.md](skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
 
-For framework development, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks.
+To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks.
 
 ## 7. Documenting a case
 
@@ -275,4 +273,4 @@ Each case README should answer these questions; the validator defines the actual
 - **Preservation** — what must remain unchanged and which constraint checks enforce it.
 - **Score endpoints** — the expected score and pass result for correct, unchanged, malformed and missing answers.
 
-See the [network-config-01 README](cases/network-config-01/README.md) for an example.
+See the [network-config-01 README](evals/cases/network-config-01/README.md) for an example.
