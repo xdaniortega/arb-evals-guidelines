@@ -163,11 +163,11 @@ describe("Source independence", () => {
     // 1. Set up an isolated mock evals repository with case, skill, and validator
     const isolatedRoot = await makeTempDir("isolated-repo-");
     const isolatedEvals = isolatedRoot;
-    const isolatedDocs = join(isolatedEvals, "eval-cases", "arbitrum-docs", "network-config-01");
+    const isolatedDocs = join(isolatedEvals, "eval-cases", "network-config-01");
     // Copy owned source inputs only, never the ignored runs tree being changed by CLI tests.
     await mkdir(isolatedDocs, { recursive: true });
     for (const name of ["case.json", "fixture", "oracle.json", "validator.ts", "validator.test.ts"]) {
-      await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", name), join(isolatedDocs, name), { recursive: true });
+      await cp(join(evalsRoot, "eval-cases", "network-config-01", name), join(isolatedDocs, name), { recursive: true });
     }
     const isolatedSkills = join(isolatedRoot, "src", "test-fixtures", "skills", "mcp-skill");
     await cp(join(repoRoot, "src", "test-fixtures", "skills", "mcp-skill"), isolatedSkills, { recursive: true });

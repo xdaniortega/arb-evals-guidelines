@@ -256,11 +256,11 @@ describe("exact-ID recovery", () => {
   it("discovers historical runs and rejects ambiguous identifiers", async () => {
     const root = await mkdtemp(join(tmpdir(), "eval-recover-layouts-"));
     tempRoots.push(root);
-    await mkdir(join(root, "eval-cases", "skill-a", "new-case", "runs", "new-run"), { recursive: true });
+    await mkdir(join(root, "eval-cases", "new-case", "runs", "new-run"), { recursive: true });
     await mkdir(join(root, "old-case", "runs", "old-run"), { recursive: true });
-    await mkdir(join(root, "eval-cases", "skill-a", "new-case", "runs", "same-run"), { recursive: true });
+    await mkdir(join(root, "eval-cases", "new-case", "runs", "same-run"), { recursive: true });
     await mkdir(join(root, "old-case", "runs", "same-run"), { recursive: true });
-    await expect(findRunDirectory(root, "new-run")).resolves.toBe(join(root, "eval-cases", "skill-a", "new-case", "runs", "new-run"));
+    await expect(findRunDirectory(root, "new-run")).resolves.toBe(join(root, "eval-cases", "new-case", "runs", "new-run"));
     await expect(findRunDirectory(root, "old-run")).resolves.toBe(join(root, "old-case", "runs", "old-run"));
     await expect(findRunDirectory(root, "same-run")).rejects.toThrow(/ambiguous/);
   });

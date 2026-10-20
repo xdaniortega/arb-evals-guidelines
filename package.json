@@ -14,7 +14,7 @@
     "test:evals": "vitest run src",
     "test:eval-sdk": "vitest run src/harnesses/pi/sdk-session.test.ts src/harnesses/pi/supervisor-agent.test.ts",
     "build:eval-guest": "node scripts/build-guest-runtime.mjs",
-    "test:eval-cases": "node --import ./scripts/case-test-resolver.mjs --test \"eval-cases/*/*/validator.test.ts\" \"eval-cases/*/*/oracle-aux.test.ts\" \"eval-cases/*/*/prepare.test.ts\"",
+    "test:eval-cases": "node --import ./scripts/case-test-resolver.mjs --test \"eval-cases/*/validator.test.ts\" \"eval-cases/*/oracle-aux.test.ts\" \"eval-cases/*/prepare.test.ts\"",
     "test:container": "EVAL_CONTAINER_TESTS=1 vitest run --maxWorkers=1 src/sandboxes/apple-container.test.ts src/runner/container-validator.test.ts src/runner/container-paired.test.ts src/sandboxes/laptop-isolation.test.ts",
     "eval": "node --experimental-strip-types scripts/run.ts",
     "eval:validate": "node --experimental-strip-types scripts/validate.ts",

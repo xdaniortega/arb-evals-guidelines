@@ -392,37 +392,29 @@ const LEGACY_SCAN_SKIP: ReadonlySet<string> = new Set([
   "src", "scripts", "container", "cases", "eval-cases", "node_modules", "dist", "docs",
 ]);
 
-/** Directory holding authored cases as `eval-cases/<skill>/<case-id>/`. */
+/** Directory holding authored cases as `eval-cases/<case-id>/`. */
 export const EVAL_CASES_DIR = "eval-cases";
 
 export interface CaseDirectory {
-  readonly skill: string;
   readonly caseId: string;
   readonly dir: string;
 }
 
 /**
- * @notice Lists `eval-cases/<skill>/<case-id>` directories (real directories only, no symlinks).
+ * @notice Lists `eval-cases/<case-id>` directories (real directories only, no symlinks).
  * @param evalsRoot Repository root.
- * @returns Case directories sorted by skill then case id; empty when `eval-cases` is absent.
+ * @returns Case directories sorted by case id; empty when `eval-cases` is absent.
  */
 export async function listCaseDirectories(evalsRoot: string): Promise<readonly CaseDirectory[]> {
   const casesRoot = join(evalsRoot, EVAL_CASES_DIR);
-  const found: CaseDirectory[] = [];
-  if (!(await assertRealDirectory(casesRoot, EVAL_CASES_DIR, { allowMissing: true }))) return found;
-  let skills: readonly string[];
+  if (!(await assertRealDirectory(casesRoot, EVAL_CASES_DIR, { allowMissing: true }))) return [];
+  let caseIds: readonly string[];
   try {
-    skills = await directoryEntries(casesRoot);
+    caseIds = await directoryEntries(casesRoot);
   } catch (cause: unknown) {
     throw new EvalError("input-invalid", `${EVAL_CASES_DIR} is not readable: ${casesRoot}`, { at: EVAL_CASES_DIR, cause });
   }
-  for (const skill of skills) {
-    const skillDir = containedPath(casesRoot, skill, `${EVAL_CASES_DIR}/${skill}`);
-    for (const caseId of await directoryEntries(skillDir)) {
-      found.push({ skill, caseId, dir: containedPath(skillDir, caseId, `${EVAL_CASES_DIR}/${skill}/${caseId}`) });
-    }
-  }
-  return found;
+  return caseIds.map((caseId) => ({ caseId, dir: containedPath(casesRoot, caseId, `${EVAL_CASES_DIR}/${caseId}`) }));
 }
 
 export async function discoverSuites(evalsRoot: string, options?: DecodeConfigOptions): Promise<readonly SuiteRef[]> {
@@ -478,18 +470,18 @@ export async function discoverCases(suite: SuiteRef, options?: DecodeConfigOptio
   return [...found].sort((left, right) => (left.selector < right.selector ? -1 : 1));
 }
 
-/** One authored task per eval-cases/<skill>/<case-id>/case.json; case ids are unique across skills. */
+/** One authored task per eval-cases/<case-id>/case.json; the folder name is the case id. */
 export async function discoverAuthoredCases(evalsRoot: string, options?: DecodeConfigOptions): Promise<readonly CaseRef[]> {
   const cases: CaseRef[] = [];
   const seen = new Map<string, string>();
-  for (const { skill, caseId, dir } of await listCaseDirectories(evalsRoot)) {
+  for (const { caseId, dir } of await listCaseDirectories(evalsRoot)) {
     const configPath = join(dir, "case.json");
     const exists = await lstat(configPath).then(() => true).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return false;
       throw error;
     });
     if (!exists) continue;
-    const at = `${EVAL_CASES_DIR}/${skill}/${caseId}/case.json`;
+    const at = `${EVAL_CASES_DIR}/${caseId}/case.json`;
     const config = decodeFreshCaseConfig(await readJsonFile(configPath, at), at, options);
     if (config.id !== caseId) throw new EvalError("input-invalid", `${at} id must equal its directory name`, { at });
     const previous = seen.get(config.id);

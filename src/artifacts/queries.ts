@@ -2544,7 +2544,7 @@ export interface HistoryEntry {
  */
 export async function listRunHistory(evalsRoot: string): Promise<readonly HistoryEntry[]> {
   const namespaces: { name: string; base: string }[] = (await listCaseDirectories(evalsRoot)).map((entry) => ({
-    name: `${entry.skill}/${entry.caseId}`,
+    name: entry.caseId,
     base: entry.dir,
   }));
   // Historical namespaces: <root>/<namespace>/runs, never inside eval-cases.

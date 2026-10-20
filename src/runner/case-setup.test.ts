@@ -15,10 +15,10 @@ async function makeInputs() {
   const repoRoot = await mkdtemp(join(tmpdir(), "eval-case-setup-"));
   roots.push(repoRoot);
   const evalsRoot = repoRoot;
-  const caseDir = join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01");
+  const caseDir = join(evalsRoot, "eval-cases", "network-config-01");
   await mkdir(caseDir, { recursive: true });
   for (const name of ["case.json", "fixture", "oracle.json", "validator.ts", "validator.test.ts"]) {
-    await cp(resolve("eval-cases/arbitrum-docs/network-config-01", name), join(caseDir, name), { recursive: true });
+    await cp(resolve("eval-cases/network-config-01", name), join(caseDir, name), { recursive: true });
   }
   for (const name of ["first", "second"]) {
     await mkdir(join(repoRoot, "skills", name), { recursive: true });

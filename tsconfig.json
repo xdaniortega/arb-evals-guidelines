@@ -17,11 +17,11 @@
   "include": [
     "src/**/*.ts",
     "scripts/**/*.ts",
-    "eval-cases/*/*/validator*.ts",
-    "eval-cases/*/*/prepare.ts",
-    "eval-cases/*/*/prepare.test.ts",
-    "eval-cases/*/*/oracle-aux.ts",
-    "eval-cases/*/*/oracle-aux.test.ts",
-    "eval-cases/*/*/preparation-fixtures.ts"
+    "eval-cases/*/validator*.ts",
+    "eval-cases/*/prepare.ts",
+    "eval-cases/*/prepare.test.ts",
+    "eval-cases/*/oracle-aux.ts",
+    "eval-cases/*/oracle-aux.test.ts",
+    "eval-cases/*/preparation-fixtures.ts"
   ]
 }

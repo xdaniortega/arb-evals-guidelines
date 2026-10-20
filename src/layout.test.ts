@@ -14,8 +14,10 @@ describe("flat repository layout", () => {
     expect(existsSync(join(repoRoot, "evals"))).toBe(false);
   });
 
-  it("discovers cases under eval-cases/<skill>/<case-id>", async () => {
+  it("discovers cases under eval-cases/<case-id>", async () => {
     const cases = await discoverAuthoredCases(repoRoot);
     expect(cases.map((entry) => entry.selector)).toContain("network-config-01");
+    expect(cases.find((entry) => entry.selector === "network-config-01")?.dir).toBe(join(repoRoot, "eval-cases", "network-config-01"));
+    expect(existsSync(join(repoRoot, "eval-cases", "arbitrum-docs"))).toBe(false);
   });
 });

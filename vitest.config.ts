@@ -7,9 +7,9 @@ export default defineConfig({
     // would collect as zero tests. They run under `pnpm test:eval-cases` instead.
     exclude: [
       ...configDefaults.exclude,
-      'eval-cases/*/*/validator.test.ts',
-      'eval-cases/*/*/oracle-aux.test.ts',
-      'eval-cases/*/*/prepare.test.ts',
+      'eval-cases/*/validator.test.ts',
+      'eval-cases/*/oracle-aux.test.ts',
+      'eval-cases/*/prepare.test.ts',
     ],
     environment: 'node',
     // Much of src is integration-level: it spawns real CLI entry points as

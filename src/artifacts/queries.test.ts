@@ -998,7 +998,7 @@ async function sealCustomRun(options: {
 }): Promise<RunResult> {
   const workDir = await mkdtemp(join(tmpdir(), "eval-query-work-"));
   workDirs.push(workDir);
-  const runsRoot = join(options.runsBaseDir, "eval-cases", "skill-a", options.namespace, "runs");
+  const runsRoot = join(options.runsBaseDir, "eval-cases", options.namespace, "runs");
   return runPairedEvaluation({
     evalsRoot,
     repoRoot,
@@ -1064,13 +1064,13 @@ describe("latest run resolver", () => {
 
     // Alphabetical enumeration visits "alpha-ns" first:
     const history = await listRunHistory(fakeEvalsRoot);
-    expect(history[0]!.namespace).toBe("skill-a/alpha-ns");
+    expect(history[0]!.namespace).toBe("alpha-ns");
     expect(history[0]!.runId).toBe(runA.runId);
 
     // resolveLatestRun MUST pick run B because 12:00:00 > 10:00:00
     const latest1 = await resolveLatestRun(fakeEvalsRoot);
     expect(latest1.runId).toBe(runB.runId);
-    expect(latest1.namespace).toBe("skill-a/zeta-ns");
+    expect(latest1.namespace).toBe("zeta-ns");
 
     // Add Run C in "alpha-ns" created at 14:00:00 (even later)
     const runC = await sealCustomRun({
@@ -1082,7 +1082,7 @@ describe("latest run resolver", () => {
 
     const latest2 = await resolveLatestRun(fakeEvalsRoot);
     expect(latest2.runId).toBe(runC.runId);
-    expect(latest2.namespace).toBe("skill-a/alpha-ns");
+    expect(latest2.namespace).toBe("alpha-ns");
   });
 
   it("rejects an ambiguous newest run retained at canonical and historical paths", async () => {
@@ -1180,7 +1180,7 @@ describe("latest run resolver", () => {
 
     // Newer incomplete run (directory exists with timestamp 12:00:00 but no receipt.json)
     const incompleteRunId = "20260907T120000Z-incomplete";
-    const incompleteRunDir = join(fakeEvalsRoot, "eval-cases", "skill-a", "ns-1", "runs", incompleteRunId);
+    const incompleteRunDir = join(fakeEvalsRoot, "eval-cases", "ns-1", "runs", incompleteRunId);
     await mkdir(incompleteRunDir, { recursive: true });
 
     // resolveLatestRun MUST surface the incomplete run rather than falling back to olderRun
@@ -1303,7 +1303,7 @@ describe("latest run resolver", () => {
   describe("isolated synthetic case CLI execution", () => {
     const nonce = randomBytes(4).toString("hex");
     const syntheticCase = `query-latest-${nonce}`;
-    const syntheticDir = join(evalsRoot, "eval-cases", "arbitrum-docs", syntheticCase);
+    const syntheticDir = join(evalsRoot, "eval-cases", syntheticCase);
     const syntheticStateDir = join(tmpdir(), `eval-latest-state-${nonce}`);
     const cleanupExit = (): void => {
       rmSync(syntheticDir, { recursive: true, force: true });
@@ -1314,10 +1314,10 @@ describe("latest run resolver", () => {
       process.once("exit", cleanupExit);
       try {
         await mkdir(syntheticDir, { recursive: true });
-        await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "fixture"), join(syntheticDir, "fixture"), { recursive: true });
-        await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "oracle.json"), join(syntheticDir, "oracle.json"));
-        await cp(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "validator.ts"), join(syntheticDir, "validator.ts"));
-        const caseConfig = JSON.parse(await readFile(join(evalsRoot, "eval-cases", "arbitrum-docs", "network-config-01", "case.json"), "utf8")) as Record<string, unknown>;
+        await cp(join(evalsRoot, "eval-cases", "network-config-01", "fixture"), join(syntheticDir, "fixture"), { recursive: true });
+        await cp(join(evalsRoot, "eval-cases", "network-config-01", "oracle.json"), join(syntheticDir, "oracle.json"));
+        await cp(join(evalsRoot, "eval-cases", "network-config-01", "validator.ts"), join(syntheticDir, "validator.ts"));
+        const caseConfig = JSON.parse(await readFile(join(evalsRoot, "eval-cases", "network-config-01", "case.json"), "utf8")) as Record<string, unknown>;
         caseConfig.id = syntheticCase;
         await writeFile(join(syntheticDir, "case.json"), JSON.stringify(caseConfig, null, 2), "utf8");
 

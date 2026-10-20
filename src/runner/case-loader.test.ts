@@ -171,14 +171,14 @@ describe("link rejection", () => {
   it("discoverAuthoredCases validates the canonical root", async () => {
     const root = await tempRoot();
     const target = join(root, "target");
-    await mkdir(join(target, "skill-a", "case-a"), { recursive: true });
-    await writeFile(join(target, "skill-a", "case-a", "case.json"), caseJson("case-a"), "utf8");
+    await mkdir(join(target, "case-a"), { recursive: true });
+    await writeFile(join(target, "case-a", "case.json"), caseJson("case-a"), "utf8");
     expect((await discoverAuthoredCases(root)).map((item) => item.config.id)).toEqual([]);
     await rm(join(root, "eval-cases"), { recursive: true, force: true });
     await mkdir(join(root, "eval-cases"), { recursive: true });
-    await writeFile(join(root, "eval-cases", "skill-a", "case-a", "case.json"), caseJson("case-a"), "utf8").catch(async () => {
-      await mkdir(join(root, "eval-cases", "skill-a", "case-a"), { recursive: true });
-      await writeFile(join(root, "eval-cases", "skill-a", "case-a", "case.json"), caseJson("case-a"), "utf8");
+    await writeFile(join(root, "eval-cases", "case-a", "case.json"), caseJson("case-a"), "utf8").catch(async () => {
+      await mkdir(join(root, "eval-cases", "case-a"), { recursive: true });
+      await writeFile(join(root, "eval-cases", "case-a", "case.json"), caseJson("case-a"), "utf8");
     });
     expect((await discoverAuthoredCases(root)).map((item) => item.config.id)).toEqual(["case-a"]);
     if (!(await canSymlink(root))) return;
