@@ -11,7 +11,9 @@ import { describe, expect, it } from "vitest";
 import { EvalError } from "./types.ts";
 import {
   redactSecretBytes,
+  redactSecretPatterns,
   redactSecrets,
+  scanForSecretPatterns,
   scanForSecrets,
   scanManyForSecrets,
   secretNeedles,
@@ -298,5 +300,135 @@ describe("redaction", () => {
     const resultBuf = Buffer.from(result.bytes);
     expect(resultBuf.subarray(0, prefix.length)).toEqual(prefix);
     expect(resultBuf.subarray(resultBuf.length - suffix.length)).toEqual(suffix);
+  });
+});
+
+describe("scanForSecretPatterns", () => {
+  it.each([
+    ["openai-key", "key: sk-abcdef1234567890abcdef123456"],
+    ["openai-key", "key: sk-ant-abcdef1234567890abcdef"],
+    ["aws-access-key-id", "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"],
+    ["aws-access-key-id", "AWS_ACCESS_KEY_ID=ASIAIOSFODNN7EXAMPLE"],
+    ["github-token", "token: ghp_123456789012345678901234567890123456"],
+    ["github-token", "token: gho_123456789012345678901234567890123456"],
+    ["github-token", "token: ghu_123456789012345678901234567890123456"],
+    ["github-token", "token: ghs_123456789012345678901234567890123456"],
+    ["github-token", "token: ghr_123456789012345678901234567890123456"],
+    ["google-api-key", "key: AIzaSyD-1234567890123456789012345678901"],
+    ["slack-token", "token: xoxb-1234567890-abcdefghij"],
+    ["slack-token", "token: xoxp-1234567890-abcdefghij"],
+    ["jwt", "token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"],
+    ["pem-private-key", "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3\n-----END PRIVATE KEY-----"],
+    ["pem-private-key", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0..."],
+    ["bearer-token", "Authorization: Bearer abcdef1234567890abcdef123456"],
+    ["url-credentials", "clone url: https://user:secret-password123@github.com/org/repo.git"],
+    ["url-credentials", "db: postgresql://admin:superSecret456@db.internal:5432/production"],
+  ])("detects positive pattern match for %s", (expectedPattern, content) => {
+    const hits = scanForSecretPatterns({ path: "evidence/output.txt", content });
+    expect(hits.some((hit) => hit.pattern === expectedPattern)).toBe(true);
+    expect(hits.every((hit) => hit.path === "evidence/output.txt")).toBe(true);
+  });
+
+  it("handles binary content via UTF-8 decoding", () => {
+    const binary = Buffer.from("sk-ant-binary12345678901234567890", "utf8");
+    const hits = scanForSecretPatterns({ path: "blob.bin", content: binary });
+    expect(hits.some((hit) => hit.pattern === "openai-key")).toBe(true);
+  });
+
+  it("deduplicates hits returning at most one hit per pattern name per payload", () => {
+    const multiple = "sk-keyone123456789012345678 and sk-keytwo123456789012345678 in same file";
+    const hits = scanForSecretPatterns({ path: "multi.txt", content: multiple });
+    const openaiHits = hits.filter((h) => h.pattern === "openai-key");
+    expect(openaiHits).toHaveLength(1);
+  });
+
+  it("never includes matched secret text in the hit object or JSON serialization", () => {
+    const secretText = "sk-abcdef1234567890abcdef1234567890";
+    const hits = scanForSecretPatterns({ path: "secret.txt", content: `API_KEY=${secretText}` });
+    expect(hits).toHaveLength(1);
+    const hit = hits[0]!;
+    expect(hit.pattern).toBe("openai-key");
+    expect(hit.path).toBe("secret.txt");
+    expect(Object.keys(hit).sort()).toEqual(["path", "pattern"]);
+    expect(JSON.stringify(hit)).not.toContain(secretText);
+  });
+
+  it.each([
+    ["prose mentioning 'sk-' alone", "Let's inspect the sk- key prefix convention for OpenAI-style APIs."],
+    ["prose with short sk- token", "The token sk-short is not a secret."],
+    ["literal word Bearer followed by short word", "The Bearer token authorization header format."],
+    ["markdown code fence", "```typescript\nconst message = 'Hello world';\n```"],
+    ["plain https:// URL with no credentials", "See https://github.com/earendil-works/arbitrum-agent-skills for details."],
+    ["plain http:// URL with port and path", "http://localhost:8080/api/v1/health"],
+    ["base64 blob that is not a JWT", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"],
+    ["general reasoning prose mentioning AKIA or ASIA", "We should ensure AWS credentials like AKIA or ASIA prefixes are checked."],
+    ["short github token", "ghp_shorttoken123"],
+    ["short google api key", "AIzaShort"],
+    ["short slack token", "xoxb-short"],
+    ["clean text with code snippets", "function authenticate(req: Request) {\n  const auth = req.headers.get('authorization');\n  return auth;\n}"],
+  ])("rejects false positives on realistic text: %s", (_description, content) => {
+    const hits = scanForSecretPatterns({ path: "reasoning.md", content });
+    expect(hits).toEqual([]);
+  });
+});
+
+describe("redactSecretPatterns", () => {
+  it("redacts JWT, bearer token, and sk- keys with pattern placeholders without exposing matched text", () => {
+    const text = [
+      "Authorization: Bearer mySecretToken1234567890abcdef",
+      "API_KEY=sk-testSecretKey1234567890abcdef",
+      "token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    ].join("\n");
+
+    const result = redactSecretPatterns(text, "test.md");
+    expect(result.count).toBe(3);
+    expect(result.text).toContain("[REDACTED:bearer-token]");
+    expect(result.text).toContain("[REDACTED:openai-key]");
+    expect(result.text).toContain("[REDACTED:jwt]");
+    expect(result.text).not.toContain("mySecretToken1234567890abcdef");
+    expect(result.text).not.toContain("sk-testSecretKey1234567890abcdef");
+    expect(result.text).not.toContain("eyJhbGciOiJIUzI1Ni");
+
+    expect(result.redactions).toEqual([
+      { path: "test.md", label: "openai-key", encoding: "raw", count: 1 },
+      { path: "test.md", label: "jwt", encoding: "raw", count: 1 },
+      { path: "test.md", label: "bearer-token", encoding: "raw", count: 1 },
+    ]);
+  });
+
+  it("redacts multiple occurrences of the same pattern and counts them", () => {
+    const text = "first: sk-111111111122222222223333333333, second: sk-444444444455555555556666666666";
+    const result = redactSecretPatterns(text, "doc.txt");
+    expect(result.count).toBe(2);
+    expect(result.redactions).toEqual([
+      { path: "doc.txt", label: "openai-key", encoding: "raw", count: 2 },
+    ]);
+    expect(result.text).toBe("first: [REDACTED:openai-key], second: [REDACTED:openai-key]");
+  });
+
+  it("sanitizes realistic documentation snippets containing placeholder bearer tokens and canonical jwt.io tokens without throwing", () => {
+    const docSnippet = [
+      "# API Documentation",
+      "To authenticate, send the header:",
+      "Authorization: Bearer YOUR_API_KEY_HERE_REPLACE_ME",
+      "",
+      "Example decoded JWT:",
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    ].join("\n");
+
+    const result = redactSecretPatterns(docSnippet, "arbitrum-docs.md");
+    expect(result.count).toBe(2);
+    expect(result.text).toContain("[REDACTED:bearer-token]");
+    expect(result.text).toContain("[REDACTED:jwt]");
+    expect(result.text).not.toContain("YOUR_API_KEY_HERE_REPLACE_ME");
+    expect(result.text).not.toContain("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+  });
+
+  it("leaves clean text untouched", () => {
+    const clean = "This is clean text with no secrets.\nconst x = 42;";
+    const result = redactSecretPatterns(clean);
+    expect(result.text).toBe(clean);
+    expect(result.count).toBe(0);
+    expect(result.redactions).toEqual([]);
   });
 });

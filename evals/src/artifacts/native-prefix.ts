@@ -224,6 +224,7 @@ export function readNativeSessionPrefix(path: string): NativePrefixSnapshot {
 export function createNativeSessionCapture(options: {
   readonly path: string;
   readonly guardedSecrets?: readonly GuardedSecret[];
+  readonly captureReasoning?: boolean;
 }): NativeSessionCapture {
   mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 });
   let fd: number;
@@ -320,7 +321,9 @@ export function createNativeSessionCapture(options: {
               !Number.isSafeInteger(item?.count) || item.count <= 0)) {
           throw evidenceInvalid("native prefix record has invalid guest redaction provenance", options.path);
         }
-        const sanitized = sanitizeNativeSessionEntries([entry], secrets);
+        const sanitized = sanitizeNativeSessionEntries([entry], secrets, {
+          captureReasoning: options.captureReasoning,
+        });
         validateNativeRecord(sanitized.entries[0], "native prefix record", capturedEntries);
         const envelope: RecordEnvelope = {
           schemaVersion: EVIDENCE_SCHEMA_VERSION,

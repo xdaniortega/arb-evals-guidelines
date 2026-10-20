@@ -61,6 +61,7 @@ type InitFrame = {
   armWallClockMs: number | null;
   limits: Pick<Limits, "maxProviderRequests" | "maxToolSteps" | "maxOutputTokens">;
   credentialVariable: "GEMINI_API_KEY" | "ANTHROPIC_API_KEY";
+  captureReasoning?: boolean;
   scriptedSteps?: ScriptedStep[];
 };
 
@@ -124,7 +125,7 @@ function parseSteps(value: unknown): ScriptedStep[] {
  * @returns A validated frame with canonical nullable task budgets.
  */
 export function parseInit(value: Record<string, unknown>): InitFrame {
-  knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "ambientTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
+  knownFields(value, ["type", "protocolVersion", "mode", "arm", "target", "skillPath", "allowedTools", "ambientTools", "processLifetimeMs", "armWallClockMs", "limits", "credentialVariable", "captureReasoning", "scriptedSteps", "skillToolBundle", "skillToolBundleSha256"], "init");
   if (value.protocolVersion !== PROTOCOL_VERSION) throw new Error("unsupported guest agent protocolVersion");
   if (value.mode !== "measured" && value.mode !== "scripted") throw new Error("init.mode must be measured or scripted");
   if (value.arm !== "baseline" && value.arm !== "treatment") throw new Error("init.arm must be baseline or treatment");
@@ -222,6 +223,7 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
   }
   const expectedVariable = target.provider === "google" ? "GEMINI_API_KEY" : target.provider === "anthropic" ? "ANTHROPIC_API_KEY" : null;
   if (expectedVariable === null || value.credentialVariable !== expectedVariable) throw new Error("credential variable does not match the selected provider");
+  if (value.captureReasoning !== undefined && typeof value.captureReasoning !== "boolean") throw new Error("init.captureReasoning must be a boolean");
   if (value.mode === "measured" && value.scriptedSteps !== undefined) throw new Error("measured init must not carry scriptedSteps");
   if (value.mode === "scripted" && value.scriptedSteps === undefined) throw new Error("scripted init requires scriptedSteps JSON data");
   return {
@@ -239,6 +241,7 @@ export function parseInit(value: Record<string, unknown>): InitFrame {
     armWallClockMs: value.armWallClockMs as number | null,
     limits: value.limits as InitFrame["limits"],
     credentialVariable: value.credentialVariable as InitFrame["credentialVariable"],
+    ...(value.captureReasoning !== undefined ? { captureReasoning: value.captureReasoning as boolean } : {}),
     ...(value.mode === "scripted" ? { scriptedSteps: parseSteps(value.scriptedSteps) } : {}),
   };
 }
@@ -414,7 +417,11 @@ export async function runGuestAgent(options: { controlSocket: string }): Promise
     }
     await registerTaskProcess(options.controlSocket);
     const capturePath = join(tmpdir(), `pi-eval-native-${process.pid}.jsonl`);
-    capture = createNativeSessionCapture({ path: capturePath, guardedSecrets: secrets });
+    capture = createNativeSessionCapture({
+      path: capturePath,
+      guardedSecrets: secrets,
+      captureReasoning: init.captureReasoning,
+    });
     const recorder = {
       record(entry: Parameters<NativeSessionCapture["record"]>[0]): void {
         capture!.record(entry);

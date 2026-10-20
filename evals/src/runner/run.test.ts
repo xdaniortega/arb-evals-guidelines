@@ -14,7 +14,7 @@
  * left in the repository.
  */
 
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,6 +118,20 @@ interface Harnessed {
   readonly result: RunResult;
   readonly runDir: string;
   readonly stateDir: string;
+}
+
+async function createTempEvalsRootWithRubric(rubric: unknown): Promise<string> {
+  const tempEvals = await mkdtemp(join(tmpdir(), "eval-rubric-evals-"));
+  tempRoots.push(tempEvals);
+  const targetCaseDir = join(tempEvals, "cases", "network-config-01");
+  await mkdir(join(tempEvals, "cases"), { recursive: true });
+  await cp(join(evalsRoot, "cases", "network-config-01"), targetCaseDir, { recursive: true });
+  // Symlink (not recursive-copy) the large container dir: it is only used as a faked
+  // image-build contextDir under the fake sandbox, and a per-test recursive copy of it
+  // races/times out under full-suite parallelism. A symlink is atomic and instant.
+  await symlink(join(evalsRoot, "container"), join(tempEvals, "container"));
+  await writeFile(join(targetCaseDir, "rubric.json"), JSON.stringify(rubric, null, 2), "utf8");
+  return tempEvals;
 }
 
 async function runFake(
@@ -318,7 +332,7 @@ describe("parity", () => {
     }
     // Case identity and policy, skill snapshot, and tool bundle hashes must be populated.
     expect(left.caseId).toBe("network-config-01");
-    expect(left.caseVersion).toBe(7);
+    expect(left.caseVersion).toBe(9);
     expect(String(left.executionPolicySha256)).toMatch(/^[0-9a-f]{64}$/);
     expect(String(left.skillSnapshotTreeSha256)).toMatch(/^[0-9a-f]{64}$/);
     expect(String(left.skillToolBundleSha256)).toMatch(/^[0-9a-f]{64}$/);
@@ -466,11 +480,23 @@ describe("delta validity", () => {
     expect(typeof pair.delta).toBe("number");
   });
   it("preserves full pass and paired comparison when a task-limit output satisfies the rubric", async () => {
+    const passingChecks = [
+      "production-chain-identity", "staging-chain-identity",
+      "production-legacy-fallback", "staging-legacy-fallback",
+      "production-rpc-endpoints", "staging-rpc-endpoints",
+      "production-sequencer-policy", "staging-sequencer-policy",
+      "production-token-identity", "staging-token-identity",
+      "production-bridge-addresses", "staging-bridge-addresses",
+      "production-bridge-onboarding", "staging-bridge-onboarding",
+      "production-finality-policy", "staging-finality-policy",
+      "json-shape", "preservation",
+    ].map((id) => ({ id, passed: true, message: "correct" }));
+
     const validatorRunner: ValidatorRunner = {
       id: "passing-validator", testDouble: true,
       async run() {
         return { runnerId: this.id, testDouble: true, durationMs: 1, failure: null,
-          outcome: { status: "graded", score: 1, fullPass: true, checks: [{ id: "task", passed: true, message: "correct" }] } };
+          outcome: { status: "graded", score: 1, fullPass: true, checks: passingChecks } };
       },
     };
     const { result, runDir } = await runFake({
@@ -485,6 +511,176 @@ describe("delta validity", () => {
     }
     const pair = await readRecord(runDir, `pairs/${result.runId}-r001/pair.json`);
     expect(pair).toMatchObject({ gradeable: true, delta: 0 });
+  });
+
+  it("grades a task-limit arm under the frozen rubric and shows it in the accuracy and outcome checks tables", async () => {
+    const ids = [
+      "production-chain-identity", "staging-chain-identity",
+      "production-legacy-fallback", "staging-legacy-fallback",
+      "production-rpc-endpoints", "staging-rpc-endpoints",
+      "production-sequencer-policy", "staging-sequencer-policy",
+      "production-token-identity", "staging-token-identity",
+      "production-bridge-addresses", "staging-bridge-addresses",
+      "production-bridge-onboarding", "staging-bridge-onboarding",
+      "production-finality-policy", "staging-finality-policy",
+      "json-shape", "preservation",
+    ];
+    // Baseline hits a task limit with only the legacy fallback + constraints correct (30/100).
+    const validatorRunner: ValidatorRunner = {
+      id: "task-limit-validator", testDouble: true,
+      async run(request) {
+        const text = Object.values(request.input.candidateFiles).map((b64) => Buffer.from(b64, "base64").toString("utf8")).join("");
+        const baseline = !text.includes("treatment");
+        const passed = (id: string): boolean =>
+          !baseline || id.includes("legacy-fallback") || id === "json-shape" || id === "preservation";
+        return { runnerId: this.id, testDouble: true, durationMs: 1, failure: null,
+          outcome: { status: "graded", score: 0, fullPass: false, checks: ids.map((id) => ({ id, passed: passed(id), message: "" })) } };
+      },
+    };
+    const { result, runDir } = await runFake({
+      script: (request) => request.conditionId === "baseline"
+        ? { outcome: "task-limit", assistantText: "baseline", writes: [{ path: "config.json", text: "{\"arm\":\"baseline\"}" }] }
+        : { outcome: "completed", assistantText: "treatment", writes: [{ path: "config.json", text: "{\"arm\":\"treatment\"}" }] },
+      validatorRunner,
+    });
+    const validation = await readRecord(runDir, `${conditionDir(result.runId, "baseline")}/validation.json`);
+    expect((validation.outcome as { rubricScore: { accuracyTotal: number } }).rubricScore.accuracyTotal).toBe(30);
+
+    const report = await buildRunReport(join(runDir, "receipt.json"));
+    const baseline = report.pairs[0]!.conditions.find((c) => c.conditionId === "baseline")!;
+    expect(baseline.status).toBe("task-limit");
+    expect(baseline.rubricScore?.groups.outcome.got).toBe(10);
+    expect(report.scored?.statusLine).toBe("Without this skill: task limit reached, graded · With this skill: completed, graded");
+    expect(report.scored?.accuracyTable.rows[0]?.baseline).toBe("10/80 — 13%");
+    expect(report.scored?.accuracyTable.totalRow.baseline).toBe("**30/100 — 30%**");
+    const fallbackRow = report.scored?.checksTable?.rows.find((row) => row.id === "legacy-fallback");
+    expect(fallbackRow).toMatchObject({ baseline: "10/10", treatment: "10/10" });
+    expect(formatRunReport(report, { format: "markdown", checks: true })).toContain("| Legacy RPC fallback configuration | 10/10 | 10/10 |");
+  });
+
+  it("seals authoritative rubric score, rubricVersion and rubric.json in inputs when a rubric is frozen", async () => {
+    const testRubric = {
+      rubricVersion: "v0.2",
+      topics: [
+        { id: "main-topic", label: "Main topic", points: 80 },
+        { id: "rules-topic", label: "Rules topic", points: 20 },
+      ],
+      checks: [
+        { id: "task-check-1", group: "outcome", topic: "main-topic", points: 80 },
+        { id: "task-check-2", group: "constraints", topic: "rules-topic", points: 20 },
+      ],
+    };
+
+    const tempEvals = await createTempEvalsRootWithRubric(testRubric);
+
+    // Validator returns task-check-1 passed, task-check-2 failed => raw score = 1/2 = 0.5
+    // Rubric score: outcome 80/80 + constraints 0/20 = 80/100 = 0.8
+    const validatorRunner: ValidatorRunner = {
+      id: "rubric-seal-validator",
+      testDouble: true,
+      async run() {
+        return {
+          runnerId: this.id,
+          testDouble: true,
+          durationMs: 1,
+          failure: null,
+          outcome: {
+            status: "graded",
+            score: 0.5,
+            fullPass: false,
+            checks: [
+              { id: "task-check-1", passed: true, message: "ok" },
+              { id: "task-check-2", passed: false, message: "failed" },
+            ],
+          },
+        };
+      },
+    };
+
+    const { result, runDir } = await runFake({ evalsRoot: tempEvals, validatorRunner });
+    expect(result.status).toBe("complete");
+
+    // inputs/rubric.json and inputs/frozen/case/rubric.json must exist
+    const rubricInput = await readRecord(runDir, "inputs/rubric.json");
+    expect(rubricInput.rubricVersion).toBe("v0.2");
+    const frozenRubric = await readRecord(runDir, "inputs/frozen/case/rubric.json");
+    expect(frozenRubric.rubricVersion).toBe("v0.2");
+
+    // Validation.json has authoritative rubric score overwritten: 0.8 instead of 0.5
+    const treatmentValidation = await readRecord(
+      runDir,
+      `${conditionDir(result.runId, "treatment")}/validation.json`,
+    );
+    expect((treatmentValidation.outcome as any).score).toBe(0.8);
+    expect((treatmentValidation.outcome as any).fullPass).toBe(false);
+    expect((treatmentValidation.outcome as any).rubricScore).toBeDefined();
+    expect((treatmentValidation.outcome as any).rubricScore.accuracyTotal).toBe(80);
+    expect((treatmentValidation.outcome as any).rubricScore.groups.outcome.got).toBe(80);
+    expect((treatmentValidation.outcome as any).rubricScore.groups.constraints.got).toBe(0);
+
+    // Receipt and pair records have rubricVersion: "v0.2"
+    const receipt = await readRecord(runDir, "receipt.json");
+    expect(receipt.rubricVersion).toBe("v0.2");
+    const pair = await readRecord(runDir, `pairs/${result.runId}-r001/pair.json`);
+    expect(pair.rubricVersion).toBe("v0.2");
+
+    // Whole evidence directory verifies byte for byte
+    const verification = await verifyRun(runDir);
+    expect(verification.ok).toBe(true);
+    expect(verification.failures).toEqual([]);
+  });
+
+  it("converts unknown check IDs returned by validator to infrastructure-failure when rubric is frozen", async () => {
+    const testRubric = {
+      rubricVersion: "v0.2",
+      checks: [
+        { id: "task-check-1", group: "outcome", points: 80 },
+        { id: "task-check-2", group: "constraints", points: 20 },
+      ],
+    };
+
+    const tempEvals = await createTempEvalsRootWithRubric(testRubric);
+
+    const validatorRunner: ValidatorRunner = {
+      id: "rubric-mismatch-validator",
+      testDouble: true,
+      async run() {
+        return {
+          runnerId: this.id,
+          testDouble: true,
+          durationMs: 1,
+          failure: null,
+          outcome: {
+            status: "graded",
+            score: 1,
+            fullPass: true,
+            checks: [
+              { id: "unexpected-check-id", passed: true, message: "bogus" },
+            ],
+          },
+        };
+      },
+    };
+
+    const { result, runDir } = await runFake({ evalsRoot: tempEvals, validatorRunner });
+    expect(result.status).toBe("partial");
+    expect(result.stopReason).toContain("rubric scoring failed");
+
+    // Baseline should have infrastructure-failure outcome with null score
+    const baselineValidation = await readRecord(
+      runDir,
+      `${conditionDir(result.runId, "baseline")}/validation.json`,
+    );
+    expect(baselineValidation.outcome).toBeNull(); // ungradeable arm has outcome null in validation.json
+    const baselineCondition = await readRecord(
+      runDir,
+      `${conditionDir(result.runId, "baseline")}/condition.json`,
+    );
+    expect(baselineCondition.status).toBe("infrastructure-failure");
+    expect(baselineCondition.gradeable).toBe(false);
+
+    const verification = await verifyRun(runDir);
+    expect(verification.ok).toBe(true);
   });
 
 });
@@ -842,6 +1038,15 @@ describe("interruption", () => {
     const verification = await verifyRun(runDir);
     expect(verification.failures).toEqual([]);
     expect(verification.ok).toBe(true);
+
+    // The interrupted arm is reported as ungraded: every accuracy cell is n/a, never zero.
+    const report = await buildRunReport(join(runDir, "receipt.json"));
+    expect(report.scored?.statusLine).toBe(
+      "Without this skill: interrupted, grading unavailable \u00b7 With this skill: not started, grading unavailable",
+    );
+    expect(report.scored?.pillars.accuracy.baseline).toBe("n/a");
+    for (const row of report.scored?.accuracyTable.rows ?? []) expect(row.baseline).toBe("n/a");
+    expect(report.scored?.accuracyTable.totalRow.baseline).toBe("**n/a**");
   });
 });
 
@@ -1295,8 +1500,20 @@ describe("validator infrastructure normalization", () => {
           });
         }
         expect(request.signal?.aborted).toBe(false);
+        const passingChecks = [
+          "production-chain-identity", "staging-chain-identity",
+          "production-legacy-fallback", "staging-legacy-fallback",
+          "production-rpc-endpoints", "staging-rpc-endpoints",
+          "production-sequencer-policy", "staging-sequencer-policy",
+          "production-token-identity", "staging-token-identity",
+          "production-bridge-addresses", "staging-bridge-addresses",
+          "production-bridge-onboarding", "staging-bridge-onboarding",
+          "production-finality-policy", "staging-finality-policy",
+          "json-shape", "preservation",
+        ].map((id) => ({ id, passed: true, message: "correct" }));
+
         return { runnerId: this.id, testDouble: true, durationMs: 1, failure: null,
-          outcome: { status: "graded", score: 1, fullPass: true, checks: [{ id: "task", passed: true, message: "correct" }] } };
+          outcome: { status: "graded", score: 1, fullPass: true, checks: passingChecks } };
       },
     };
     const { result, runDir } = await runFake({ validatorRunner, operationAllowanceMs: 800 });

@@ -39,21 +39,21 @@
         ".dockerignore": "sha256:dd7a604bf07eb2eccbd3bbf550c540b77ba70b62629ed22298fe74ceddfe5eb7",
         "configure-egress.sh": "sha256:0a2bb7a175f62fbf7fb8318dd26c6afe4ceffc2592d81989db95c50d916e6c9b",
         "run-measured.mjs": "sha256:ce6b837aa0cf6ab30810c5f7c3cc53f23a9f9cb75ea7fe58f97dcda4e423cf75",
-        "guest-runtime/artifact-lock.json": "sha256:2c4b3fbcca9c5f726f1a819af423326ede68f26901d9d9d3d7fa02987c78c50a",
+        "guest-runtime/artifact-lock.json": "sha256:9f1b9aa7a802dc40dfecd988860f50919dfa14b606fb9f628f8b2fe1b1cc0e0d",
         "guest-runtime/src/core/types.mjs": "sha256:7c186a8046eacc6fceb64e7904105e10ac990837c295c0a8a5a1a676b02f1988",
         "guest-runtime/src/core/timing.mjs": "sha256:75061b5d3b14718ba0eafd905586e8cf8359f8b6cc1e1bcd6678b02b2770d805",
         "guest-runtime/src/core/experiment.mjs": "sha256:49e1643f58369930ed423c5b0501324f3a0d27322f96decbd98dba2455b08683",
-        "guest-runtime/src/core/secret-scan.mjs": "sha256:ad84bddf0f714fc640a6d064fe3713820a54eb361e4493aff392b9f6de87b4ea",
+        "guest-runtime/src/core/secret-scan.mjs": "sha256:950e2dc60308f2807e900d07297a16301d182099772f63c94a1e508b03f1c721",
         "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
         "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
-        "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:296c54b210a13340d7335290dd4d7a016356102e55545c328aaa36ddb1582096",
-        "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:b14e208bfffa310e6bbe913a74d4e275ef38d40f5f2dd459e93f65bb671514ef",
+        "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:d060337a355a105d9ddee21887ffa715c78d75837c42c3404ac56159605f67f0",
+        "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:daead10fb84a4fad22dca6bf800a68890ea2576026657b41b3a9df10168df36d",
         "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:cf1639a26b2079c8932200298b79efad93641c27c41cb111c6bbdf9dc54f855d",
         "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:f38d2087416398d9046d1d1b7dccc9ffe8423f44c55377513ca8d2dd5f7589ec",
         "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:bf59dccbe72174031e28386a2ecd235f27f0c8298333db55569737f50fb4cf12",
         "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
         "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:3283b699e2a5e42c5149b3ee792450fcb5804cbba980d9877a7b4ff26a83ab40",
-        "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:a683c4c6d70afd215044aede67903f387909bd8addec85578eb0f6d2df9c48bc"
+        "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:6bcd891135c41997a85cf48b7251b863dcf6ed24ca329e4ba301498e1515604a"
       },
       "guestPaths": {
         "entrypoint": "/opt/eval/configure-egress.sh",
@@ -68,36 +68,36 @@
           "version": "5.9.3"
         },
         "sources": {
-          "evals/src/core/types.ts": "sha256:a4469b742e7dbd64743e25898024f87f99d4944ff70bc95e43ad6d054d9a38f1",
+          "evals/src/core/types.ts": "sha256:169edf711d628f9b74c7bf9394d512f84cb8b4bce4d4a83c591960e8c85e7849",
           "evals/src/core/timing.ts": "sha256:3e21cbf113930c680f891ee658b89fc027f243c17205ea0f68e2d7d059943ff1",
           "evals/src/core/experiment.ts": "sha256:aa8527cda31ae9159e48b1f7ecfadab78c19c90e19030edb4d8ce46f5c1de694",
-          "evals/src/core/secret-scan.ts": "sha256:c7fc684fad1821b574d668f9ea9b960027a9057a366d89c25d39de11ae8daaf5",
+          "evals/src/core/secret-scan.ts": "sha256:d013f50c254ea1c968ab79be2d0e204cc89b34e3ddad0e91d3f8c40856e852bd",
           "evals/src/transport-blocker.ts": "sha256:c2d69fec78cf18115a1c1494a9b1f654102c52538d5e3836475094df747257e6",
           "evals/src/runner/models.ts": "sha256:c2ea4b9729a8160e33fbf714be98bf655c2ad445cd40f76cb5a5d0f222b9d8dd",
-          "evals/src/artifacts/native-prefix.ts": "sha256:bc0242956a581c86babdcb95ed8be55f82d4d719125a81b3f9d3388067121244",
-          "evals/src/harnesses/pi/export-viewer.ts": "sha256:e00ae0ce5a1513958acf27c50429a71e256d60cb5970df755fa311fc95b6dd14",
+          "evals/src/artifacts/native-prefix.ts": "sha256:f4e5f846c4d43f7f8a008e726f2300a54042d799559535a4347be920262a46b0",
+          "evals/src/harnesses/pi/export-viewer.ts": "sha256:1c969ae1227598f2c05fba1926e1839f73b1f891060dfcf2f55711914a81dbcc",
           "evals/src/harnesses/pi/scripted-stream.ts": "sha256:bc88665085ec7720000de6ada4c338fce127aecd21f598430f88c60a199f825d",
           "evals/src/harnesses/pi/ambient-tools.ts": "sha256:7e95e21baaa893a184a7ad024eddea2ab6f0a3675b74edf217eed2e05ab0219b",
           "evals/src/harnesses/pi/mcp-http-client.ts": "sha256:1df95f0a5312c39d733ba8cdf8fc53c7257cc78530b3da83bd15e91b83629f41",
           "evals/src/harnesses/pi/mcp-tools.ts": "sha256:8fb611b4f324cf5ecce4e0a30bbe885454e454c9c5b9041078d56ec5aa36b10e",
           "evals/src/harnesses/pi/sdk-session.ts": "sha256:05ee4e075fe435ca518b9fde02f8e8ae91be80b74bc4e3b5e0073f0efc24fdb9",
-          "evals/src/harnesses/pi/guest-agent.ts": "sha256:370c4cf2f3a25a240bba89cb7dab92c1959c9b8376947194c47c6fa8b62f9a8f"
+          "evals/src/harnesses/pi/guest-agent.ts": "sha256:da10343066b8ca9c3695ffa2b9f414ea2e8ed1ee601473c4adf39595da58fd23"
         },
         "artifacts": {
           "guest-runtime/src/core/types.mjs": "sha256:7c186a8046eacc6fceb64e7904105e10ac990837c295c0a8a5a1a676b02f1988",
           "guest-runtime/src/core/timing.mjs": "sha256:75061b5d3b14718ba0eafd905586e8cf8359f8b6cc1e1bcd6678b02b2770d805",
           "guest-runtime/src/core/experiment.mjs": "sha256:49e1643f58369930ed423c5b0501324f3a0d27322f96decbd98dba2455b08683",
-          "guest-runtime/src/core/secret-scan.mjs": "sha256:ad84bddf0f714fc640a6d064fe3713820a54eb361e4493aff392b9f6de87b4ea",
+          "guest-runtime/src/core/secret-scan.mjs": "sha256:950e2dc60308f2807e900d07297a16301d182099772f63c94a1e508b03f1c721",
           "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
           "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
-          "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:296c54b210a13340d7335290dd4d7a016356102e55545c328aaa36ddb1582096",
-          "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:b14e208bfffa310e6bbe913a74d4e275ef38d40f5f2dd459e93f65bb671514ef",
+          "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:d060337a355a105d9ddee21887ffa715c78d75837c42c3404ac56159605f67f0",
+          "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:daead10fb84a4fad22dca6bf800a68890ea2576026657b41b3a9df10168df36d",
           "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:cf1639a26b2079c8932200298b79efad93641c27c41cb111c6bbdf9dc54f855d",
           "guest-runtime/src/harnesses/pi/ambient-tools.mjs": "sha256:f38d2087416398d9046d1d1b7dccc9ffe8423f44c55377513ca8d2dd5f7589ec",
           "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:bf59dccbe72174031e28386a2ecd235f27f0c8298333db55569737f50fb4cf12",
           "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
           "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:3283b699e2a5e42c5149b3ee792450fcb5804cbba980d9877a7b4ff26a83ab40",
-          "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:a683c4c6d70afd215044aede67903f387909bd8addec85578eb0f6d2df9c48bc"
+          "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:6bcd891135c41997a85cf48b7251b863dcf6ed24ca329e4ba301498e1515604a"
         }
       }
     }

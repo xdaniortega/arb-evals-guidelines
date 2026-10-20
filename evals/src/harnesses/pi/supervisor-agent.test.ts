@@ -104,7 +104,7 @@ async function fixture(
   return { child, dir, frames, send, waitFor, exit, secret, get stdout() { return stdout; }, get stderr() { return stderr; } };
 }
 
-function initFrame(steps: readonly unknown[]) {
+function initFrame(steps: readonly unknown[], options: { captureReasoning?: boolean } = {}) {
   return {
     type: "init",
     protocolVersion: 1,
@@ -120,6 +120,7 @@ function initFrame(steps: readonly unknown[]) {
     armWallClockMs: 10_000,
     limits,
     credentialVariable: "GEMINI_API_KEY",
+    ...(options.captureReasoning !== undefined ? { captureReasoning: options.captureReasoning } : {}),
     scriptedSteps: steps,
   };
 }
@@ -315,20 +316,37 @@ describe("framed guest SDK process", () => {
     expect(fx.stderr).not.toContain(fx.secret);
   });
 
-  it("redacts a synthetic credential canary and strips raw thinking/signatures from every output frame", async () => {
+  it("redacts a synthetic credential canary while preserving raw thinking/signatures in every output frame when captureReasoning is enabled", async () => {
     const fx = await fixture();
-    fx.send(initFrame([{ type: "thinking", thinking: `private ${fx.secret}`, signature: `sig-${fx.secret}`, text: `public ${fx.secret}` }]));
+    fx.send(initFrame([{ type: "thinking", thinking: `private ${fx.secret}`, signature: `sig-${fx.secret}`, text: `public ${fx.secret}` }], { captureReasoning: true }));
     await fx.waitFor("ready");
     fx.send({ type: "prompt", prompt: "respond" });
     fx.child.stdin.end();
     const result = await fx.waitFor("result");
     expect(await fx.exit).toBe(0);
+    // The secret is redacted everywhere it appears, including inside reasoning.
     expect(fx.stdout).not.toContain(fx.secret);
-    expect(fx.stdout).not.toContain("private ");
-    expect(fx.stdout).not.toContain("sig-");
     expect(fx.stdout).toContain("[REDACTED:GEMINI_API_KEY]");
+    // When captureReasoning is true, reasoning and its signature survive redaction verbatim,
+    // with only the secret portion replaced.
+    expect(fx.stdout).toContain("private [REDACTED:GEMINI_API_KEY]");
+    expect(fx.stdout).toContain("sig-[REDACTED:GEMINI_API_KEY]");
     expect(result.redactions.count).toBeGreaterThan(0);
     expect(fx.stderr).toBe("");
+  });
+
+  it("strips thinking blocks and signatures by default from guest output frames", async () => {
+    const fx = await fixture();
+    fx.send(initFrame([{ type: "thinking", thinking: "internal reasoning", signature: "sig-xyz", text: "public answer" }]));
+    await fx.waitFor("ready");
+    fx.send({ type: "prompt", prompt: "respond" });
+    fx.child.stdin.end();
+    const result = await fx.waitFor("result");
+    expect(await fx.exit).toBe(0);
+    expect(fx.stdout).toContain("public answer");
+    expect(fx.stdout).not.toContain("internal reasoning");
+    expect(fx.stdout).not.toContain("sig-xyz");
+    expect(result.outcome).toBe("completed");
   });
 
   it("aborts an actual SDK bash tool and reports success only after streaming stopped", async () => {

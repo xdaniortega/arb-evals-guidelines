@@ -119,6 +119,11 @@ export async function createFrozenInputSnapshot(input: {
     await writeSnapshotFile("provenance.json", provBytes);
   }
 
+  // 9. Rubric, if present
+  if (frozen.rubricBytes !== undefined) {
+    await writeSnapshotFile("case/rubric.json", frozen.rubricBytes);
+  }
+
   // Build manifest tree and write manifest.json
   const manifest = buildManifestTree(entries);
   const manifestBytes = Buffer.from(

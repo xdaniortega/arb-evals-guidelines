@@ -439,6 +439,27 @@ export type CasePreparer = (context: {
 }) => Promise<PreparedCaseData>;
 
 // ---------------------------------------------------------------------------
+// Native session evidence record
+// ---------------------------------------------------------------------------
+
+export interface NativeSessionRecord {
+  readonly schemaVersion: number;
+  readonly conditionId: ConditionId;
+  readonly available: boolean;
+  readonly completed: boolean;
+  readonly tailStatus: string;
+  readonly incompleteTail: boolean;
+  readonly incompleteReason: string | null;
+  readonly reasoningCaptured?: boolean;
+  readonly entries: readonly unknown[];
+  readonly entryCount: number;
+  readonly redactions: {
+    readonly count: number;
+    readonly locations: readonly string[];
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Validator contract (owner-authored case validators implement this)
 // ---------------------------------------------------------------------------
 

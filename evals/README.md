@@ -1,317 +1,295 @@
-# Skill Evaluations — Operator Guide
+# Arbitrum Skills Evaluation Framework
 
-Developer-only paired-evaluation harness for agent skills. This subsystem is not part of the published `arb` CLI, MCP server, or npm package. Nothing here ships, and no published command, export, or dependency exists to serve it.
+Does a skill help an agent do a task better? This framework compares the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
 
-## 1. Quick start
+Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
 
-The fastest path to running an evaluation:
+## Requirements
 
-### Measured run
-Requires Apple-silicon macOS with Apple Container running, live provider/MCP access, and an API key in `evals/.env` ([template](.env.example)):
+For a measured evaluation, you need:
+
+- **Apple-silicon macOS**, with Apple Container installed and running. Check with `container system status`.
+- **Node.js 24.21.0**, the selected evaluation baseline, and **pnpm 10.33.2**.
+- This repository and its dependencies, installed with `pnpm install --frozen-lockfile`.
+- An API key for the selected provider in the git-ignored `evals/.env` file: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
+- Internet access for the initial container build, model requests and any documentation tools declared by the skill.
+
+## 1. What is an eval?
+
+An evaluation, or **eval**, is a task with a defined way to judge the answer. Here, each comparison runs that task twice:
+
+1. **Baseline:** the agent has no evaluated skill available.
+2. **Treatment:** the same agent has a frozen, unchanged copy of the selected skill available.
+
+Each attempt is called an **arm**. A baseline and treatment together form a **pair**. One command invocation is a **run**, which can contain one or several pairs.
+
+The agent receives a prompt and starting files, does the task, and leaves its answer in the workspace. A **validator** then checks that answer against expected results and assigns a score. An **oracle** is the case's reference data: the expected answers and their sources. It stays hidden from the agent.
+
+### What does “deterministic” mean here?
+
+The checks are deterministic: **the same captured answer and frozen grading inputs produce the same score**. Another language model does not decide whether the answer looks good.
+
+The agent's answers can still vary between attempts. Deterministic grading gives us a consistent measuring tool; it does not guarantee that the skill improves every answer. Repeated pairs help us see how consistent the observed difference is.
+
+## 2. Quick start
+
+### Set up once
 
 ```bash
-# Check environment readiness (sends no completion requests)
-pnpm eval:doctor
+pnpm install --frozen-lockfile
 
-# Run paired evaluation with paid provider requests
+# Create the credential file if it does not already exist
+cp -n evals/.env.example evals/.env
+```
+
+Edit `evals/.env` and fill in the key for your chosen provider. For the example below, use `GEMINI_API_KEY`. Keep credentials out of command arguments and committed files.
+
+### Check readiness, then run one pair
+
+```bash
+# Check environment readiness; sends no completion requests
+pnpm eval:doctor -- --model gemini-3.8-flash --thinking low
+
+# Run one baseline/treatment pair with paid provider requests
 pnpm eval -- --case network-config-01 \
   --skill skills/arbitrum-docs \
-  --model gemini-3.8-flash
+  --model gemini-3.8-flash \
+  --limit wallClockMs=300000
 ```
 
-New measured runs default to Pi, Apple Container, isolated validation, and thinking `low`. Each arm receives 5 minutes by default starting from its prompt.
+The `wallClockMs=300000` limit gives each arm five minutes, starting when its prompt begins.
 
-## 2. Methodology
+The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](cases/network-config-01/case.json) and [starting configuration](cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
 
-### What is measured
+The run prints a comparison table and the path to a `receipt.json` file. The receipt identifies the saved evidence. See [Read the output](#4-read-the-output) and [How to inspect a run](#5-how-to-inspect-a-run) below.
 
-Skill evaluations answer one question:
+## 3. How scoring works
 
-> Does adding one agent skill actually make an agent better at one concrete task?
+### A shared scoring rubric
 
-The answer comes from running the same task twice in fresh, disposable environments:
+The framework standardizes how we score; each case defines what a correct outcome means.
 
-| Arm | Environment |
-| --- | --- |
-| **baseline** | A fresh guest with the agent runtime and **no** evaluated skill. |
-| **treatment** | A **different** fresh guest, built from the **same image digest**, with the agent runtime plus **exactly one** frozen copy of the evaluated skill. |
+| Pillar | Common definition | What each case supplies |
+|---|---|---|
+| Accuracy | A percentage of how well the agent fulfilled the requested task. | Expected outcomes, checks, evidence and passing conditions. |
+| Cost | Resources consumed to perform the task, in tokens or monetary terms. | Cost delta: baseline vs treatment mean over at least X runs. |
+| Latency | Time from task start to completion or termination (ms or s). | Time delta: baseline vs treatment mean over at least X runs. |
 
-Skill presence is the *only* permitted difference between arms. Before anything runs, a field-by-field parity check verifies that all other variables are identical:
-- Prompt and fixture bytes
-- Requested output path
-- Oracle and deterministic validator
-- Allowed tools
-- Provider, exact model, and thinking level
-- Resource limits and execution policies
-- Network policy
+Accuracy is split into two parts:
 
-If any configuration diverges, the run aborts before any guest is launched.
+| Accuracy pillar | Weight | Question it answers |
+|---|---:|---|
+| Outcome correctness and completeness | 80% | Did the agent correctly and fully deliver everything requested? Check that the result matches the expected facts, values, behavior or state across the full requested scope. Where the case introduces a predefined failure, invalid input or unmet prerequisite, check that the agent identifies it and responds as expected (recover, ask, or stop). |
+| Constraints and preservation | 20% | Did the agent respect permissions and task boundaries while preserving what should remain unchanged? |
 
-### Why bother
+Rules:
+- Outcome is 80 points, constraints 20; accuracy total is 0–100.
+- Happy- and unhappy-path checks are both outcome checks; the case decides which it needs.
+- Checks are pass/fail. Failed checks keep their weight; missing evidence shows `n/a` and never reweights.
+- Cost and latency never add accuracy points. For this trial X = 1 (single-pair observation); cost is recorded tokens.
 
-A skill is an assertion: "this text makes an agent better at a task." Vibes do not distinguish a skill that imparts real domain knowledge from one that merely sounds authoritative. A single demo proves nothing about the counterfactual—how the agent would have performed without the skill.
+A case declares its checks in `rubric.json` (`rubricVersion: "v0.2"`); each check names its group (`outcome` or `constraints`), its points and an optional display topic. Group labels and weights are fixed by the framework, so `rubric.json` has no `groups` block.
 
-Paired baseline/treatment runs make performance claims falsifiable. However, an ineffective skill need not produce an observed delta of zero: sampling variance, model stochasticity, and dynamic web data can introduce noise even under frozen configurations. A single pair is an operational smoke test, not a statistically rigorous effect estimate.
+### Scores and outcomes
+- The validator returns pass/fail checks; the framework scores them against the frozen `rubric.json` before sealing. Full pass = every check passed.
+- `completed` and `task-limit` answers are graded normally; a limit alone does not fail a run.
+- Infrastructure failures and ungraded arms show `n/a` and are excluded from averages.
+- Runs scored under an earlier rubric are shown as legacy results and never reweighted.
 
-### Guest isolation and network boundary
+## 4. Read the output
 
-With `--sandbox apple-container`, each arm executes in an independent, disposable guest VM on Apple-silicon macOS:
-- **Egress enforcement**: The guest entrypoint applies an `iptables` egress filter under root privilege, then irreversibly drops privilege (`noNewPrivs true`, `uid 10001`, `gid 10001`, no groups, empty capability sets) before running agent code.
-- **CIDR filtering**: Explicit deny rules block private networks (RFC 1918), the host gateway, loopback, link-local addresses, cloud metadata (`169.254.169.254`), and sibling guest networks. Bounded outbound TCP on public ports is permitted.
-- **Attestation**: Before agent execution begins, the guest writes an immutable `attestation.json` proving actual UID/GID status, capabilities, mount flags, DNS resolvers, and network probe outcomes (confirming blocked private routes and active public routes). The host verifies this attestation before delivering credentials.
-- **Credential delivery**: API keys flow directly to the guest over an in-memory control channel only after attestation succeeds. Credentials are never passed via command-line arguments (`argv`), environment variables (`--env`), or files (`--env-file`), preventing leakage via container inspection tooling.
-
-### Agent capabilities and secret redaction
-
-Both arms receive the standard toolset: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. Ambient tools (such as `glob`) and the generic `mcp` client extension are provided identically to both arms. Baseline starts with no configured MCP servers; only treatment receives the selected skill's declared server configuration. Either arm may connect to endpoints it discovers using the shared client.
-
-Because agents have access to `bash`, an agent may inspect its environment and output its API key. Every guest output is scanned across five encodings:
-- Raw
-- JSON-escaped
-- Percent-encoded
-- Base64
-- Base64url
-
-Redactions are applied before artifacts are written or sealed, and recorded under `--view redactions`. The run remains gradeable so an incidental environment listing does not invalidate an evaluation. If redaction verification fails, the run is quarantined and sealed without promoting secrets into evidence.
-
-### Subsystem layout
+A single-pair run prints the same sections, labels and values as the published `EVALS.md`, followed by an operational footer. Example (illustrative values):
 
 ```text
-evals/
-├── README.md                # Operator guide (this document)
-├── ARCHITECTURE.md          # Frozen contract: invariants and security model
-├── .env.example             # Direct-provider credential template
-├── tsconfig.json            # Eval-only typecheck configuration
-├── src/
-│   ├── core/                # Pure logic: schemas, parity, limits, hashing, redaction
-│   ├── runner/              # Preflight, case loading, snapshotting, candidate projection
-│   ├── harnesses/           # Prompt execution (Pi SDK harness and test doubles)
-│   └── sandboxes/           # Guest lifecycle (Apple Container and test doubles)
-├── scripts/                 # CLI entrypoints
-└── cases/
-    └── network-config-01/   # Canonical case
-        ├── case.json        # Prompt, output path, and allowed tools
-        ├── fixture/         # Initial starting workspace
-        ├── oracle.json      # Ground-truth expected answers and sources
-        ├── validator.ts     # Deterministic validator executed in isolated guest
-        ├── validator.test.ts
-        └── runs/            # Local, git-ignored run evidence
+network configuration migration
+Agent:  Pi · google/gemini-3.8-flash
+Skill:  arbitrum-docs
+Run:    20261002T101500Z-3f9a1c2d · Pair r001
+Status: Without this skill: task limit reached, graded · With this skill: completed, graded
+
+Evaluation pillars:
+┌───────────────────────┬────────────────────┬─────────────────┬───────────────────────┐
+│ Pillar                │ Without this skill │ With this skill │                Change │
+├───────────────────────┼────────────────────┼─────────────────┼───────────────────────┤
+│ Accuracy              │                30% │             85% │ +55 percentage points │
+│ Cost: recorded tokens │          2,106,273 │         921,312 │   −1,184,961 (−56.3%) │
+│ Latency               │              5m00s │           1m30s │       −3m30s (−70.0%) │
+└───────────────────────┴────────────────────┴─────────────────┴───────────────────────┘
+
+Scenario: Migrate production and staging network configuration to Arbitrum
+
+Accuracy:
+┌──────────────────────────────────────┬────────────────────┬─────────────────┐
+│ Check                                │ Without this skill │ With this skill │
+├──────────────────────────────────────┼────────────────────┼─────────────────┤
+│ Outcome correctness and completeness │        10/80 — 13% │     65/80 — 81% │
+│ Constraints and preservation         │       20/20 — 100% │    20/20 — 100% │
+├──────────────────────────────────────┼────────────────────┼─────────────────┤
+│ Accuracy total                       │       30/100 — 30% │    85/100 — 85% │
+└──────────────────────────────────────┴────────────────────┴─────────────────┘
+
+Cost and latency:
+┌───────────────────────────────────────────────┬────────────────────┬─────────────────┐
+│ Metric                                        │ Without this skill │ With this skill │
+├───────────────────────────────────────────────┼────────────────────┼─────────────────┤
+│ Total recorded tokens, including cached input │          2,106,273 │         921,312 │
+│ Time to completion or termination             │          5m00.155s │       1m29.975s │
+└───────────────────────────────────────────────┴────────────────────┴─────────────────┘
+
+limits    per arm: time=300s, output tokens=unlimited, tool steps=unlimited, provider requests=unlimited
+elapsed   5m13s wall time
+receipt   evals/cases/network-config-01/runs/20261002T101500Z-3f9a1c2d/receipt.json
+inspect   pnpm eval:inspect --receipt <receipt> --pair r001 --condition treatment --view session --export both
+publish   pnpm eval:publish --receipt <receipt> --checks
 ```
 
-Read in this sequence: **[evals/README.md](README.md) for operation → [evals/ARCHITECTURE.md](ARCHITECTURE.md) for fixed invariants → target case files → sealed receipts.**
+- Add `--checks` to `eval`, `eval:report` or `eval:publish` to include the **Outcome checks** table (one row per display topic, with an **Outcome total**).
+- An arm without grading evidence (for example, interrupted before its workspace was exported) shows `n/a` in every accuracy cell and in the change column. When its recorded duration is missing, latency is derived from the native session and labelled `(session-derived)`; changes that use it are labelled `approximate`.
+- Durations under a minute print as `45.2s`; longer ones as `3m34s` (precise: `3m33.947s`).
+- A run whose frozen rubric is not `v0.2` prints its original scalar score under a `LEGACY RESULT` label; its accuracy rows show `n/a (legacy run)`.
 
-`evals/ARCHITECTURE.md` is the authoritative specification for all invariants.
+`--format markdown` or `--format json` changes the report format; `--quiet` hides progress logs. Synthetic runs carry a `TEST-DOUBLE EVIDENCE` label and do not measure skill effectiveness.
 
-## 3. Prerequisites
+### Multi-pair runs
 
-### Environment requirements
-- Invoke all commands from the **repository root**.
-- Node `>=22` and pnpm `10.33.2` (pinned in `package.json`).
-- Measured runs require **Apple-silicon macOS** with Apple Container installed and `container system status` reporting `running`.
-- Fake runs (`--mode fake`) use deterministic in-process doubles and require neither Apple Container nor provider credentials.
+Runs with several repetitions print an averages table and a per-pair table instead:
 
-### Provider credentials
+| Field or column          | Meaning                                                                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| **Baseline / Treatment** | The correctness score for each arm, from 0 to 1; in Averages, the mean over the same gradeable pairs.                         |
+| **Delta**                | Treatment score minus baseline score; in Averages, the mean paired difference. Positive values mean a higher treatment score. |
+| **Gradeable pairs**      | The number of matched pairs used in the correctness averages.                                                                 |
+| **Tokens Δ**             | Treatment-minus-baseline token use, including reported cache usage; its mean in Averages. This is not a cost calculation.     |
+| **Time Δ**               | Treatment-minus-baseline agent execution time; its mean in Averages. Separate from total run elapsed time.                    |
 
-Credentials reside in git-ignored `evals/.env`. Copy `evals/.env.example` and supply the required key:
+Resource averages use eligible pairs with both measurements available; the report prints their denominators separately. `n/a` means a value is unavailable. Negative resource deltas mean treatment used fewer tokens or less time.
 
-| Provider | Variable |
-| --- | --- |
-| `anthropic` | `ANTHROPIC_API_KEY` |
-| `google` | `GEMINI_API_KEY` |
+## 5. How to inspect a run
 
-Strict credential invariants:
-1. **Credential presence never selects models or providers.** The exact model flag is required. Provider is inferred from an exact match in the model catalog (or asserted via `--provider`). Contradictory or uncataloged targets fail at preflight before credentials are read.
-2. **No fallback.** No silent retries or model substitutions occur. A run either executes with the specified configuration or terminates immediately.
-3. **Isolation boundary.** Keys are held only in memory and transferred to attested guests over an authenticated control channel. Host and guest secret scanners strip credentials before logs or evidence are sealed.
+Inspection reads saved evidence and sends no new model requests. Every command below follows the same shape: `pnpm eval:inspect -- --latest --case <case-id> --condition <baseline|treatment> --view <name>`.
 
-Use a dedicated, low-limit, revocable API key.
-
-### Admitted model catalog
-
-| Model identifier | Provider | Reference |
-| --- | --- | --- |
-| `gemini-3.8-flash` | `google` | [Google Gemini documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash) |
-| `claude-opus-4-8` | `anthropic` | [Anthropic Claude documentation](https://platform.claude.com/docs/de/models/opus-4-8/overview) |
-| `claude-opus-5` | `anthropic` | [Anthropic Claude documentation](https://platform.claude.com/docs/en/models/opus-5/whats-new-opus-5) |
-
-Thinking support defaults to `low` and is validated per model.
-
-### Execution modes
-
-| Mode | Harness | Sandbox | Validator runner | Network & credentials |
-| --- | --- | --- | --- | --- |
-| `--mode fake` | `fake` | `fake` | `in-process` | In-process doubles, zero network egress, no credentials read |
-| `--mode measured` | `pi` | `apple-container` | `isolated-container` | Apple Container VMs, bounded public egress, verified credentials |
-
-Measured mode requires all three production components; test doubles are rejected at preflight.
-
-## 4. Grading
-
-### Workspace grading
-
-Cases declare no candidate mode: every fresh run grades the **final agent workspace**, including new and nested files, within existing bounds; a fresh case requesting `file` is rejected at preflight, while `--from` keeps each retained run's recorded mode.
-
-### Deterministic validation
-
-Grading is decoupled from agent execution:
-1. When an agent condition finishes, its final workspace is sanitized and captured.
-2. The validator runs inside an isolated, network-less container (`isolated-container`) separate from the agent runtime.
-3. The validator evaluates workspace artifacts against `oracle.json` and produces a deterministic numerical score in the range `[0.0, 1.0]`.
-
-### Task failure vs infrastructure failure
-
-The harness strictly distinguishes task failures from infrastructure failures:
-
-- **Task outcome — gradeable.** The agent produces an incorrect, malformed, or missing answer, or exhausts its allocated task-level budget. This is a legitimate evaluation result and may score `0.0`.
-- **Infrastructure outcome — not gradeable (`score: null`).** Provider API outages, container creation failures, networking timeouts, guest crashes, validator failures, cleanup errors, or secret quarantine events. These indicate an invalid measurement condition.
-
-**The Delta Rule**: A baseline/treatment delta is **never** computed, reported, or aggregated unless **both** arms of the pair are gradeable. An infrastructure failure is never treated as a task failure (never scored zero), and a task failure is never dismissed as infrastructure.
-
-### Validation commands
+### Step 1: find your run
 
 ```bash
-# Decode and validate suites and cases, verifying hashes and limit resolution
-pnpm eval:validate
-pnpm eval:validate -- --case network-config-01 --skill skills/arbitrum-docs
-
-# Run case validator unit tests
-pnpm test:eval-cases
-
-# Run deterministic eval test suites
-pnpm test:evals
-pnpm test:eval-sdk
-
-# Run container integration tests (requires Apple Container)
-pnpm test:container
-```
-
-## 5. Metrics
-
-### Runs and pairs
-
-- A **run** is a single CLI invocation.
-- A **pair** is one baseline/treatment repetition (`--repetitions N`).
-- For each valid pair, score delta is treatment score minus baseline score.
-- Aggregate delta is the arithmetic mean of deltas across all valid, gradeable pairs. Zero or negative deltas are valid measurements.
-
-### Result table format
-
-Upon run completion, the harness renders a standard nine-column summary:
-
-```text
-Case | Harness | Provider | Model | Baseline | Treatment | Delta | Tokens Δ | Time Δ
-```
-
-- **Delta**: Mean treatment score minus mean baseline score over valid pairs.
-- **Tokens Δ & Time Δ**: Diagnostic measurements reflecting resource utilization differences (`n/a` if unavailable). These are diagnostic engineering metrics and do not represent monetary savings.
-- `--details`: Adds individual per-pair scores to the output.
-- `--format table|markdown|json`: Configures the output presentation (`pnpm --silent` produces raw parseable JSON).
-- `--quiet`: Suppresses operational progress logs on stderr.
-
-Official measured results are committed alongside evaluated skills once verified.
-
-## 6. Inspection
-
-### Sealed evidence structure
-
-Runs seal an immutable cryptographic chain: **receipt → manifest → pair → condition → artifacts**. All evidence is stored locally under `evals/cases/<case-id>/runs/<run-id>/`:
-
-```text
-evals/cases/<case-id>/runs/<run-id>/
-├── receipt.json                 # Chain root: references manifest SHA-256 hash
-├── manifest.json                # SHA-256 digest map over all sorted evidence files
-├── cleanup.json                 # Journaled container identities and destruction status
-├── inputs/                      # Frozen invocation inputs: target, policy, case, skill snapshot
-├── pairs/<pair-id>/
-│   ├── pair.json                # Per-pair gradeability, arm scores, and computed delta
-│   ├── baseline/                # Arm condition, attestation, session, redactions,
-│   └── treatment/               #   workspace, candidate, validation, errors
-├── views/                       # Derived visualizations (regenerable, outside sealed chain)
-└── recovery/<id>/               # Sealed recovery audit records appended by eval:recover
-```
-
-Every inspection and reporting tool verifies the complete hash chain before outputting data. If any sealed file has been modified or corrupted, verification fails, identifies the mismatch, refuses to display scores, and exits with a non-zero status.
-
-### Inspection commands
-
-```bash
-# Query latest run and pair identifiers for a case
 pnpm eval:history -- --latest --case network-config-01
+```
 
-# Inspect the candidate output for the treatment arm
+This prints the receipt path and pair identifiers for your most recent run of that case. For several repetitions, note a specific `--pair <pair-id>` here; every command below accepts it.
+
+### Step 2: open the session
+
+The **session** is the agent's actual transcript: every message, tool call, tool result, and the model's reasoning, in order.
+
+```bash
+pnpm eval:inspect -- --latest --case network-config-01 \
+  --condition treatment --view session --export both
+```
+
+This prints two paths: a `.jsonl` file (the session in Pi's own native format — open it with Pi itself, or read it directly, one JSON record per line) and an `.html` file. **Open the HTML path in a browser.** It renders the same transcript as a readable, collapsible page: assistant messages, the model's reasoning (click to expand/collapse), tool calls with their arguments, and tool results. Any secret value the run was configured to guard (API keys, tokens) shows as `[REDACTED:<label>]` instead of the real value — everything else, including reasoning, is exactly what the model produced.
+
+Repeat with `--condition baseline` to see the same task without the skill, and compare the two transcripts side by side.
+
+> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `evals/cases/<case-id>/runs/<run-id>/` directory (git-ignored) and is never uploaded anywhere by this framework. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
+>
+> The `--capture-reasoning` CLI flag exists so that model reasoning can be retained when we specifically want to analyze the model's reasoning; it is off by default because reasoning substantially increases session artifact size.
+
+### Step 3: check the result
+
+```bash
+# See the final answer
 pnpm eval:inspect -- --latest --case network-config-01 \
   --condition treatment --view candidate
 
-# Export native session JSONL and Pi HTML session transcripts
+# See which checks passed or failed, and why
 pnpm eval:inspect -- --latest --case network-config-01 \
-  --condition treatment --view session --export both
-
-# Re-render the verified report from a receipt file
-pnpm eval:report -- --receipt evals/cases/network-config-01/runs/<run-id>/receipt.json --format table
+  --condition treatment --view validation
 ```
 
-Supported views for `--view`:
-`condition`, `messages`, `tools`, `workspace`, `candidate`, `validation`, `errors`, `runtime`, `attestation`, `redactions`, `session`.
+Compare the session's tool calls with the final answer and the validator's explanations to understand *why* a run scored the way it did. Available sessions may be incomplete after an interrupted run.
 
-Use `--pair <pair-id>` to target a specific repetition.
+### Other views
 
-### Resource recovery
+| `--view`      | Shows                                                              |
+| ------------- | ------------------------------------------------------------------- |
+| `session`     | The full transcript: messages, tool calls, reasoning (see Step 2). |
+| `messages`    | Just the message text, derived from the session.                   |
+| `tools`       | Just the tool calls and their results, derived from the session.   |
+| `candidate`   | The final answer the validator scored.                              |
+| `validation`  | Per-check pass/fail and the resulting score.                        |
+| `workspace`   | The files the agent left behind.                                    |
+| `condition`   | Status, timing, and usage for one arm.                               |
+| `errors`      | What went wrong, for a failed or infrastructure-failed arm.          |
+| `runtime`     | The resolved model, provider, and thinking level actually used.      |
+| `attestation` | The observed guest policy (tools, network, skill) the arm actually ran under. |
+| `redactions`  | How many secret occurrences were redacted, and where.                |
 
-If an evaluation is interrupted, residual guest containers or networks can be cleaned up without rerunning or regrading tasks:
+To keep inspecting one specific run as newer runs arrive, replace `--latest --case network-config-01` with `--receipt "<receipt-path>"`:
 
 ```bash
-pnpm eval:recover -- --run <run-id>
+# Print the saved comparison again; replace the placeholder with a real receipt path
+pnpm eval:report -- --receipt "<receipt-path>" --format table
 ```
 
-Recovery audits active resources, executes teardown, appends sealed recovery records into `recovery/`, and updates the cleanup ledger. If cancellation settlement cannot be confirmed in the bounded cleanup window, the run is recorded partial with `cleanup-failed` and `verified:false`; paid execution stops, and recovery later reconciles the exact identities without rerunning the task.
+### Publishing verified evaluation results
 
-## 7. Reproduction
-
-### Retained-input reproduction
-
-Evaluations can be reproduced deterministically from retained run evidence using `--from`:
+After verifying evaluation evidence, publish the scored report to the evaluated skill's `EVALS.md`:
 
 ```bash
-# Dry run: validates receipt, hashes, and inputs without launching guests
-pnpm eval -- --from evals/cases/network-config-01/runs/<run-id>/receipt.json --dry-run
-
-# Re-execute evaluation using retained inputs, limits, and image digest
-pnpm eval -- --from evals/cases/network-config-01/runs/<run-id>/receipt.json --authorize-paid
+pnpm eval:publish -- --receipt "<receipt-path>" [--checks]
 ```
 
-Reproduction invariants:
-- Retained inputs, limits, repetitions, image digests, and candidate modes are locked from the original receipt; configuration overrides are rejected.
-- Retained fake runs execute in fake mode; paid execution requires the explicit `--authorize-paid` flag.
+The publish command:
+- Verifies run evidence first (`verifyRun`); refuses to publish if verification fails.
+- Derives the destination skill from `inputs/skill-snapshot.json.sourcePath` (e.g. `skills/arbitrum-docs`).
+- Updates a bounded generated results section delimited by `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->` in `<skillSourcePath>/EVALS.md`.
+- Idempotently replaces the generated block on subsequent runs while preserving all authored coverage notes verbatim outside the markers.
+- Includes an AF-Evaluation status badge (`<status> · <treatment accuracy>%`; describes execution/grading status, non-certifying).
+- Refuses single-pair runs where either arm is ungraded; re-run the case instead of publishing `n/a`.
+- Keeps the receipt path and operational footer outside `EVALS.md`.
+- Ordinary `eval` and `eval:report` commands never modify `EVALS.md`.
 
-## 8. Recorded results
+Evidence is stored locally in `evals/cases/<case-id>/runs/<run-id>/`. A receipt and manifest record hashes of the retained files; `eval:report` and `eval:inspect` verify that chain before trusting the result, so editing a sealed file invalidates verification. Session exports (`views/*.jsonl`, `views/*.html`) are generated read-only views outside that chain and never change the sealed evidence.
 
-Per-skill measured results live next to the skill they describe, so a skill's evidence
-travels with it and stays out of the agent-visible snapshot:
+If an interrupted run leaves containers or networks behind, clean up its recorded resources with `pnpm eval:recover -- --run <run-id>`.
 
-| Skill | Case | Result |
-|---|---|---|
-| [`skills/arbitrum-docs`](../skills/arbitrum-docs/EVALS.md) | `network-config-01` | baseline 0.111, treatment 0.778, delta +0.667 (one pair, `NOT PASS`) |
+## 6. Project layout
 
-`NOT PASS` records operational acceptance, not skill quality: the treatment arm completed
-and both arms were graded, but the baseline arm exhausted its output token budget instead
-of finishing, and acceptance requires both arms to finish cleanly. One pair does not
-establish statistical effectiveness. A skill-root `EVALS.md` is excluded from the
-agent-visible snapshot; `SKILL.md`, which carries the label, is not.
+```text
+evals/
+├── README.md                # Human guide to running and understanding evals
+├── .env.example             # Credential template; copy locally to .env
+├── tsconfig.json            # Evaluation TypeScript configuration
+├── container/               # Guest image, network setup and locked runtime
+├── src/
+│   ├── core/                # Schemas, comparison rules, limits and redaction
+│   ├── runner/              # Setup, case loading and paired-run orchestration
+│   ├── harnesses/           # Agent execution through Pi or test doubles
+│   ├── sandboxes/           # Container lifecycle and test doubles
+│   └── artifacts/           # Saved evidence, verification and report readers
+├── scripts/                 # Command-line entrypoints
+└── cases/
+    └── network-config-01/   # Application configuration migration case
+        ├── case.json        # Task prompt, output path and allowed tools
+        ├── fixture/         # Starting workspace shared by both arms
+        ├── oracle.json      # Hidden expected answers and their sources
+        ├── validator.ts     # Deterministic checks, run in a separate container
+        ├── validator.test.ts # Wrong-answer and accepted-variant tests
+        └── runs/            # Local, git-ignored evidence created by runs
+```
 
-## 9. Limitations
+Skill coverage and result summaries live alongside the evaluated skill, for example [skills/arbitrum-docs/EVALS.md](../skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
 
-Read and understand these limitations before interpreting evaluation scores:
+For framework development, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks.
 
-- **Models are stochastic**: Identical prompts and configurations produce different model completions across iterations.
-- **A single pair is an operational smoke test**: One repetition validates that harness plumbing, sandboxing, and grading executed cleanly. It does not establish statistical significance.
-- **Dynamic public web dependencies**: Both arms have access to bounded public internet egress; external network resources and documentation endpoints can change between runs.
-- **Historical chain state retention varies**: Nitro node providers configure state history and pruning independently. The availability of archive state depends on node operator policy. A state verifiable at capture may not persist indefinitely.
-- **Single runs are exploratory**: Substantial score deltas on small sample sizes should be treated as prompts for further testing rather than definitive conclusions.
-- **Private model reasoning traces are not retained**: Internal model thinking and intermediate provider traces are not preserved or exported.
-- **Skill bundles and tool provisioning**: Both arms have the same generic MCP client extension and ambient tools. Only treatment receives the selected skill and its declared MCP server configuration. Baseline receives no seeded servers but can connect to discovered endpoints. A skill naming an external tool does not by itself guarantee that the endpoint is reachable. Model-selected connections and calls are agent behavior, not additional evaluator-provided server configuration.
-- **Test-double results are non-evaluative**: Evidence generated with `--mode fake` is marked with `TEST-DOUBLE EVIDENCE` and reflects harness execution mechanics, not skill quality.
-- **Non-atomic sealing**: While sealing is guarded and tampering is detected loudly, an abrupt system termination during manifest generation leaves an unsealed run tree that verification will reject.
-- **Execution budgets**: The **300,000 ms (5 minute) default** and **600,000 ms (10 minute) maximum** apply **per arm**, from prompt submission, and are resolved identically for both arms. The overall invocation watchdog is separate and reserves infrastructure time for startup, cleanup, and sealing; it is not a single combined arm ceiling. Setup, waiting, capture, and validation have distinct bounded allowances enforced by watchdogs.
-- **Disk quotas are memory-bounded**: Apple Container provides no hypervisor-level disk quota primitive. Guest writable storage is backed by tmpfs and constrained by guest memory limits.
-- **In-guest egress enforcement**: Egress filtering is applied via guest `iptables` and privilege drops rather than an external hypervisor firewall. Attestation probes verify network blocks on each run, but isolation relies on container kernel privilege isolation.
-- **Shared immutable image cache**: In accordance with architecture Amendment 4, container images (`eval-cached-*`) are immutable build artifacts shared across runs. Both arms run against the identical verified image digest.
+## 7. Documenting a case
+
+Each case README should answer these questions; the validator defines the actual scoring and passing rules.
+
+- **Provenance** — the reference answers, their sources and when those sources were checked.
+- **Checks and weights** — each check, its group (`outcome` or `constraints`), its points and rationale, and any facts grouped within a check.
+- **Unhappy paths** — which outcome checks exercise a predefined failure, invalid input or unmet prerequisite, and the expected response.
+- **Accepted variants** — which differences are harmless (such as permitted formatting) and which requirements must remain exact.
+- **Preservation** — what must remain unchanged and which constraint checks enforce it.
+- **Score endpoints** — the expected score and pass result for correct, unchanged, malformed and missing answers.
+
+See the [network-config-01 README](cases/network-config-01/README.md) for an example.

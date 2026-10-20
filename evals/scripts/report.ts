@@ -10,23 +10,25 @@
 
 import { resolve } from "node:path";
 import { EvalError, toStructuredFailure } from "../src/core/types.ts";
-import { buildRunReport, formatRunReport } from "../src/artifacts/queries.ts";
+import { buildRunReport, formatRunReport, REPORT_JSON_SCHEMA_VERSION } from "../src/artifacts/queries.ts";
 
 const USAGE =
-  "usage: eval:report --receipt <path to receipt.json> [--receipt <another receipt>] [--format table|markdown|json] [--details]\n" +
+  "usage: eval:report --receipt <path to receipt.json> [--receipt <another receipt>] [--format table|markdown|json] [--details] [--checks]\n" +
   "  Each run keeps its own averages. Multiple JSON receipts produce an array.\n" +
-  "  --details adds operational per-arm metadata to human output; JSON is unchanged.";
+  "  --checks includes topic-level check breakdown table; --details adds operational diagnostics.";
 
 interface Args {
   readonly receiptPaths: readonly string[];
   readonly format: "table" | "markdown" | "json";
   readonly details: boolean;
+  readonly checks: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Args {
   const receiptPaths: string[] = [];
   let format: "table" | "markdown" | "json" = "table";
   let details = false;
+  let checks = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -36,6 +38,10 @@ function parseArgs(argv: readonly string[]): Args {
     }
     if (flag === "--details") {
       details = true;
+      continue;
+    }
+    if (flag === "--checks") {
+      checks = true;
       continue;
     }
     const value = argv[index + 1];
@@ -63,14 +69,15 @@ function parseArgs(argv: readonly string[]): Args {
     throw new EvalError("input-invalid", `--receipt is required. ${USAGE}`, { at: "--receipt" });
   }
 
-  return { receiptPaths, format, details };
+  return { receiptPaths, format, details, checks };
 }
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2).filter((entry) => entry !== "--"));
   const reports = await Promise.all(args.receiptPaths.map(buildRunReport));
   const rendered = reports.map((report, index) => formatRunReport(report, {
-    format: args.format, details: args.details, runNumber: index + 1,
+    format: args.format, details: args.details, checks: args.checks,
+    ...(reports.length > 1 ? { runNumber: index + 1 } : {}),
   }));
   const output = args.format === "json" && rendered.length > 1
     ? JSON.stringify(rendered.map((item) => JSON.parse(item)), null, 2)
@@ -85,7 +92,24 @@ main().then(
   },
   (error: unknown) => {
     const failure = toStructuredFailure(error, "evidence-invalid");
-    process.stderr.write(`FAIL [${failure.code}] at ${failure.at ?? "(unknown)"}: ${failure.message}\n`);
+    const isJson = process.argv.includes("--format") && process.argv[process.argv.indexOf("--format") + 1] === "json";
+    if (isJson) {
+      process.stdout.write(
+        JSON.stringify(
+          {
+            schemaVersion: REPORT_JSON_SCHEMA_VERSION,
+            success: false,
+            receipt: null,
+            summary: null,
+            failures: [failure],
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    } else {
+      process.stderr.write(`FAIL [${failure.code}] at ${failure.at ?? "(unknown)"}: ${failure.message}\n`);
+    }
     process.exitCode = 1;
   },
 );

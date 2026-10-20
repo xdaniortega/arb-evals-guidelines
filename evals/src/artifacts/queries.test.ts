@@ -31,6 +31,7 @@ import type { ConditionReport, PairReport, RunReport } from "./queries.ts";
 import {
   buildRunReport,
   compareRunsChronologically,
+  deriveSessionDurationMs,
   formatInspectResult,
   formatLatestRun,
   formatRunReport,
@@ -564,7 +565,7 @@ describe("run report", () => {
     expect(typeof pair?.delta.delta).toBe("number");
 
     const text = formatRunReport(report);
-    expect(text).toMatch(/^\(1\) /);
+    expect(text.split("\n")[0]).toBe("network configuration migration");
     expect(text).not.toMatch(/^(mode|evidence|chain)\s+/m);
     expect(text).toContain("not a measured result");
     expect(text).not.toContain(`pair ${pair?.pairId} (repetition`);
@@ -629,9 +630,9 @@ describe("run report", () => {
     // Terminal table format
     const tableText = formatRunReport(report);
     expect(tableText).not.toMatch(/^report\s+/m);
-    expect(tableText).not.toMatch(/^inspect\s+/m);
+    expect(tableText).not.toContain("--view candidate");
     expect(tableText).toMatch(/^receipt\s+/m);
-    expect(tableText).toMatch(/^native\s+/m);
+    expect(tableText).toMatch(/^inspect\s+(pnpm eval:inspect .*--view session --export both|n\/a)/m);
     expect(tableText).not.toMatch(/^(mode|evidence|chain)\s+/m);
 
     // Markdown format
@@ -759,10 +760,10 @@ describe("inspect", () => {
     const reportText = formatRunReport(report);
 
     // Verify Task A: reportText no longer prints auto-suggested inspect or report lines
-    expect(reportText).not.toMatch(/^inspect\s+/m);
+    expect(reportText).not.toContain("--view candidate");
     expect(reportText).not.toMatch(/^report\s+/m);
     expect(reportText).toMatch(/^receipt\s+/m);
-    expect(reportText).toMatch(/^native\s+/m);
+    expect(reportText).toMatch(/^inspect\s+(pnpm eval:inspect .*--view session --export both|n\/a)/m);
     expect(reportText).not.toMatch(/^from\s+/m);
 
     // Verify structured JSON schema still exposes inspection commands
@@ -811,7 +812,7 @@ describe("inspect", () => {
     const report = await buildRunReport(result.receiptPath);
     const reportText = formatRunReport(report);
 
-    expect(reportText).not.toMatch(/^inspect\s+/m);
+    expect(reportText).not.toContain("--view candidate");
     expect(reportText).not.toMatch(/^report\s+/m);
 
     const cmdArgs = [
@@ -852,7 +853,7 @@ describe("inspect", () => {
     const report = await buildRunReport(result.receiptPath);
     const reportText = formatRunReport(report);
 
-    expect(reportText).not.toMatch(/^inspect\s+/m);
+    expect(reportText).not.toContain("--view candidate");
     expect(reportText).not.toMatch(/^report\s+/m);
 
     const cmdArgs = [
@@ -1416,5 +1417,26 @@ describe("latest run resolver", () => {
       expect(parsed.receiptPath).toBeDefined();
       expect(parsed.pairs).toBeInstanceOf(Array);
     });
+  });
+});
+
+describe("session-derived latency", () => {
+  it("measures from the first user prompt to the last recorded message", () => {
+    expect(deriveSessionDurationMs([
+      { type: "session", timestamp: "2026-09-19T20:36:05.842Z" },
+      { type: "message", timestamp: "2026-09-19T20:36:06.000Z", message: { role: "assistant" } },
+      { type: "message", timestamp: "2026-09-19T20:36:10.000Z", message: { role: "user" } },
+      { type: "message", timestamp: "2026-09-19T20:37:00.500Z", message: { role: "assistant" } },
+      { type: "model_change", timestamp: "2026-09-19T21:00:00.000Z" },
+    ])).toBe(50_500);
+  });
+
+  it("falls back to message timestamps and returns null without evidence", () => {
+    expect(deriveSessionDurationMs([
+      { type: "message", message: { role: "user", timestamp: 1_000 } },
+      { type: "message", message: { role: "assistant", timestamp: 4_500 } },
+    ])).toBe(3_500);
+    expect(deriveSessionDurationMs([])).toBeNull();
+    expect(deriveSessionDurationMs([{ type: "message", message: { role: "assistant", timestamp: 1 } }])).toBeNull();
   });
 });

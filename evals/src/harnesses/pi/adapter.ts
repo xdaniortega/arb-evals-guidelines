@@ -25,7 +25,7 @@ import { assertNotAborted, CONDITION_OPERATION_ALLOWANCE_MS, deriveStopCause, Ev
 import type { ConditionId, StopCause, StructuredFailure, TerminalClass } from "../../core/types.ts";
 import { validateTargetConfiguration } from "../../runner/models.ts";
 import type { Guest } from "../../sandboxes/sandbox.ts";
-import { sanitizeNativeSessionEntries, type NativeSessionEntry, type SanitizedNativeSessionResult } from "./export-viewer.ts";
+import { sanitizeNativeSessionEntries, type NativeSessionEntry } from "./export-viewer.ts";
 import type { ScriptedStep } from "./scripted-stream.ts";
 import type {
   Harness,
@@ -457,6 +457,7 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
         maxOutputTokens: request.limits.maxOutputTokens,
       },
       credentialVariable: variable,
+      ...(request.captureReasoning !== undefined ? { captureReasoning: request.captureReasoning } : {}),
       ...(options.scriptedSteps === undefined ? {} : { scriptedSteps: options.scriptedSteps }),
     });
     return session;
@@ -588,12 +589,15 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
           catch (error: unknown) { closureError = error; }
           if (remote.failure !== null) throw remote.failure;
           if (closureError !== null) throw closureError;
-          const entries = sanitizeNativeSessionEntries(remote.records, request.guardedSecrets ?? []);
-          const messages = deriveMessagesFromNativeSession(entries.entries).map((message) => {
+          // remote.records already carries entries the guest redacted before sending
+          // each `record` frame (native-prefix.ts#record runs on that side); no second
+          // redaction pass is needed here.
+          const entries = remote.records;
+          const messages = deriveMessagesFromNativeSession(entries).map((message) => {
             const bounded = truncateText(message.text);
             return { ...message, text: bounded.text, truncated: bounded.truncated };
           });
-          const toolSteps = deriveToolStepsFromNativeSession(entries.entries);
+          const toolSteps = deriveToolStepsFromNativeSession(entries);
           const outcome = frame.outcome;
           if (outcome !== "completed" && outcome !== "task-limit" && outcome !== "infrastructure-failure") {
             throw new EvalError("protocol-drift", "guest SDK result carried an unknown outcome", { at: "pi.remote.result" });
@@ -659,10 +663,10 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
             timing,
             runtime: runtimeFor(request),
             failures,
-            nativeSessionEntries: entries.entries,
+            nativeSessionEntries: entries,
             nativeSessionRedactions: {
-              count: remote.redactionCount + entries.count,
-              entries: [...remote.redactions, ...entries.redactions],
+              count: remote.redactionCount,
+              entries: remote.redactions,
             },
           };
         } finally {
@@ -748,11 +752,16 @@ export function createPiHarness(options: PiHarnessOptions = {}): Harness {
           );
         }
 
-        // Sanitize COPIES of actual entries (strips private reasoning/signatures, redacts secrets)
-        // If an unverifiable secret survives, sanitizeNativeSessionEntries throws EvalError("secret-quarantine")
+        // Sanitize COPIES of actual entries (the live entries reused for the next model turn
+        // are never touched). This is the only sanitization pass for the local path: the
+        // durable native-prefix capture wrote its own sanitized copy from the streamed
+        // structuredClone as each entry was appended, but never mutated these live entries.
+        // If an unverifiable secret survives, sanitizeNativeSessionEntries throws
+        // EvalError("secret-quarantine").
         const sanitizedResult = sanitizeNativeSessionEntries(
           rawEntries,
           request.guardedSecrets ?? [],
+          { captureReasoning: request.captureReasoning },
         );
 
         // Derive transcripts and tool step views from the sanitized copy

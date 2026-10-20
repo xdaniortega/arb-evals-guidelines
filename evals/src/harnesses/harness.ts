@@ -40,6 +40,8 @@ export interface HarnessRequest {
   readonly guardedSecrets?: readonly GuardedSecret[];
   /** Evaluator-owned write-only sink for incremental sanitized native entries. */
   readonly nativeSessionRecorder?: NativeSessionEntryRecorder;
+  /** Optional flag: when true, preserve model reasoning verbatim in native session entries. Defaults to false (strip). */
+  readonly captureReasoning?: boolean;
 }
 
 export interface NormalizedMessage {

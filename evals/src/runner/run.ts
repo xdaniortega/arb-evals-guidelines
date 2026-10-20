@@ -112,6 +112,7 @@ import type {
 } from "../core/types.ts";
 import type { SkillToolBundle } from "../core/skill-tools.ts";
 import { resolveSkillToolBundle } from "./skill-tool-manifest.ts";
+import { scoreWithRubric } from "./rubric.ts";
 
 // ---------------------------------------------------------------------------
 // Frozen guest layout and policies
@@ -438,6 +439,8 @@ export interface RunOptions {
     readonly simulateSurvivingSecretHit?: boolean;
   };
   readonly schedulingPolicy?: "serial" | "overlap";
+  /** Optional flag: when true, preserve model reasoning verbatim in native session entries. Defaults to false (strip). */
+  readonly captureReasoning?: boolean;
   readonly onProgress?: (event: RunProgressEvent) => void;
 }
 
@@ -1089,6 +1092,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
       state.nativeCapture = createNativeSessionCapture({
         path: join(stateDir, "native-prefixes", `${options.runId}-${step.pairId}-${step.conditionId}.jsonl`),
         guardedSecrets,
+        captureReasoning: options.captureReasoning,
       });
       return state;
     });
@@ -1140,6 +1144,7 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
             deadlineAtMs: guestLifetimeDeadlineAtMs,
             skillToolBundle,
             skillToolBundleSha256,
+            captureReasoning: options.captureReasoning,
             isFinalized: () => finalized,
           }), "interrupted");
           pendingEffects.push({ handle: preparationHandle as BoundedEffect<unknown>, conditionId: state.step.conditionId });
@@ -1355,6 +1360,36 @@ export async function runPairedEvaluation(options: RunOptions): Promise<RunResul
           state.failures.push(failure);
           runFailures.push(failure);
           if (stopReason === null) stopReason = `validation failed: ${failure.code}`;
+        } else if (frozen.rubric !== undefined && state.validation.outcome.status === "graded") {
+          // Authoritative central rubric scoring
+          try {
+            const rubricScore = scoreWithRubric(frozen.rubric, state.validation.outcome.checks);
+            state.validation = {
+              ...state.validation,
+              outcome: {
+                ...state.validation.outcome,
+                score: rubricScore.score,
+                fullPass: rubricScore.fullPass,
+                rubricScore,
+              } as any,
+            };
+          } catch (rubricError: unknown) {
+            const failure = structuredFrom(rubricError);
+            state.status = "infrastructure-failure";
+            state.failures.push(failure);
+            runFailures.push(failure);
+            state.validation = {
+              ...state.validation,
+              failure,
+              outcome: {
+                status: "infrastructure-failure",
+                score: null,
+                fullPass: null,
+                checks: state.validation.outcome.checks,
+              },
+            };
+            if (stopReason === null) stopReason = `rubric scoring failed: ${failure.message}`;
+          }
         }
         options.onProgress?.({
           type: "capture-grading-completed",
@@ -1691,7 +1726,18 @@ async function writeFrozenInputs(
     frozenEntries.push({ path: "provenance.json", sha256: sha256Hex(provBytes), bytes: provBytes.byteLength });
   }
 
-  // 8. Snapshot manifest
+  // 8. Rubric, if present
+  if (input.frozen.rubricBytes !== undefined) {
+    await store.writeFile("inputs/frozen/case/rubric.json", input.frozen.rubricBytes);
+    await store.writeFile("inputs/rubric.json", input.frozen.rubricBytes);
+    frozenEntries.push({
+      path: "case/rubric.json",
+      sha256: input.frozen.rubricSha256 ?? sha256Hex(input.frozen.rubricBytes),
+      bytes: input.frozen.rubricBytes.byteLength,
+    });
+  }
+
+  // 9. Snapshot manifest
   const frozenManifest = buildManifestTree(frozenEntries, EVIDENCE_SCHEMA_VERSION);
   await store.writeRecord("inputs/frozen/manifest.json", {
     schemaVersion: EVIDENCE_SCHEMA_VERSION,
@@ -1738,6 +1784,7 @@ async function prepareCondition(input: {
   readonly deadlineAtMs: number;
   readonly skillToolBundle: SkillToolBundle;
   readonly skillToolBundleSha256: string;
+  readonly captureReasoning?: boolean;
   readonly isFinalized?: () => boolean;
 }): Promise<PreparedCondition> {
   const { state, sandbox, journal, frozen, signal } = input;
@@ -1850,6 +1897,7 @@ async function prepareCondition(input: {
     signal,
     deadlineAtMs: boundaryDeadlineAtMs,
     guardedSecrets: input.guardedSecrets,
+    captureReasoning: input.captureReasoning,
     ...(state.nativeCapture === null ? {} : {
       nativeSessionRecorder: { record: state.nativeCapture.record.bind(state.nativeCapture) },
     }),
@@ -1915,9 +1963,19 @@ async function dispatchArmPrompt(input: {
     const livePrefix = state.nativeCapture?.snapshot();
     if (livePrefix && livePrefix.entries.length > 0 && result.nativeSessionEntries) {
       try {
+        // The harness already sanitized result.nativeSessionEntries (either the guest's
+        // per-record sanitization relayed over frames, or the local path's own single pass
+        // over the SDK's raw in-memory entries), so this sanitization is not adding a second
+        // *sanitization* pass over trusted data - it is independently re-verifying an
+        // *untrusted* claim. A harness is arbitrary code (including test doubles and
+        // future harnesses); if its reported entries still carry a live secret, that must
+        // surface as secret-quarantine specifically, because only that code blocks every
+        // further paid call in the run (see the `blockPaidCalls` call sites keyed on it) -
+        // a plain mismatch below would only fail this one condition.
         const carrier = sanitizeNativeSessionEntries(
           result.nativeSessionEntries as readonly NativeSessionEntry[],
           prepared.request.guardedSecrets ?? [],
+          { captureReasoning: prepared.request.captureReasoning },
         );
         if (canonicalJson(carrier.entries, "native result carrier") !==
             canonicalJson(livePrefix.entries, "native durable prefix")) {
@@ -2115,6 +2173,7 @@ async function executeCondition(input: {
   readonly deadlineAtMs: number;
   readonly skillToolBundle: SkillToolBundle;
   readonly skillToolBundleSha256: string;
+  readonly captureReasoning?: boolean;
   readonly faults?: {
     readonly simulateSurvivingSecretHit?: boolean;
   };
@@ -2464,7 +2523,7 @@ async function sealRun(input: {
     const conditionRefs: Array<{ conditionId: ConditionId; dir: string }> = [];
     for (const state of states) {
       const dir = conditionDirFor(state.step);
-      await sealCondition(store, dir, state, testDouble, evidenceLabel, frozen, options.guardedSecrets ?? []);
+      await sealCondition(store, dir, state, testDouble, evidenceLabel, frozen, options.guardedSecrets ?? [], options.captureReasoning);
       conditionRefs.push({ conditionId: state.step.conditionId, dir });
     }
 
@@ -2496,6 +2555,7 @@ async function sealRun(input: {
       suiteId: frozen.suite.id,
       caseId: frozen.config.id,
       caseVersion: frozen.config.version,
+      ...(frozen.rubric !== undefined ? { rubricVersion: frozen.rubric.rubricVersion } : {}),
       testDouble,
       evidenceLabel,
       conditions: conditionRefs.map((ref) => ({ conditionId: ref.conditionId, dir: ref.dir })),
@@ -2527,6 +2587,7 @@ async function sealRun(input: {
     caseSelector: frozen.selector,
     caseId: frozen.config.id,
     caseVersion: frozen.config.version,
+    ...(frozen.rubric !== undefined ? { rubricVersion: frozen.rubric.rubricVersion } : {}),
     mode: options.mode,
     status: input.stopReason === null ? "complete" : "partial",
     stopReason: input.stopReason,
@@ -2577,6 +2638,7 @@ async function sealCondition(
   evidenceLabel: string,
   frozen: FrozenCase,
   guardedSecrets: readonly GuardedSecret[],
+  captureReasoning?: boolean,
 ): Promise<void> {
   const gradeable = isGradeable(state);
   await store.writeRecord(`${dir}/condition.json`, {
@@ -2613,9 +2675,15 @@ async function sealCondition(
   });
   await sealAttestation(store, dir, state, testDouble, evidenceLabel);
 
-  // Sanitized native session retention:
-  // Independently verify and rescan even if positive redaction count was supplied.
-  // A hostile/mismatched final carrier cannot be hidden by the authentic prefix.
+  // Native session retention: state.sessionEntries is the durable prefix when the arm's
+  // native session recorder captured at least one entry (the common Pi-harness case), but
+  // falls back to whatever the Harness implementation itself reported otherwise (e.g. a
+  // scripted or fake harness that never calls the recorder). The Harness interface is
+  // implemented by more than the Pi adapter, so this redaction pass is not defense in
+  // depth over already-trusted data - it is the actual, only sanitization point for those
+  // other implementations. Independently re-verify and rescan even when a positive
+  // redaction count was already supplied: a hostile or mismatched final carrier cannot
+  // be hidden by an authentic-looking prefix.
   if (state.nativePromotionFailure) throw state.nativePromotionFailure;
   const completed = state.status === "completed";
   const rawEntries = state.sessionEntries;
@@ -2623,7 +2691,7 @@ async function sealCondition(
   let sanitizedEntries = rawEntries;
   let sessionRedactions = state.sessionRedactions ?? { count: 0, entries: [] };
   if (hasNativeEntries && guardedSecrets.length > 0) {
-    const res = sanitizeNativeSessionEntries(rawEntries, guardedSecrets);
+    const res = sanitizeNativeSessionEntries(rawEntries, guardedSecrets, { captureReasoning });
     sanitizedEntries = res.entries;
     if (sessionRedactions.count === 0) {
       if (res.count > 0) {
@@ -2664,6 +2732,7 @@ async function sealCondition(
     tailStatus,
     incompleteTail,
     incompleteReason,
+    ...(captureReasoning !== undefined ? { reasoningCaptured: captureReasoning } : {}),
     entries: sanitizedEntries,
     entryCount: sanitizedEntries.length,
     redactions: {
@@ -2768,6 +2837,9 @@ async function sealCondition(
             score: state.validation.outcome.score,
             fullPass: state.validation.outcome.fullPass,
             checks: state.validation.outcome.checks.map((check) => ({ ...check })),
+            ...((state.validation.outcome as any).rubricScore !== undefined
+              ? { rubricScore: (state.validation.outcome as any).rubricScore }
+              : {}),
           },
     failure: state.validation?.failure ?? null,
   });

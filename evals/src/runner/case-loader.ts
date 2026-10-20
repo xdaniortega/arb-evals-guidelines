@@ -23,6 +23,8 @@ import {
 // fresh boundary: no authored collection mode, effective policy `workspace`.
 import { EvalError, WORKSPACE_OUTPUT_MARKER, decodeFreshCaseConfig, decodeSuiteConfig } from "../core/types.ts";
 import type { CaseConfig, DecodeConfigOptions, PreparedCaseData, RuntimeProfileId, SuiteConfig } from "../core/types.ts";
+import { decodeRubric } from "./rubric.ts";
+import type { Rubric } from "./rubric.ts";
 
 export const MAX_FIXTURE_FILES = 64;
 export const MAX_FIXTURE_FILE_BYTES = 1_048_576;
@@ -74,6 +76,9 @@ export interface FrozenCase {
   readonly validatorClosureSha256: string;
   readonly runtimeProfileId: RuntimeProfileId;
   readonly preparationProvenance: Readonly<Record<string, string>> | null;
+  readonly rubric?: Rubric;
+  readonly rubricBytes?: Buffer;
+  readonly rubricSha256?: string;
 }
 
 export interface ValidatorClosureResult {
@@ -731,6 +736,25 @@ export async function freezeTask(
     assertSafeRelativePath(config.outputPath, `${at}/case.json#outputPath`);
   }
 
+  // Optional rubric.json: if present in the case directory, decode and freeze it
+  let rubric: Rubric | undefined;
+  let rubricBytes: Buffer | undefined;
+  let rubricSha256: string | undefined;
+  const rubricPath = containedPath(selected.dir, "rubric.json", `${at}/rubric.json`);
+  const hasRubric = await lstat(rubricPath).then((s) => !s.isSymbolicLink() && s.isFile()).catch(() => false);
+  if (hasRubric) {
+    await assertNoSymlinkedAncestor(selected.dir, "rubric.json", `${at}/rubric.json`);
+    rubricBytes = await readRegularFile(rubricPath, MAX_CASE_JSON_BYTES, `${at}/rubric.json`);
+    let rubricJson: unknown;
+    try {
+      rubricJson = JSON.parse(rubricBytes.toString("utf8")) as unknown;
+    } catch (cause: unknown) {
+      throw new EvalError("input-invalid", `${at}/rubric.json is not valid JSON`, { at: `${at}/rubric.json`, cause });
+    }
+    rubric = decodeRubric(rubricJson, `${at}/rubric.json`);
+    rubricSha256 = sha256Hex(rubricBytes);
+  }
+
   return {
     selector: selected.selector,
     caseDir: selected.dir,
@@ -749,5 +773,8 @@ export async function freezeTask(
     validatorClosureSha256: validatorClosure.closureSha256,
     runtimeProfileId: config.runtimeProfileId ?? fallbackProfileId,
     preparationProvenance: prepared?.provenance ?? null,
+    ...(rubric !== undefined && rubricBytes !== undefined && rubricSha256 !== undefined
+      ? { rubric, rubricBytes, rubricSha256 }
+      : {}),
   };
 }

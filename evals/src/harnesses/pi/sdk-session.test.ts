@@ -25,8 +25,8 @@ import {
   RealCompletionTransportBlockedError,
 } from "../../test-guards.ts";
 import {
-  createSanitizedSessionCopy,
   exportSessionFileToHtml,
+  sanitizeNativeSessionEntries,
   verifyExportedHtml,
 } from "./export-viewer.ts";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
@@ -758,13 +758,13 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
     });
   });
 
-  describe("Sanitization and Pinned HTML Export", () => {
-    it("sanitization changes COPIES ONLY, never the live messages used for the next model turn", async () => {
-      const workspace = makeTempDir("pi-sanitization");
+  describe("Redaction and Pinned HTML Export", () => {
+    it("redaction changes COPIES ONLY (never the live messages used for the next model turn) and preserves reasoning", async () => {
+      const workspace = makeTempDir("pi-redaction");
       const target: Target = { provider: "google", model: "gemini-3.8-flash", thinking: "low" };
 
       const SECRET_TOKEN = "SECRET_CANARY_VALUE_99887766";
-      const REASONING_TEXT = "I am private thinking that must never leak into evidence";
+      const REASONING_TEXT = "I am private thinking that must be preserved, not leaked as a secret";
 
       const scriptedStream = createScriptedStreamSimple([
         // Turn 1: Model outputs thinking reasoning and a secret marker
@@ -796,47 +796,65 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
 
       // Now create a SANITIZED COPY of the session file
       const sessionFile = instance.sessionFile!;
-      const sanitizedFile = join(workspace, "session-sanitized.jsonl");
+      const redactedFile = join(workspace, "session-redacted.jsonl");
+      const rawLines = readFileSync(sessionFile, "utf8").split("\n").filter((line) => line.trim().length > 0);
+      const rawEntries = rawLines.map((line) => JSON.parse(line));
 
-      createSanitizedSessionCopy(sessionFile, sanitizedFile, [
+      // Default: reasoning is stripped
+      const stripped = sanitizeNativeSessionEntries(rawEntries, [
         { label: "CANARY_SECRET", value: SECRET_TOKEN },
       ]);
+      const strippedContent = JSON.stringify(stripped);
+      expect(strippedContent).not.toContain(SECRET_TOKEN);
+      expect(strippedContent).toContain("[REDACTED:CANARY_SECRET]");
+      expect(strippedContent).not.toContain(REASONING_TEXT);
+      expect(strippedContent).not.toContain("encrypted-signature-xyz");
+
+      // Opt-in: reasoning is preserved with captureReasoning: true
+      const redacted = sanitizeNativeSessionEntries(
+        rawEntries,
+        [{ label: "CANARY_SECRET", value: SECRET_TOKEN }],
+        { captureReasoning: true },
+      );
+      writeFileSync(redactedFile, `${redacted.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
 
       // ASSERTION OF RULE R6: LIVE MESSAGES REMAIN UNCHANGED
       const liveAssistantAfter = instance.session.messages[instance.session.messages.length - 1] as any;
       expect(liveAssistantAfter.content.some((b: any) => b.type === "thinking")).toBe(true);
       expect(liveAssistantAfter.content.find((b: any) => b.type === "text")?.text).toContain(SECRET_TOKEN);
 
-      // SANITIZED COPY: Verify thinking is stripped and secret is redacted
-      const sanitizedContent = readFileSync(sanitizedFile, "utf8");
-      expect(sanitizedContent).not.toContain(SECRET_TOKEN);
-      expect(sanitizedContent).toContain("[REDACTED:CANARY_SECRET]");
-      expect(sanitizedContent).not.toContain(REASONING_TEXT);
-      expect(sanitizedContent).not.toContain("encrypted-signature-xyz");
+      // REDACTED COPY: the secret is redacted; reasoning and its signature are preserved -
+      // the sealed session is Pi's raw native session, not a stripped view.
+      const redactedContent = readFileSync(redactedFile, "utf8");
+      expect(redactedContent).not.toContain(SECRET_TOKEN);
+      expect(redactedContent).toContain("[REDACTED:CANARY_SECRET]");
+      expect(redactedContent).toContain(REASONING_TEXT);
+      expect(redactedContent).toContain("encrypted-signature-xyz");
 
       // EXPORT TO HTML using pinned exporter
       const htmlPath = join(workspace, "exported.html");
-      const hashBeforeExport = sha256File(sanitizedFile);
+      const hashBeforeExport = sha256File(redactedFile);
 
-      await exportSessionFileToHtml(sanitizedFile, htmlPath);
+      await exportSessionFileToHtml(redactedFile, htmlPath);
 
       // Canonical input bytes must NOT be changed by exporter
-      const hashAfterExport = sha256File(sanitizedFile);
+      const hashAfterExport = sha256File(redactedFile);
       expect(hashAfterExport).toBe(hashBeforeExport);
 
       // Verify exported HTML
       expect(existsSync(htmlPath)).toBe(true);
       const htmlVerification = verifyExportedHtml(htmlPath, {
         disallowedSecrets: [SECRET_TOKEN],
-        disallowedReasoningTokens: [REASONING_TEXT, "encrypted-signature-xyz"],
       });
       expect(htmlVerification.valid).toBe(true);
       expect(htmlVerification.violations.length).toBe(0);
 
-      // Also confirm the sanitized token survived in the exported viewer
+      // The secret never reaches the exported viewer, in either the raw HTML or the
+      // embedded session data; the reasoning reaches the embedded data (Pi's template
+      // renders thinking blocks client-side from it).
       const htmlText = readFileSync(htmlPath, "utf8");
       expect(htmlText).not.toContain(SECRET_TOKEN);
-      expect(htmlText).not.toContain(REASONING_TEXT);
+      expect(JSON.stringify(htmlVerification.decodedSessionJson)).toContain(REASONING_TEXT);
 
       instance.dispose();
     });

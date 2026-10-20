@@ -49,7 +49,7 @@ import {
   STARTUP_ALLOWANCE_MS,
   type RunProgressEvent,
 } from "../src/runner/run.ts";
-import { buildRunReport, formatRunReport } from "../src/artifacts/queries.ts";
+import { buildRunReport, formatRunReport, REPORT_JSON_SCHEMA_VERSION } from "../src/artifacts/queries.ts";
 
 /** Invocation clock begins at CLI module entry, before credentials, probes and source hashing. */
 const CLI_STARTED_AT_MS = Date.now();
@@ -76,12 +76,13 @@ const USAGE =
   `usage: eval --case <id> --skill <path> --model <id> [--mode ${RUN_MODES.join("|")}] [--repetitions <n>] ` +
   `[--harness ${HARNESS_IDS.join("|")}] [--sandbox ${SANDBOX_IDS.join("|")}] [--validator-runner ${VALIDATOR_RUNNER_IDS.join("|")}] ` +
   `[--provider <google|anthropic>] [--thinking <level>] [--serial] [--scheduling ${SCHEDULING_IDS.join("|")}] ` +
-  `[--format ${FORMAT_IDS.join("|")}] [--details] [--quiet] ` +
+  `[--format ${FORMAT_IDS.join("|")}] [--details] [--checks] [--quiet] [--capture-reasoning] ` +
   `[--limit <key>=<value> ...] (limit keys: ${LIMIT_KEYS.join(", ")})\n` +
   `  Defaults: measured mode, Pi, Apple Container, isolated validator, and low thinking.\n` +
   `  Provider is inferred from the exact model; --provider asserts or disambiguates it.\n` +
   `  --mode fake explicitly selects zero-paid-call test doubles and does not require a model.\n` +
   `  --details adds operational metadata to human table/Markdown output; JSON is unchanged.\n` +
+  `  --capture-reasoning retains model reasoning when we specifically want to analyze the model's reasoning; off by default because reasoning substantially increases session artifact size.\n` +
   `  Scheduling defaults to overlap after both-ready; --serial retains the same readiness barrier.\n` +
   `  --skill selects one complete treatment skill relative to the repository; baseline receives none.\n` +
   `  --suite <id> remains available only for existing legacy eval.json suites; it conflicts with --skill.\n` +
@@ -136,7 +137,9 @@ interface Args {
   readonly schedulingPolicy: "serial" | "overlap";
   readonly format: FormatId;
   readonly details: boolean;
+  readonly checks: boolean;
   readonly quiet: boolean;
+  readonly captureReasoning: boolean;
 }
 
 /**
@@ -160,7 +163,9 @@ export function parseArgs(argv: readonly string[]): Args {
   let schedulingPolicy: "serial" | "overlap" = "overlap";
   let format: FormatId = "table";
   let details = false;
+  let checks = false;
   let quiet = false;
+  let captureReasoning = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -178,6 +183,14 @@ export function parseArgs(argv: readonly string[]): Args {
     }
     if (flag === "--details") {
       details = true;
+      continue;
+    }
+    if (flag === "--checks") {
+      checks = true;
+      continue;
+    }
+    if (flag === "--capture-reasoning") {
+      captureReasoning = true;
       continue;
     }
 
@@ -317,7 +330,9 @@ export function parseArgs(argv: readonly string[]): Args {
     schedulingPolicy,
     format,
     details,
+    checks,
     quiet,
+    captureReasoning,
   };
 }
 
@@ -535,12 +550,13 @@ export async function runCli(
       installSignalHandlers: true,
       signal: boundaryController.signal,
       schedulingPolicy,
+      captureReasoning: args.captureReasoning,
       onProgress,
       preflightInputs,
     });
 
     const report = await buildRunReport(result.receiptPath);
-    const formatted = formatRunReport(report, { format: args.format, details: args.details });
+    const formatted = formatRunReport(report, { format: args.format, details: args.details, checks: args.checks });
     process.stdout.write(`${formatted}\n`);
 
     return {
@@ -596,7 +612,7 @@ if (isDirectInvocation) {
         process.stdout.write(
           JSON.stringify(
             {
-              schemaVersion: 1,
+              schemaVersion: REPORT_JSON_SCHEMA_VERSION,
               success: false,
               receipt: null,
               summary: null,

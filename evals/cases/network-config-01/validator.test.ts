@@ -8,8 +8,29 @@ import { validateSnapshot, type ValidationOutcome } from "./validator.js";
 
 const FIXTURE_PATH = fileURLToPath(new URL("./fixture/config.json", import.meta.url));
 const ORACLE_PATH = fileURLToPath(new URL("./oracle.json", import.meta.url));
+const RUBRIC_PATH = fileURLToPath(new URL("./rubric.json", import.meta.url));
 const ENVIRONMENTS = ["production", "staging"] as const;
 const CHECK_COUNT = 18;
+const EXPECTED_CHECK_IDS = [
+  "json-shape",
+  "preservation",
+  "production-chain-identity",
+  "production-legacy-fallback",
+  "production-rpc-endpoints",
+  "production-sequencer-policy",
+  "production-token-identity",
+  "production-bridge-addresses",
+  "production-bridge-onboarding",
+  "production-finality-policy",
+  "staging-chain-identity",
+  "staging-legacy-fallback",
+  "staging-rpc-endpoints",
+  "staging-sequencer-policy",
+  "staging-token-identity",
+  "staging-bridge-addresses",
+  "staging-bridge-onboarding",
+  "staging-finality-policy",
+] as const;
 const MUTATION_CASES = [
   ["chain", "chainId", "chain-identity"],
   ["rpcPolicy", "sequencerSubmissionUrl", "rpc-endpoints"],
@@ -59,26 +80,18 @@ test("accepts an explicit known-good generic app migration", async (context) => 
   assert.equal(result.fullPass, true);
   assert.deepEqual(
     result.checks.map((check) => check.id),
-    [
-      "json-shape",
-      "preservation",
-      "production-chain-identity",
-      "production-legacy-fallback",
-      "production-rpc-endpoints",
-      "production-sequencer-policy",
-      "production-token-identity",
-      "production-bridge-addresses",
-      "production-bridge-onboarding",
-      "production-finality-policy",
-      "staging-chain-identity",
-      "staging-legacy-fallback",
-      "staging-rpc-endpoints",
-      "staging-sequencer-policy",
-      "staging-token-identity",
-      "staging-bridge-addresses",
-      "staging-bridge-onboarding",
-      "staging-finality-policy",
-    ],
+    [...EXPECTED_CHECK_IDS],
+  );
+});
+
+test("pins rubric.json check IDs to the validator's declared check IDs", async () => {
+  const rubric = JSON.parse(await readFile(RUBRIC_PATH, "utf8")) as {
+    checks: Array<{ id: string }>;
+  };
+  assert.equal(rubric.checks.length, EXPECTED_CHECK_IDS.length);
+  assert.deepEqual(
+    new Set(rubric.checks.map((c) => c.id)),
+    new Set(EXPECTED_CHECK_IDS),
   );
 });
 

@@ -35,6 +35,25 @@ import type { CandidateMode, ConditionId, PartialLimits, StopCause, StructuredFa
 import type { NormalizedMessage, NormalizedToolStep } from "../harnesses/harness.ts";
 import { MANIFEST_FILE, RECEIPT_FILE, VIEWS_DIR, isChainExcludedPath } from "./store.ts";
 import { exportSessionFileToHtml } from "../harnesses/pi/export-viewer.ts";
+import { decodeRubric, isRubricScore, scoreWithRubric } from "../runner/rubric.ts";
+import type { Rubric, RubricScore } from "../runner/rubric.ts";
+import {
+  buildScoredReport,
+  formatDuration,
+  renderScoredMarkdown,
+  renderScoredTerminal,
+  renderScoredJson,
+  REPORT_JSON_SCHEMA_VERSION,
+  LEGACY_RESULT_LABEL,
+} from "./scored-report.ts";
+import type {
+  ScoredReportModel,
+  ScoredArmAccuracy,
+  ScoredPillars,
+  ScoredAccuracyTable,
+  ScoredChecksTable,
+  ScoredCostLatencyTable,
+} from "./scored-report.ts";
 
 // ---------------------------------------------------------------------------
 // Verification
@@ -538,6 +557,7 @@ export interface RunReceipt {
   readonly caseSelector: string;
   readonly caseId: string;
   readonly caseVersion: number;
+  readonly rubricVersion?: string;
   readonly mode: string;
   readonly status: string;
   readonly stopReason: string | null;
@@ -628,6 +648,12 @@ export interface ConditionReport {
    */
   readonly stopCause: StopCause;
   readonly providerStopReason: string | null;
+  readonly rubricScore?: RubricScore | null;
+  /**
+   * Latency derived from the native session (first prompt → last recorded message) when
+   * `timing.durationMs` is missing. `null` when no session evidence exists; never fabricated.
+   */
+  readonly sessionDurationMs?: number | null;
 }
 
 export interface PairReport {
@@ -682,18 +708,31 @@ export interface RunReport {
   readonly elapsedWallTime?: string;
   readonly limits?: PartialLimits;
   readonly failures?: readonly StructuredFailure[];
+  readonly rubricVersion?: string;
+  readonly isLegacy: boolean;
+  readonly skillSourcePath?: string;
+  readonly caseTitle?: string;
+  readonly caseScenario?: string;
+  readonly scored?: ScoredReportModel | null;
 }
 
 async function readCondition(
   runDir: string,
   conditionDir: string,
-): Promise<{ condition: SealedCondition; validation: ValidationOutcome | null; nativeSessionAvailable: boolean }> {
+): Promise<{
+  condition: SealedCondition;
+  validation: ValidationOutcome | null;
+  rubricScore: RubricScore | null;
+  nativeSessionAvailable: boolean;
+  sessionDurationMs: number | null;
+}> {
   const condition = (await readJsonFile(join(runDir, conditionDir, "condition.json"), `${conditionDir}/condition.json`)) as SealedCondition;
   const validationRecord = (await readJsonFile(
     join(runDir, conditionDir, "validation.json"),
     `${conditionDir}/validation.json`,
-  )) as { outcome?: ValidationOutcome | null };
+  )) as { outcome?: (ValidationOutcome & { rubricScore?: unknown }) | null };
   let nativeSessionAvailable = false;
+  let sessionDurationMs: number | null = null;
   try {
     const sessionRaw = await readFile(join(runDir, conditionDir, "session.json"), "utf8");
     const sessionRecord = JSON.parse(sessionRaw) as Record<string, unknown>;
@@ -707,10 +746,39 @@ async function readCondition(
       sessionRecord.available !== false &&
       entries.length > 0 &&
       first?.type === "session";
+    sessionDurationMs = sessionRecord?.available === false ? null : deriveSessionDurationMs(entries);
   } catch {
     nativeSessionAvailable = false;
   }
-  return { condition, validation: validationRecord.outcome ?? null, nativeSessionAvailable };
+  // Only a sealed rubric v0.2 score is honored; anything else is treated as absent.
+  const sealed = validationRecord.outcome?.rubricScore;
+  const rubricScore = isRubricScore(sealed) ? sealed : null;
+  return { condition, validation: validationRecord.outcome ?? null, rubricScore, nativeSessionAvailable, sessionDurationMs };
+}
+
+/**
+ * Derives latency from native session entries: first user prompt timestamp to the last
+ * recorded message timestamp. Returns null when either timestamp is unavailable.
+ */
+export function deriveSessionDurationMs(entries: readonly unknown[]): number | null {
+  let startMs: number | null = null;
+  let endMs: number | null = null;
+  for (const raw of entries) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as { type?: unknown; timestamp?: unknown; message?: { role?: unknown; timestamp?: unknown } };
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+    const at =
+      typeof entry.timestamp === "string" ? Date.parse(entry.timestamp)
+      : typeof entry.message.timestamp === "number" ? entry.message.timestamp
+      : Number.NaN;
+    if (!Number.isFinite(at)) continue;
+    if (startMs === null) {
+      if (entry.message.role !== "user") continue;
+      startMs = at;
+    }
+    endMs = at;
+  }
+  return startMs !== null && endMs !== null && endMs >= startMs ? endMs - startMs : null;
 }
 
 function countChecks(outcome: ValidationOutcome | null): { passed: number; total: number } {
@@ -749,8 +817,39 @@ export async function buildRunReport(receiptPath: string): Promise<RunReport> {
       runDir,
       verification,
       pairs,
+      isLegacy: false,
+      rubricVersion: receipt.rubricVersion,
+      scored: null,
     };
   }
+
+  let rubric: Rubric | null = null;
+  let rubricVersion = receipt.rubricVersion;
+  try {
+    const rubricPath = join(runDir, "inputs", "rubric.json");
+    const rawRubric = await readJsonFile(rubricPath, "inputs/rubric.json");
+    rubric = decodeRubric(rawRubric);
+    if (!rubricVersion) {
+      rubricVersion = rubric.rubricVersion;
+    }
+  } catch {
+    rubric = null;
+  }
+  const isLegacy = rubric === null || receipt.rubricVersion === undefined;
+
+  let skillSourcePath: string | undefined;
+  try {
+    const snapshotPath = join(runDir, "inputs", "skill-snapshot.json");
+    const snapshot = (await readJsonFile(snapshotPath, "inputs/skill-snapshot.json")) as Record<string, unknown>;
+    if (typeof snapshot?.sourcePath === "string" && snapshot.sourcePath.length > 0) {
+      skillSourcePath = snapshot.sourcePath;
+    }
+  } catch {
+    skillSourcePath = undefined;
+  }
+
+  const caseTitle = rubric?.display?.title;
+  const caseScenario = rubric?.display?.scenario;
 
   let target: Target | undefined;
   let harnessId: string | undefined;
@@ -800,12 +899,14 @@ export async function buildRunReport(receiptPath: string): Promise<RunReport> {
 
   let taskLimitCount = 0;
   let infrastructureFailureCount = 0;
+  const reportFailures: StructuredFailure[] = [];
 
   for (const pairRef of receipt.pairs) {
     const conditionReports: ConditionReport[] = [];
     const grades: ConditionGrade[] = [];
     for (const conditionRef of pairRef.conditions) {
-      const { condition, validation, nativeSessionAvailable } = await readCondition(runDir, conditionRef.dir);
+      const { condition, validation, rubricScore: sealedRubricScore, nativeSessionAvailable, sessionDurationMs } =
+        await readCondition(runDir, conditionRef.dir);
       const checks = countChecks(validation);
       const timing = condition.timing as { durationMs?: unknown } | null;
       const usage = condition.usage as {
@@ -837,15 +938,43 @@ export async function buildRunReport(receiptPath: string): Promise<RunReport> {
           ? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
           : null;
 
+      // A rubric score is only shown under a decodable v0.2 frozen rubric; any other
+      // run is reported through the legacy branch with its original scalar score.
+      let rubricScore: RubricScore | null = null;
+      if (validation !== null && validation.status === "graded" && rubric !== null) {
+        if (sealedRubricScore !== null) {
+          rubricScore = sealedRubricScore;
+        } else {
+          try {
+            const recomputed = scoreWithRubric(rubric, validation.checks);
+            if (validation.score !== null && Math.abs(recomputed.accuracyTotal / 100 - validation.score) > 1e-6) {
+              rubricScore = null;
+              reportFailures.push({
+                code: "protocol-drift",
+                failureClass: "infrastructure",
+                message: `recomputed rubric score (${recomputed.accuracyTotal / 100}) does not match sealed validation score (${validation.score}); suppressed rubric score`,
+                at: `${conditionRef.dir}/validation.json`,
+              });
+            } else {
+              rubricScore = recomputed;
+            }
+          } catch {
+            rubricScore = null;
+          }
+        }
+      }
+
       conditionReports.push({
         conditionId: condition.conditionId,
         status: condition.status,
         gradeable: condition.gradeable,
         score: validation !== null && validation.status === "graded" ? validation.score : null,
         fullPass: validation !== null && validation.status === "graded" ? validation.fullPass : null,
+        rubricScore,
         checksPassed: checks.passed,
         checksTotal: checks.total,
         durationMs: typeof timing?.durationMs === "number" ? timing.durationMs : null,
+        sessionDurationMs: typeof timing?.durationMs === "number" ? null : sessionDurationMs,
         providerRequests: typeof usage?.providerRequests === "number" ? usage.providerRequests : null,
         toolSteps: typeof usage?.toolSteps === "number" ? usage.toolSteps : null,
         inputTokens,
@@ -989,11 +1118,11 @@ export async function buildRunReport(receiptPath: string): Promise<RunReport> {
     const startMs = Date.parse(receipt.createdAt);
     const endMs = Date.parse(receipt.finalizedAt);
     if (endMs >= startMs) {
-      elapsedWallTime = `${((endMs - startMs) / 1000).toFixed(1)}s`;
+      elapsedWallTime = formatDuration(endMs - startMs);
     }
   }
 
-  return {
+  const intermediateReport: RunReport = {
     runId: receipt.runId,
     suiteId: receipt.suiteId,
     caseSelector: receipt.caseSelector,
@@ -1013,7 +1142,20 @@ export async function buildRunReport(receiptPath: string): Promise<RunReport> {
     counts,
     elapsedWallTime,
     limits,
-    failures: receipt.failures,
+    failures: [...(receipt.failures ?? []), ...reportFailures],
+    rubricVersion: isLegacy ? undefined : (rubricVersion ?? rubric?.rubricVersion),
+    isLegacy,
+    skillSourcePath,
+    caseTitle,
+    caseScenario,
+    scored: null,
+  };
+
+  const scored = !isLegacy && pairs.length === 1 ? buildScoredReport(intermediateReport, rubric) : null;
+
+  return {
+    ...intermediateReport,
+    scored,
   };
 }
 
@@ -1190,7 +1332,12 @@ function findFirstAvailableNativeSession(pairs: readonly PairReport[]): {
  */
 export function formatRunReport(
   report: RunReport,
-  options: { readonly format?: "table" | "markdown" | "json"; readonly details?: boolean; readonly runNumber?: number } = {},
+  options: {
+    readonly format?: "table" | "markdown" | "json";
+    readonly details?: boolean;
+    readonly checks?: boolean;
+    readonly runNumber?: number;
+  } = {},
 ): string {
   const format = options.format ?? "table";
 
@@ -1198,7 +1345,7 @@ export function formatRunReport(
     if (!report.verification.ok) {
       return JSON.stringify(
         {
-          schemaVersion: 1,
+          schemaVersion: REPORT_JSON_SCHEMA_VERSION,
           success: false,
           receipt: null,
           summary: null,
@@ -1218,11 +1365,14 @@ export function formatRunReport(
     }
     return JSON.stringify(
       {
-        schemaVersion: 1,
+        schemaVersion: REPORT_JSON_SCHEMA_VERSION,
         runId: report.runId,
         suiteId: report.suiteId,
         caseSelector: report.caseSelector,
         caseId: report.caseId,
+        rubricVersion: report.isLegacy ? null : (report.rubricVersion ?? null),
+        isLegacy: report.isLegacy ?? false,
+        ...(report.isLegacy ? { legacyLabel: LEGACY_RESULT_LABEL } : {}),
         mode: report.mode,
         status: report.status,
         testDouble: report.testDouble,
@@ -1242,6 +1392,7 @@ export function formatRunReport(
         counts: report.counts ?? null,
         limits: report.limits ?? null,
         elapsedWallTime: report.elapsedWallTime ?? null,
+        scored: !report.isLegacy && report.pairs.length === 1 && report.scored ? renderScoredJson(report.scored) : null,
         pairs: report.pairs,
         failures: report.failures ?? [],
         commands: {
@@ -1256,15 +1407,15 @@ export function formatRunReport(
   }
 
   const markdown = format === "markdown";
-  const lines = [`${markdown ? "# " : ""}(${options.runNumber ?? 1}) ${report.runId}`, ""];
-  const field = (label: string, value: string): void => {
-    lines.push(markdown ? `- **${label}:** ${value}` : `${label.toLowerCase().padEnd(9)} ${value}`);
-  };
-  field("Case", `${report.caseSelector} (${report.caseId})`);
-  field("Status", `${report.status}${report.stopReason === null ? "" : ` — ${report.stopReason}`}`);
-  if (report.testDouble) field("Synthetic", "TEST-DOUBLE EVIDENCE — synthetic scores, not a measured result");
 
   if (!report.verification.ok) {
+    const lines = [`${markdown ? "# " : ""}(${options.runNumber ?? 1}) ${report.runId}`, ""];
+    const field = (label: string, value: string): void => {
+      lines.push(markdown ? `- **${label}:** ${value}` : `${label.toLowerCase().padEnd(9)} ${value}`);
+    };
+    field("Case", `${report.caseSelector} (${report.caseId})`);
+    field("Status", `${report.status}${report.stopReason === null ? "" : ` — ${report.stopReason}`}`);
+    if (report.testDouble) field("Synthetic", "TEST-DOUBLE EVIDENCE — synthetic scores, not a measured result");
     field("Verification", "FAILED");
     for (const failure of report.verification.failures) {
       field("Failure", `[${failure.code}] ${failure.message}`);
@@ -1280,6 +1431,81 @@ export function formatRunReport(
     return lines.join("\n");
   }
 
+  const nativeTarget = findFirstAvailableNativeSession(report.pairs);
+  const inspect =
+    nativeTarget === null
+      ? "n/a (no native Pi session recorded for this run)"
+      : `pnpm eval:inspect --receipt ${report.receiptPath} --pair ${nativeTarget.pairId} --condition ${nativeTarget.conditionId} --view session --export both`;
+
+  const multiplePairs = report.pairs.length > 1;
+
+  const publishCommand = `pnpm eval:publish --receipt ${report.receiptPath} --checks`;
+
+  // Rubric-scored Markdown output (same layout as the published EVALS.md) for single-pair runs.
+  // Operational data stays in a footer, below the scored sections.
+  if (markdown && report.scored && !report.isLegacy && !multiplePairs) {
+    const footerLines = [
+      ...(report.testDouble ? ["- **Synthetic:** TEST-DOUBLE EVIDENCE — synthetic scores, not a measured result"] : []),
+      `- **Limits:** ${formatLimits(report.limits)}`,
+      `- **Elapsed:** ${report.elapsedWallTime ?? "n/a"} wall time`,
+      ...(report.failures ?? []).map((failure) => `- **Failure:** [${failure.code}] ${failure.message}`),
+      `- **Receipt:** \`${report.receiptPath}\``,
+      `- Inspect/export: \`${inspect}\``,
+    ];
+    let footer = footerLines.join("\n");
+    if (options.details && report.pairs.length > 0) {
+      footer = `## Operational details\n\n\`\`\`text\n${renderPairDetails(report)}\n\`\`\`\n\n${footer}`;
+    }
+    return renderScoredMarkdown(report.scored, {
+      checks: options.checks,
+      details: options.details,
+      footer,
+    });
+  }
+
+  // Rubric-scored terminal output for single-pair runs: the same sections, labels and
+  // values as EVALS.md, followed by an operational footer.
+  if (!markdown && report.scored && !report.isLegacy && !multiplePairs) {
+    // A numbered heading separates reports only when several receipts are rendered together.
+    const lines: string[] = options.runNumber === undefined ? [] : [`(${options.runNumber}) ${report.runId}`, ""];
+    const field = (label: string, value: string): void => {
+      lines.push(`${label.toLowerCase().padEnd(9)} ${value}`);
+    };
+    lines.push(renderScoredTerminal(report.scored, {
+      checks: options.checks,
+      headerExtra: report.testDouble ? [["Note", "TEST-DOUBLE EVIDENCE — synthetic scores, not a measured result"]] : [],
+    }));
+    if (options.details && report.pairs.length > 0) {
+      lines.push("", renderPairDetails(report));
+    }
+    lines.push("");
+    field("Limits", formatLimits(report.limits));
+    field("Elapsed", `${report.elapsedWallTime ?? "n/a"} wall time`);
+    for (const failure of report.failures ?? []) {
+      field("Failure", `[${failure.code}] ${failure.message}`);
+    }
+    field("Receipt", report.receiptPath);
+    field("Inspect", inspect);
+    field("Publish", publishCommand);
+    return lines.join("\n");
+  }
+
+  // Legacy run representation (preserves original scalar scores and table layout)
+  const lines = [`${markdown ? "# " : ""}(${options.runNumber ?? 1}) ${report.runId}`, ""];
+  if (report.isLegacy) {
+    lines.push(
+      markdown
+        ? `> **Warning:** ${LEGACY_RESULT_LABEL}\n`
+        : `*** ${LEGACY_RESULT_LABEL} ***\n`,
+    );
+  }
+  const field = (label: string, value: string): void => {
+    lines.push(markdown ? `- **${label}:** ${value}` : `${label.toLowerCase().padEnd(9)} ${value}`);
+  };
+  field("Case", `${report.caseSelector} (${report.caseId})`);
+  field("Status", `${report.status}${report.stopReason === null ? "" : ` — ${report.stopReason}`}`);
+  if (report.testDouble) field("Synthetic", "TEST-DOUBLE EVIDENCE — synthetic scores, not a measured result");
+
   field("Target", `${report.target?.provider ?? "n/a"} / ${report.target?.model ?? "n/a"}; thinking=${report.target?.thinking ?? "n/a"}; harness=${report.harnessId ?? "n/a"}`);
   if (report.counts) {
     field("Pairs", `${report.counts.plannedPairs} planned / ${report.counts.attemptedPairs} attempted / ${report.counts.validPairs} gradeable; ${report.counts.notStartedPairs} not started`);
@@ -1290,7 +1516,6 @@ export function formatRunReport(
     field("Failure", `[${failure.code}] ${failure.message}`);
   }
 
-  const multiplePairs = report.pairs.length > 1;
   if (multiplePairs) {
     lines.push("", markdown ? "## Averages" : "Averages", "", `Gradeable pairs: ${report.counts?.validPairs ?? 0}`, "",
       markdown ? renderMarkdownTable(report) : renderResultsTable(report), "",
@@ -1315,9 +1540,6 @@ export function formatRunReport(
   }
   lines.push("");
   field("Receipt", markdown ? `\`${report.receiptPath}\`` : report.receiptPath);
-  const nativeTarget = findFirstAvailableNativeSession(report.pairs);
-  const inspect = nativeTarget === null ? "n/a (no native Pi session recorded for this run)"
-    : `pnpm eval:inspect --receipt ${report.receiptPath} --pair ${nativeTarget.pairId} --condition ${nativeTarget.conditionId} --view session --export both`;
   lines.push(markdown ? `- Inspect/export: \`${inspect}\`` : `native    ${inspect}`);
   return lines.join("\n");
 }
@@ -2137,6 +2359,7 @@ export interface ResolvedNativeSessionResult {
   readonly completed: boolean;
   readonly incompleteTail: boolean;
   readonly tailStatus: string;
+  readonly reasoningCaptured?: boolean;
   /** Full native JSONL records: actual header first when it was observed, then tree entries. */
   readonly entries: readonly unknown[];
   readonly header: unknown | null;
@@ -2204,6 +2427,7 @@ export async function readNativeSession(
     completed: record.completed === true,
     incompleteTail: record.incompleteTail === true,
     tailStatus: typeof record.tailStatus === "string" ? record.tailStatus : (available ? "completed" : "unavailable"),
+    ...(typeof record.reasoningCaptured === "boolean" ? { reasoningCaptured: record.reasoningCaptured } : {}),
     entries,
     header,
     treeEntries,
@@ -2579,3 +2803,21 @@ export async function exportNativeSessionView(input: {
   }
   return { runId: receipt.runId, pairId: pair.pairId, conditionId: input.conditionId, jsonlPath, htmlPath, completed: session.completed, tailStatus: session.tailStatus, redactions: session.redactions.count };
 }
+
+export {
+  buildScoredReport,
+  renderScoredMarkdown,
+  renderScoredTerminal,
+  renderScoredJson,
+  REPORT_JSON_SCHEMA_VERSION,
+  LEGACY_RESULT_LABEL,
+};
+export type {
+  ScoredReportModel,
+  ScoredArmAccuracy,
+  ScoredPillars,
+  ScoredAccuracyTable,
+  ScoredChecksTable,
+  ScoredCostLatencyTable,
+};
+

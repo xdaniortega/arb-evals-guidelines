@@ -18,11 +18,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAllowlistedEnv } from "../test-guards.ts";
-import { buildRunReport, formatRunReport, renderResultsTable } from "../artifacts/queries.ts";
+import { buildRunReport, formatRunReport, renderResultsTable, REPORT_JSON_SCHEMA_VERSION } from "../artifacts/queries.ts";
 import { createEvidenceStore, createRunJournal } from "../artifacts/store.ts";
 import { buildRunPlan, sha256Hex } from "../core/experiment.ts";
 import type { RunPlan } from "../core/experiment.ts";
 import { EVIDENCE_SCHEMA_VERSION, SAFE_DEFAULT_LIMITS } from "../core/types.ts";
+import { createFakeHarness } from "../harnesses/fake.ts";
 import { createPiHarness } from "../harnesses/pi/adapter.ts";
 import { createScriptedStreamSimple } from "../harnesses/pi/scripted-stream.ts";
 import { createFakeSandbox } from "../sandboxes/fake.ts";
@@ -170,16 +171,33 @@ describe("Process-level automatic table and report contract", () => {
       receiptPath = extractReceiptPath(stdout);
 
       const runTables = extractTables(stdout);
-      expect(runTables).toHaveLength(1);
-      expect(tableRows(runTables[0]!)[0]).toEqual(PAIR_COLUMNS);
-      expect(tableRows(runTables[0]!)).toHaveLength(2);
-      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
-      expect(tableRows(runTables[0]!)[1]?.[0]).toBe(receipt.pairs[0].pairId);
+      expect(runTables).toHaveLength(3);
 
-      expect(stdout).toMatch(/^\(1\) \S+/);
-      expect(stdout).toMatch(/^Pair outcomes$/m);
-      expect(stdout).not.toMatch(/^Pair \d+$/m);
-      expect(stdout).toMatch(/^Pair 1: Baseline: completed \/ (?:PASS|NOT PASS); Treatment: completed \/ (?:PASS|NOT PASS)\.$/m);
+      // 1. Evaluation pillars table
+      const pillarRows = tableRows(runTables[0]!);
+      expect(pillarRows[0]).toEqual(["Pillar", "Without this skill", "With this skill", "Change"]);
+      expect(pillarRows[1]?.[0]).toBe("Accuracy");
+      expect(pillarRows[2]?.[0]).toBe("Cost: recorded tokens");
+      expect(pillarRows[3]?.[0]).toBe("Latency");
+
+      // 2. Accuracy breakdown table
+      const accuracyRows = tableRows(runTables[1]!);
+      expect(accuracyRows[0]).toEqual(["Check", "Without this skill", "With this skill"]);
+      expect(accuracyRows.map((row) => row[0])).toEqual([
+        "Check", "Outcome correctness and completeness", "Constraints and preservation", "Accuracy total",
+      ]);
+
+      // 3. Cost and latency table
+      const costLatencyRows = tableRows(runTables[2]!);
+      expect(costLatencyRows[0]).toEqual(["Metric", "Without this skill", "With this skill"]);
+      expect(costLatencyRows[1]?.[0]).toBe("Total recorded tokens, including cached input");
+      expect(costLatencyRows[2]?.[0]).toBe("Time to completion or termination");
+
+      expect(stdout).toMatch(/^network configuration migration$/m);
+      expect(stdout).toMatch(/^Run:\s+\S+ · Pair r001$/m);
+      expect(stdout).toMatch(/^Status: Completed; graded$/m);
+      expect(stdout).not.toMatch(/^Pair outcomes$/m);
+      expect(stdout).toMatch(/^publish\s+pnpm eval:publish --receipt \S+ --checks$/m);
       expect(stdout).not.toMatch(/^Averages$/m);
       expect(stdout).not.toContain("Gradeable pairs:");
       expect(stdout).not.toContain("In averages:");
@@ -232,25 +250,31 @@ describe("Process-level automatic table and report contract", () => {
       expect(combined.stdout).toMatch(/^\(1\) /m);
       expect(combined.stdout).toMatch(/^\(2\) /m);
       expect(combined.stdout.match(/^Averages$/gm)).toHaveLength(1);
-      expect(combined.stdout).toContain("1 planned / 1 attempted / 1 gradeable");
       expect(combined.stdout).toContain("2 planned / 2 attempted / 2 gradeable");
       const sections = combined.stdout.split(/(?=^\(\d+\) )/m).filter((section) => /^\(\d+\) /.test(section));
       expect(sections).toHaveLength(2);
       for (const [index, section] of sections.entries()) {
         const pairCount = index + 1;
         expect(section).not.toMatch(/^Pair \d+$/m);
-        expect(section.match(/^Pair \d+: Baseline:/gm)).toEqual(Array.from({ length: pairCount }, (_, pair) => `Pair ${pair + 1}: Baseline:`));
-        const tables = extractTables(section);
-        expect(tables).toHaveLength(pairCount > 1 ? 2 : 1);
-        const pairRows = tableRows(tables.at(-1)!);
-        expect(pairRows[0]).toEqual(PAIR_COLUMNS);
-        expect(pairRows).toHaveLength(pairCount + 1);
         if (pairCount > 1) {
+          expect(section.match(/^Pair \d+: Baseline:/gm)).toEqual(Array.from({ length: pairCount }, (_, pair) => `Pair ${pair + 1}: Baseline:`));
+        }
+        const tables = extractTables(section);
+        if (pairCount > 1) {
+          expect(tables).toHaveLength(2);
+          const pairRows = tableRows(tables.at(-1)!);
+          expect(pairRows[0]).toEqual(PAIR_COLUMNS);
+          expect(pairRows).toHaveLength(pairCount + 1);
           expect(section.match(/^Averages$/gm)).toHaveLength(1);
           expect(section.indexOf("\nAverages\n")).toBeLessThan(section.indexOf("\nPair outcomes\n"));
           expect(section).toContain(`Gradeable pairs: ${pairCount}`);
           expect(tableRows(tables[0]!)[0]).toEqual(RESULT_COLUMNS);
         } else {
+          expect(tables).toHaveLength(3);
+          expect(tableRows(tables[0]!)[0]).toEqual(["Pillar", "Without this skill", "With this skill", "Change"]);
+          expect(tableRows(tables[1]!)[0]).toEqual(["Check", "Without this skill", "With this skill"]);
+          expect(tableRows(tables[1]!).map((row) => row[0])).not.toContain("Unhappy-path handling");
+          expect(tableRows(tables[2]!)[0]).toEqual(["Metric", "Without this skill", "With this skill"]);
           expect(section).not.toMatch(/^Averages$/m);
           expect(section).not.toContain("Gradeable pairs:");
         }
@@ -260,11 +284,14 @@ describe("Process-level automatic table and report contract", () => {
       const runs = JSON.parse(combinedJson.stdout);
       expect(runs).toHaveLength(2);
       expect(runs.map((run: { counts: { validPairs: number } }) => run.counts.validPairs)).toEqual([1, 2]);
-      for (const [index, section] of sections.entries()) {
-        const pairIds = tableRows(extractTables(section).at(-1)!).slice(1).map((row) => row[0]);
-        expect(pairIds).toEqual(runs[index].pairs.map((pair: { pairId: string }) => pair.pairId));
-        expect(new Set(pairIds).size).toBe(pairIds.length);
-      }
+      expect(runs[0].scored).not.toBeNull();
+      expect(runs[1].scored).toBeNull();
+      // Multi-pair run retains the pair table with pairIds matching runs[1].pairs
+      const multiPairIds = tableRows(extractTables(sections[1]!).at(-1)!).slice(1).map((row) => row[0]);
+      expect(multiPairIds).toEqual(runs[1].pairs.map((pair: { pairId: string }) => pair.pairId));
+      expect(new Set(multiPairIds).size).toBe(multiPairIds.length);
+      // Single-pair run contains pair 1 outcome
+      expect(sections[0]).toContain("Status: Completed; graded");
     } finally {
       for (const receipt of receipts) rmSync(dirname(receipt), { recursive: true, force: true });
     }
@@ -377,7 +404,7 @@ describe("Process-level automatic table and report contract", () => {
       expect(jsonRes.status).toBe(0);
       // Stdout must be 100% parseable JSON without banners
       const parsed = JSON.parse(jsonRes.stdout);
-      expect(parsed.schemaVersion).toBe(1);
+      expect(parsed.schemaVersion).toBe(REPORT_JSON_SCHEMA_VERSION);
       expect(parsed.status).toBe("complete");
       expect(parsed.testDouble).toBe(true);
       expect(parsed.evidenceLabel).toContain("TEST-DOUBLE EVIDENCE");
@@ -398,19 +425,33 @@ describe("Process-level automatic table and report contract", () => {
       // Markdown format
       const mdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown"]);
       expect(mdRes.status).toBe(0);
-      const markdownHeaders = mdRes.stdout.split("\n").filter((line) => line === PAIR_MARKDOWN_HEADER);
-      expect(markdownHeaders).toHaveLength(1);
-      expect(mdRes.stdout.split("\n").filter((line) => line === MARKDOWN_HEADER)).toHaveLength(0);
-      expect(mdRes.stdout).toContain("| :--- | :--- | :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: |");
-      expect(mdRes.stdout).toContain("## Pair outcomes");
-      expect(mdRes.stdout).not.toContain("### Pair 1");
+      expect(mdRes.stdout).toContain("# EVALS.MD: network configuration migration");
+      expect(mdRes.stdout).toContain(`Agent: fake · google/fake-model-0`);
+      expect(mdRes.stdout).toContain(`Skill: arbitrum-docs`);
+      expect(mdRes.stdout).toContain(`Run: ${parsed.runId} · Pair r001`);
+      expect(mdRes.stdout).toContain("Status: Completed; graded");
+      expect(mdRes.stdout).toContain("| Pillar | Without this skill | With this skill | Change |");
+      expect(mdRes.stdout).toContain(`| Accuracy | ${parsed.scored.accuracy.baseline}% | ${parsed.scored.accuracy.treatment}% |`);
+      expect(mdRes.stdout).toContain("## Scenario: Migrate production and staging network configuration to Arbitrum");
+      expect(mdRes.stdout).toContain("### Accuracy");
+      expect(mdRes.stdout).toContain("| Check | Without this skill | With this skill |");
+      expect(mdRes.stdout).toContain("| Outcome correctness and completeness |");
+      expect(mdRes.stdout).not.toContain("Unhappy-path handling");
+      expect(mdRes.stdout).toContain("| Constraints and preservation |");
+      expect(mdRes.stdout).toContain(`| **Accuracy total** | **${parsed.scored.accuracy.baseline}/100 — ${parsed.scored.accuracy.baseline}%** | **${parsed.scored.accuracy.treatment}/100 — ${parsed.scored.accuracy.treatment}%** |`);
+      expect(mdRes.stdout).toContain("### Cost and latency");
       expect(mdRes.stdout).not.toContain("## Averages");
+      expect(mdRes.stdout).not.toContain("## Pair outcomes");
       expect(mdRes.stdout).not.toContain("Gradeable pairs:");
-      expect(mdRes.stdout).toContain(`| ${parsed.pairs[0].pairId} |`);
-      expect(mdRes.stdout).not.toContain("In averages:");
-      expect(mdRes.stdout).toMatch(/Pair 1: Baseline: completed \/ (?:PASS|NOT PASS); Treatment: completed \/ (?:PASS|NOT PASS)\./);
-      expect(mdRes.stdout).toContain(parsed.caseSelector);
       expect(mdRes.stdout).not.toContain("score=");
+
+      // Numeric agreement: markdown and json share identical numbers
+      expect(mdRes.stdout).toContain(`${parsed.scored.accuracy.baseline}%`);
+      expect(mdRes.stdout).toContain(`${parsed.scored.accuracy.treatment}%`);
+      expect(mdRes.stdout).toContain(parsed.scored.groups.outcome.baseline);
+      expect(mdRes.stdout).toContain(parsed.scored.groups.outcome.treatment);
+      expect(mdRes.stdout).toContain(parsed.scored.groups.constraints.baseline);
+      expect(mdRes.stdout).toContain(parsed.scored.groups.constraints.treatment);
 
       const detailedMdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--details"]);
       expect(detailedMdRes.status).toBe(0);
@@ -420,10 +461,62 @@ describe("Process-level automatic table and report contract", () => {
       const detailedJsonRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--details"]);
       expect(detailedJsonRes.status).toBe(0);
       expect(JSON.parse(detailedJsonRes.stdout)).toEqual(reportParsed);
+
+      const checksMdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--checks"]);
+      expect(checksMdRes.status).toBe(0);
+      expect(checksMdRes.stdout).toContain("### Outcome checks");
+      expect(checksMdRes.stdout).toContain("| Correct network identities |");
+
+      const checksJsonRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--checks"]);
+      expect(checksJsonRes.status).toBe(0);
+      expect(JSON.parse(checksJsonRes.stdout)).toEqual(reportParsed);
     } finally {
       if (receiptPath) {
         rmSync(dirname(receiptPath), { recursive: true, force: true });
       }
+    }
+  });
+
+  it("renders markdown status header with both arms for mixed case baseline task-limit and treatment completed", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "mixed-status-"));
+    const workDir = join(tempRoot, "work");
+
+    try {
+      await writeOfflineSkill(tempRoot);
+      const mixedHarness = createFakeHarness({
+        script: (request) => ({
+          outcome: request.conditionId === "baseline" ? "task-limit" : "completed",
+          assistantText: request.conditionId === "baseline" ? "task limit reached" : "task completed",
+        }),
+      });
+
+      const result = await runPairedEvaluation({
+        evalsRoot: resolve(process.cwd(), "evals"),
+        repoRoot: tempRoot,
+        caseSelector: "network-config-01",
+        skillPath: "skills/arbitrum-docs",
+        mode: "fake",
+        repetitions: 1,
+        cliLimits: SAFE_DEFAULT_LIMITS,
+        target: { provider: "google", model: "fake-model-0", thinking: "off" },
+        runId: "mixed-status-test",
+        runsRoot: join(tempRoot, "runs"),
+        resourceNonce: "abcd1234",
+        createdAt: new Date().toISOString(),
+        source: { revision: "test", dirty: false },
+        evaluatorBuild: "test",
+        harness: mixedHarness,
+        sandbox: createFakeSandbox(),
+        validatorRunner: createInProcessValidatorRunner(),
+        workDir,
+      });
+
+      const mdRes = runCommand(REPORT_SCRIPT, ["--receipt", result.receiptPath, "--format", "markdown"]);
+      expect(mdRes.status).toBe(0);
+      expect(mdRes.stdout).toContain("Status: Without this skill: task limit reached, graded · With this skill: completed, graded\n");
+    } finally {
+      await disposeRunWorkDir(workDir).catch(() => {});
+      rmSync(tempRoot, { recursive: true, force: true });
     }
   });
 

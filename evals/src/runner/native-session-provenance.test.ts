@@ -1,13 +1,13 @@
 /**
- * Regression test for Pi SDK native session provenance, sanitization, and retention.
+ * Regression test for Pi SDK native session provenance, redaction, and retention.
  *
  * Exercises:
  * 1. createPiHarness + createFakeSandbox + real createAgentSession + tools with scripted stream.
  * 2. Exact correspondence between observed live SDK IDs/parents/toolcall-results and sealed session.json.
  * 3. Real file effect executed by SDK tools on the sandbox workspace.
  * 4. Actual receipt verification and reporting over sealed immutable evidence.
- * 5. Complete stripping of thinking blocks / signatures and verifiable redaction of echoed secrets (gradeable).
- * 6. Guarantee that live SDK session state is never mutated by sanitization.
+ * 5. Thinking blocks and signatures preserved verbatim; verifiable redaction of echoed secrets (gradeable).
+ * 6. Guarantee that live SDK session state is never mutated by redaction.
  * 7. Quarantine fault stopping future repetitions and cancelling run-wide dispatch.
  * 8. Preservation of partial prefix after verified task-limit stop.
  * 9. Honest unavailable status when native entries are absent (e.g. from fake harness).
@@ -47,7 +47,7 @@ import { installTestGuards } from "../test-guards.ts";
 const repoRoot = process.cwd();
 const evalsRoot = join(repoRoot, "evals");
 
-describe("Native session provenance, sanitization, and retention regression (L1)", () => {
+describe("Native session provenance, redaction, and retention regression (L1)", () => {
   let tempDirs: string[] = [];
 
   function makeTempDir(prefix: string): string {
@@ -71,7 +71,7 @@ describe("Native session provenance, sanitization, and retention regression (L1)
     tempDirs = [];
   });
 
-  it("proves real SDK entry IDs, parents, tool effects, thinking stripping, and secret redaction survive runner sealing", async () => {
+  it("proves real SDK entry IDs, parents, tool effects, preserved thinking, and secret redaction survive runner sealing", async () => {
     const root = makeTempDir("native-prov-");
     const workDir = makeTempDir("native-prov-work-");
     const secretValue = "top-secret-canary-key-4242";
@@ -155,6 +155,7 @@ describe("Native session provenance, sanitization, and retention regression (L1)
       runsRoot: join(root, "runs"),
       stateDir: join(root, ".state"),
       guardedSecrets,
+      captureReasoning: true,
       credentials: guardedSecrets.map((s) => ({
         variable: s.label,
         value: s.value,
@@ -180,6 +181,7 @@ describe("Native session provenance, sanitization, and retention regression (L1)
     expect(baselineSession.completed).toBe(true);
     expect(baselineSession.incompleteTail).toBe(false);
     expect(baselineSession.tailStatus).toBe("completed");
+    expect(baselineSession.reasoningCaptured).toBe(true);
 
     const sealedEntries = baselineSession.entries as NativeSessionEntry[];
     expect(sealedEntries.length).toBeGreaterThanOrEqual(4);
@@ -252,20 +254,21 @@ describe("Native session provenance, sanitization, and retention regression (L1)
     // The result's parent must be the tool call entry
     expect(writeResultEntry!.parentId).toBe(writeCallEntry!.id);
 
-    // 6. Complete stripping of private reasoning, thinking blocks, and signatures
+    // 6. Private reasoning, thinking blocks, and signatures are preserved verbatim - the
+    // sealed session is Pi's raw native session; only secret values are ever changed.
     const serializedSealed = JSON.stringify(sealedEntries);
-    expect(serializedSealed).not.toContain("hidden-private-chain-of-thought-reasoning-needle");
-    expect(serializedSealed).not.toContain("private-thinking-signature-sig123");
-    for (const entry of sealedEntries) {
-      expect(entry.thinkingSignature).toBeUndefined();
-      expect(entry.signature).toBeUndefined();
-      expect(entry.reasoning).toBeUndefined();
-      if (entry.message && typeof entry.message === "object") {
-        expect((entry.message as any).thinkingSignature).toBeUndefined();
-        expect((entry.message as any).signature).toBeUndefined();
-        expect((entry.message as any).reasoning).toBeUndefined();
-      }
-    }
+    expect(serializedSealed).toContain("hidden-private-chain-of-thought-reasoning-needle");
+    expect(serializedSealed).toContain("private-thinking-signature-sig123");
+    const finalAssistantEntry = sealedEntries.find(
+      (e) =>
+        e.message &&
+        typeof e.message === "object" &&
+        Array.isArray((e.message as any).content) &&
+        (e.message as any).content.some(
+          (b: any) => b.type === "thinking" && b.thinkingSignature === "private-thinking-signature-sig123",
+        ),
+    );
+    expect(finalAssistantEntry).toBeDefined();
 
     // 7. Verified secret redaction: condition remains gradeable, secret byte absent from evidence
     expect(serializedSealed).toContain("[REDACTED:CANARY_KEY]");
@@ -332,7 +335,7 @@ describe("Native session provenance, sanitization, and retention regression (L1)
     expect(steps.some((s: any) => s.tool === "write")).toBe(true);
     expect(steps.some((s: any) => s.tool === "read")).toBe(true);
 
-    // 11. Export the sealed, sanitized full native records (header + tree) through
+    // 11. Export the sealed, redacted full native records (header + tree) through
     // the pinned HTML exporter using only a disposable copy outside canonical evidence.
     const canonicalHashBeforeHtml = (await verifyRun(result.runDir)).recomputedTreeSha256;
     const disposableJsonl = join(result.runDir, "views", "baseline-native.jsonl");
@@ -341,10 +344,6 @@ describe("Native session provenance, sanitization, and retention regression (L1)
     await exportSessionFileToHtml(disposableJsonl, disposableHtml);
     const html = verifyExportedHtml(disposableHtml, {
       disallowedSecrets: [secretValue],
-      disallowedReasoningTokens: [
-        "hidden-private-chain-of-thought-reasoning-needle",
-        "private-thinking-signature-sig123",
-      ],
     });
     expect(html.valid).toBe(true);
     const exportedSession = html.decodedSessionJson as {
@@ -355,6 +354,9 @@ describe("Native session provenance, sanitization, and retention regression (L1)
     expect(exportedSession.entries).toHaveLength(actualTreeEntries.length);
     expect(JSON.stringify(exportedSession)).toContain("call_write_sol_1");
     expect(JSON.stringify(exportedSession)).toContain("call_read_sol_2");
+    // Reasoning reaches the exported viewer too - the sealed session never stripped it,
+    // and Pi's HTML template renders thinking blocks client-side from this embedded data.
+    expect(JSON.stringify(exportedSession)).toContain("hidden-private-chain-of-thought-reasoning-needle");
     const afterHtml = await verifyRun(result.runDir);
     expect(afterHtml.ok).toBe(true);
     expect(afterHtml.recomputedTreeSha256).toBe(canonicalHashBeforeHtml);

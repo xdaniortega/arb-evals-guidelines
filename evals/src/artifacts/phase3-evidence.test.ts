@@ -11,7 +11,7 @@
  * 6. Legacy (schema-v1) evidence shows unavailable sessions/snapshots explicitly, without fake replay.
  * 7. Prepared snapshots and file/workspace candidates round-trip through the same reader; old evidence is not
  *    silently given new defaults that imply unrecorded guarantees.
- * 8. Sanitized inspection copy round-trips through the pinned HTML exporter.
+ * 8. Redacted inspection copy round-trips through the pinned HTML exporter.
  */
 
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -465,9 +465,9 @@ describe("Recursive secret redaction across all encodings", () => {
         timestamp: 2000,
         message: {
           role: "assistant",
-          thinkingSignature: "sig-should-be-stripped",
+          thinkingSignature: "sig-should-be-preserved",
           content: [
-            { type: "thinking", text: "private reasoning that must be stripped" },
+            { type: "thinking", text: "private reasoning that must be preserved" },
             { type: "text", text: `I found token ${jsonEsc} in config` },
             {
               type: "toolCall",
@@ -507,33 +507,41 @@ describe("Recursive secret redaction across all encodings", () => {
       },
     ];
 
-    // Sanitize entries
-    const sanitized = sanitizeNativeSessionEntries(complexEntries, [secret]);
+    // Sanitize entries with captureReasoning: true to test preservation
+    const redacted = sanitizeNativeSessionEntries(complexEntries, [secret], { captureReasoning: true });
 
-    // 1. Thinking signature and thinking content block must be completely removed
-    const assistantMsg = sanitized[1]?.message as Record<string, unknown>;
-    expect(assistantMsg.thinkingSignature).toBeUndefined();
+    // 1. Thinking signature and thinking content block are preserved when captureReasoning is true
+    const assistantMsg = redacted[1]?.message as Record<string, unknown>;
+    expect(assistantMsg.thinkingSignature).toBe("sig-should-be-preserved");
     const contentBlocks = assistantMsg.content as Array<Record<string, unknown>>;
-    expect(contentBlocks.some((b) => b.type === "thinking")).toBe(false);
+    const thinkingBlock = contentBlocks.find((b) => b.type === "thinking");
+    expect(thinkingBlock?.text).toBe("private reasoning that must be preserved");
 
-    // 2. Real scanner verification: scan the entire serialized sanitized result
-    const serializedSanitized = JSON.stringify(sanitized);
+    // 1b. By default, reasoning and signatures are stripped
+    const stripped = sanitizeNativeSessionEntries(complexEntries, [secret]);
+    const strippedAssistant = stripped[1]?.message as Record<string, unknown>;
+    expect(strippedAssistant.thinkingSignature).toBeUndefined();
+    const strippedBlocks = strippedAssistant.content as Array<Record<string, unknown>>;
+    expect(strippedBlocks.find((b) => b.type === "thinking")).toBeUndefined();
+
+    // 2. Real scanner verification: scan the entire serialized redacted result
+    const serializedRedacted = JSON.stringify(redacted);
     const scannerHits = scanForSecrets(
-      { path: "sanitized-session", content: serializedSanitized },
+      { path: "redacted-session", content: serializedRedacted },
       [secret],
     );
     expect(scannerHits).toEqual([]); // ZERO hits!
 
     // 3. Confirm placeholder replacements were made
-    expect(serializedSanitized).toContain("[REDACTED:API_SECRET_KEY]");
-    expect(serializedSanitized).not.toContain(rawSecret);
-    expect(serializedSanitized).not.toContain(b64Enc);
-    expect(serializedSanitized).not.toContain(pctEnc);
+    expect(serializedRedacted).toContain("[REDACTED:API_SECRET_KEY]");
+    expect(serializedRedacted).not.toContain(rawSecret);
+    expect(serializedRedacted).not.toContain(b64Enc);
+    expect(serializedRedacted).not.toContain(pctEnc);
 
     // 4. Live entries were not mutated (structuredClone guarantee)
     const originalSerialized = JSON.stringify(complexEntries);
     expect(originalSerialized).toContain(rawSecret);
-    expect(originalSerialized).toContain("sig-should-be-stripped");
+    expect(originalSerialized).toContain("sig-should-be-preserved");
 
     // 5. Unverifiable redaction quarantines: simulate an entry that cannot be redacted
     const unredactableEntry: NativeSessionEntry[] = [
@@ -566,6 +574,23 @@ describe("Recursive secret redaction across all encodings", () => {
     ) as { quarantined?: boolean; reason?: string };
     expect(onDiskRecord.quarantined).toBe(true);
     expect(onDiskRecord.reason).toContain("guarded secret was detected");
+
+    // 6. Pattern-based secret redaction in sanitizeNativeSessionEntries (does NOT throw/quarantine)
+    const patternEntry: NativeSessionEntry[] = [
+      {
+        type: "message",
+        id: "msg-pattern-leaked",
+        message: {
+          role: "assistant",
+          content: "API key: sk-abcdef1234567890abcdef123456",
+        },
+      },
+    ];
+    const patternResult = sanitizeNativeSessionEntries(patternEntry);
+    const patternMsg = patternResult[0]?.message as Record<string, unknown>;
+    expect(patternMsg.content).toBe("API key: [REDACTED:openai-key]");
+    expect(patternResult.count).toBe(1);
+    expect(patternResult.redactions[0]?.label).toBe("openai-key");
   });
 });
 

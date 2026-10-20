@@ -69,6 +69,8 @@ describe("CLI process boundary (evals/scripts/run.ts)", () => {
     expect(stdout).toContain("--mode measured|fake");
     expect(stdout).toContain("UNLIMITED by default");
     expect(stdout).toContain("none (or 0) to keep it");
+    expect(stdout).toContain("--capture-reasoning");
+    expect(stdout).toContain("analyze the model's reasoning");
   });
 
   it("rejects an invalid --harness value", () => {
@@ -86,11 +88,14 @@ describe("CLI process boundary (evals/scripts/run.ts)", () => {
     const command = ["--case", "network-config-01", "--skill", "skills/arbitrum-docs", "--model", "gemini-3.8-flash"];
     const simplified = parseArgs(command);
     const explicit = parseArgs([...command, "--mode", "measured", "--harness", "pi", "--sandbox", "apple-container", "--validator-runner", "isolated-container", "--provider", "google", "--thinking", "low"]);
-    expect(simplified).toMatchObject({ mode: "measured", harnessId: "pi", sandboxId: "apple-container", validatorRunnerId: "isolated-container" });
+    expect(simplified).toMatchObject({ mode: "measured", harnessId: "pi", sandboxId: "apple-container", validatorRunnerId: "isolated-container", captureReasoning: false });
     expect({ ...simplified, provider: "google", thinking: "low" }).toEqual(explicit);
     expect(resolveTargetConfiguration({ model: simplified.model!, provider: simplified.provider, thinking: simplified.thinking }))
       .toEqual(resolveTargetConfiguration({ model: explicit.model!, provider: explicit.provider, thinking: explicit.thinking }));
     expect(parseArgs(["--suite", "legacy", "--case", "case-a", "--model", "gemini-3.8-flash"]).suiteId).toBe("legacy");
+
+    const withReasoning = parseArgs([...command, "--capture-reasoning"]);
+    expect(withReasoning.captureReasoning).toBe(true);
   });
 
   it("refuses --mode measured with explicit --harness fake", () => {

@@ -99,6 +99,74 @@ export function secretPlaceholder(label) {
 export function scanManyForSecrets(payloads, secrets) {
     return payloads.flatMap((payload) => scanForSecrets(payload, secrets));
 }
+const SECRET_PATTERNS = [
+    { name: "openai-key", regex: /\bsk-[A-Za-z0-9_-]{20,}/ },
+    { name: "aws-access-key-id", regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
+    { name: "github-token", regex: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
+    { name: "google-api-key", regex: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+    { name: "slack-token", regex: /\bxox[baprs]-[0-9A-Za-z-]{10,}/ },
+    { name: "jwt", regex: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
+    { name: "pem-private-key", regex: /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/ },
+    { name: "bearer-token", regex: /\bBearer\s+[A-Za-z0-9._~+/-]{20,}/ },
+    { name: "url-credentials", regex: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/ },
+];
+/**
+ * Scans a payload for high-confidence secret patterns.
+ *
+ * Emits at most one hit per pattern name per payload without exposing matched text.
+ * Binary content is decoded as UTF-8 for pattern matching.
+ */
+export function scanForSecretPatterns(payload) {
+    // Binary content: decoded with Buffer.toString("utf8") for pattern matching (unlike the
+    // value-driven path which matches exact byte needles; pattern matching operates on
+    // character-level regular expressions defined over text characters rather than raw byte sequences).
+    const text = typeof payload.content === "string"
+        ? payload.content
+        : Buffer.isBuffer(payload.content)
+            ? payload.content.toString("utf8")
+            : Buffer.from(payload.content).toString("utf8");
+    const hits = [];
+    for (const { name, regex } of SECRET_PATTERNS) {
+        if (regex.test(text)) {
+            hits.push({ pattern: name, path: payload.path });
+        }
+    }
+    return hits;
+}
+/**
+ * @notice Redacts high-confidence secret pattern matches with non-reversible labeled placeholders.
+ * @param text Text payload to sanitize.
+ * @param path Optional origin or file path label recorded on emitted redactions.
+ * @returns Sanitized text along with total match count and detailed redaction records.
+ */
+export function redactSecretPatterns(text, path = "") {
+    if (text === "") {
+        return { text, count: 0, redactions: [] };
+    }
+    let current = text;
+    let totalCount = 0;
+    const redactions = [];
+    for (const { name, regex } of SECRET_PATTERNS) {
+        const flags = regex.flags.includes("g") ? regex.flags : `${regex.flags}g`;
+        const globalRegex = new RegExp(regex.source, flags);
+        let matchCount = 0;
+        const replaced = current.replace(globalRegex, () => {
+            matchCount += 1;
+            return secretPlaceholder(name);
+        });
+        if (matchCount > 0) {
+            current = replaced;
+            redactions.push({
+                path,
+                label: name,
+                encoding: "raw",
+                count: matchCount,
+            });
+            totalCount += matchCount;
+        }
+    }
+    return { text: current, count: totalCount, redactions };
+}
 /**
  * @notice Sanitizes sensitive text by replacing multi-encoding secret occurrences with non-reversible labeled placeholders.
  * @param text Text payload to sanitize.

@@ -922,27 +922,44 @@ describe("Pi SDK harness adapter", () => {
     rmSync(ws, { recursive: true, force: true });
   });
 
-  it("strips thinking blocks and signatures from native session entries without rejecting the run", async () => {
-    const ws = makeTempDir("pi-thinking-strip");
-    const guest = createMockGuest(ws);
-    const request = createMockRequest();
+  it("strips thinking blocks from native session entries by default, and preserves them when captureReasoning is enabled", async () => {
+    const ws1 = makeTempDir("pi-thinking-default");
+    const guest1 = createMockGuest(ws1);
+    const harness1 = createPiHarness({
+      streamSimpleOverride: createScriptedStreamSimple([
+        {
+          type: "thinking",
+          thinking: "internal chain of thought reasoning",
+          text: "Public final response",
+        },
+      ]),
+    });
+    const resultDefault = await harness1.run(guest1, createMockRequest());
+    expect(resultDefault.outcome).toBe("completed");
+    expect(resultDefault.nativeSessionEntries).toBeDefined();
+    const serializedDefault = JSON.stringify(resultDefault.nativeSessionEntries);
+    expect(serializedDefault).toContain("Public final response");
+    expect(serializedDefault).not.toContain("internal chain of thought reasoning");
+    rmSync(ws1, { recursive: true, force: true });
 
-    const streamSimpleOverride = createScriptedStreamSimple([
-      {
-        type: "thinking",
-        thinking: "internal chain of thought reasoning",
-        text: "Public final response",
-      },
-    ]);
-
-    const harness = createPiHarness({ streamSimpleOverride });
-    const result = await harness.run(guest, request);
-    expect(result.outcome).toBe("completed");
-    expect(result.nativeSessionEntries).toBeDefined();
-    const serialized = JSON.stringify(result.nativeSessionEntries);
-    expect(serialized).toContain("Public final response");
-    expect(serialized).not.toContain("internal chain of thought reasoning");
-    rmSync(ws, { recursive: true, force: true });
+    const ws2 = makeTempDir("pi-thinking-preserve");
+    const guest2 = createMockGuest(ws2);
+    const harness2 = createPiHarness({
+      streamSimpleOverride: createScriptedStreamSimple([
+        {
+          type: "thinking",
+          thinking: "internal chain of thought reasoning",
+          text: "Public final response",
+        },
+      ]),
+    });
+    const resultPreserve = await harness2.run(guest2, createMockRequest({ captureReasoning: true }));
+    expect(resultPreserve.outcome).toBe("completed");
+    expect(resultPreserve.nativeSessionEntries).toBeDefined();
+    const serializedPreserve = JSON.stringify(resultPreserve.nativeSessionEntries);
+    expect(serializedPreserve).toContain("Public final response");
+    expect(serializedPreserve).toContain("internal chain of thought reasoning");
+    rmSync(ws2, { recursive: true, force: true });
   });
 
   it("honors cooperative cancellation via AbortSignal", async () => {
