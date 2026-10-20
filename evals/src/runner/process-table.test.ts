@@ -285,7 +285,10 @@ describe("Process-level automatic table and report contract", () => {
       expect(runs).toHaveLength(2);
       expect(runs.map((run: { counts: { validPairs: number } }) => run.counts.validPairs)).toEqual([1, 2]);
       expect(runs[0].scored).not.toBeNull();
-      expect(runs[1].scored).toBeNull();
+      // Multi-pair runs expose the mean-over-every-pair scored model (B2).
+      expect(runs[1].scored).not.toBeNull();
+      expect(runs[1].scored.mode).toBe("mean");
+      expect(runs[1].scored.pairIds).toEqual(runs[1].pairs.map((pair: { pairId: string }) => pair.pairId));
       // Multi-pair run retains the pair table with pairIds matching runs[1].pairs
       const multiPairIds = tableRows(extractTables(sections[1]!).at(-1)!).slice(1).map((row) => row[0]);
       expect(multiPairIds).toEqual(runs[1].pairs.map((pair: { pairId: string }) => pair.pairId));

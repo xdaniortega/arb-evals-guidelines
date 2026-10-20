@@ -807,6 +807,18 @@ export async function peekRunPairs(
   return { runId: receipt.runId, pairs: receipt.pairs };
 }
 
+/**
+ * Finds one pair by full pair ID or short `rNNN` label (expanded to `<runId>-rNNN`).
+ * Shared by publication, report and inspection so every `--pair` accepts both forms.
+ */
+export function findPairRef(
+  receipt: Pick<RunReceipt, "runId" | "pairs">,
+  selector: string,
+): ReceiptPairRef | undefined {
+  const fullPairId = /^r\d+$/.test(selector) ? `${receipt.runId}-${selector}` : selector;
+  return receipt.pairs.find((candidate) => candidate.pairId === fullPairId);
+}
+
 /** Resolved `--pair` outcome: either one selected pair, or the mean over every pair. */
 export type ReceiptPairSelection =
   | { readonly mode: "single"; readonly pair: ReceiptPairRef }
@@ -833,8 +845,7 @@ export function resolvePairSelection(
     }
     return { mode: "mean", pairs: receipt.pairs };
   }
-  const fullPairId = /^r\d+$/.test(selector) ? `${receipt.runId}-${selector}` : selector;
-  const pair = receipt.pairs.find((candidate) => candidate.pairId === fullPairId);
+  const pair = findPairRef(receipt, selector);
   if (pair === undefined) {
     throw new EvalError(
       "input-invalid",
@@ -1462,7 +1473,7 @@ export function formatRunReport(
         counts: report.counts ?? null,
         limits: report.limits ?? null,
         elapsedWallTime: report.elapsedWallTime ?? null,
-        scored: !report.isLegacy && report.pairs.length === 1 && report.scored ? renderScoredJson(report.scored) : null,
+        scored: !report.isLegacy && report.scored ? renderScoredJson(report.scored) : null,
         pairs: report.pairs,
         failures: report.failures ?? [],
         commands: {
@@ -1817,9 +1828,13 @@ export async function inspectCondition(input: {
 
   const pairId = input.pairId ?? null;
   const pairRef =
-    pairId === null ? receipt.pairs[0] : receipt.pairs.find((pair) => pair.pairId === pairId);
+    pairId === null ? receipt.pairs[0] : findPairRef(receipt, pairId);
   if (pairRef === undefined) {
-    throw new EvalError("input-invalid", `receipt has no pair ${pairId ?? "(first)"}`, { at: "--pair" });
+    throw new EvalError(
+      "input-invalid",
+      `receipt has no pair ${pairId ?? "(first)"}. Available: ${receipt.pairs.map((p) => p.pairId).join(", ")}`,
+      { at: "--pair" },
+    );
   }
   const conditionRef = pairRef.conditions.find((condition) => condition.conditionId === input.conditionId);
   if (conditionRef === undefined) {
@@ -2846,8 +2861,14 @@ export async function exportNativeSessionView(input: {
   const receipt = decodeReceipt(await readJsonFile(join(runDir, RECEIPT_FILE), RECEIPT_FILE));
   const verification = await verifyRun(runDir);
   if (!verification.ok) throw new EvalError("evidence-invalid", "native export refuses a broken evidence chain", { at: input.receiptPath });
-  const pair = input.pairId ? receipt.pairs.find((candidate) => candidate.pairId === input.pairId) : receipt.pairs[0];
-  if (!pair) throw new EvalError("input-invalid", "receipt has no selected pair", { at: "--pair" });
+  const pair = input.pairId ? findPairRef(receipt, input.pairId) : receipt.pairs[0];
+  if (!pair) {
+    throw new EvalError(
+      "input-invalid",
+      `receipt has no pair ${input.pairId ?? "(first)"}. Available: ${receipt.pairs.map((p) => p.pairId).join(", ")}`,
+      { at: "--pair" },
+    );
+  }
   const condition = pair.conditions.find((candidate) => candidate.conditionId === input.conditionId);
   if (!condition) throw new EvalError("input-invalid", `pair has no ${input.conditionId} condition`, { at: "--condition" });
   const session = await readNativeSession(join(runDir, RECEIPT_FILE), condition.dir);

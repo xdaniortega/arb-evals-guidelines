@@ -1,0 +1,40 @@
+{
+  "name": "arb-evals",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "description": "Isolated paired evaluation framework for agent skills (extracted from arbitrum-agent-skills).",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run && pnpm test:eval-cases",
+    "test:evals": "vitest run evals/src",
+    "test:eval-sdk": "vitest run evals/src/harnesses/pi/sdk-session.test.ts evals/src/harnesses/pi/supervisor-agent.test.ts",
+    "build:eval-guest": "node evals/scripts/build-guest-runtime.mjs",
+    "test:eval-cases": "node --import ./evals/scripts/case-test-resolver.mjs --test \"evals/cases/*/validator.test.ts\" \"evals/cases/*/oracle-aux.test.ts\" \"evals/cases/*/prepare.test.ts\"",
+    "test:container": "EVAL_CONTAINER_TESTS=1 vitest run --maxWorkers=1 evals/src/sandboxes/apple-container.test.ts evals/src/runner/container-validator.test.ts evals/src/runner/container-paired.test.ts evals/src/sandboxes/laptop-isolation.test.ts",
+    "eval": "node --experimental-strip-types evals/scripts/run.ts",
+    "eval:validate": "node --experimental-strip-types evals/scripts/validate.ts",
+    "eval:report": "node --experimental-strip-types evals/scripts/report.ts",
+    "eval:publish": "node --experimental-strip-types evals/scripts/publish.ts",
+    "eval:history": "node --experimental-strip-types evals/scripts/history.ts",
+    "eval:inspect": "node --experimental-strip-types evals/scripts/inspect.ts",
+    "eval:recover": "node --experimental-strip-types evals/scripts/doctor.ts",
+    "eval:doctor": "node --experimental-strip-types evals/scripts/doctor.ts --doctor",
+    "typecheck": "pnpm typecheck:evals",
+    "typecheck:evals": "tsc --noEmit -p evals/tsconfig.json"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.85.0",
+    "@earendil-works/pi-ai": "0.85.0",
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-server": "0.85.0",
+    "@types/node": "^22.15.0",
+    "ajv": "^8.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  }
+}

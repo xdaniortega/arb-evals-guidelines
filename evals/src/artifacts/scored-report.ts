@@ -235,8 +235,10 @@ function executionPhrase(condition: ConditionReport | undefined): string {
 }
 
 function badgeStatus(condition: ConditionReport | undefined, fallback: string): { text: string; color: string } {
-  const phrase = condition === undefined ? fallback : executionPhrase(condition);
+  const phrase = condition === undefined ? fallback : (MEAN_ARM_STATUS.get(condition)?.badgePhrase ?? executionPhrase(condition));
   switch (phrase) {
+    case MIXED_STATUS:
+      return { text: MIXED_STATUS, color: "yellow" };
     case "completed":
       return { text: "completed", color: "blue" };
     case "task limit reached":
@@ -293,6 +295,8 @@ function buildArmAccuracy(rubric: Rubric, score: RubricScore | null): ScoredArmA
 
 function effectiveDuration(condition: ConditionReport | undefined): { ms: number | null; derived: boolean } {
   if (condition === undefined) return { ms: null, derived: false };
+  const mean = MEAN_ARM_STATUS.get(condition);
+  if (mean !== undefined) return { ms: condition.durationMs ?? condition.sessionDurationMs ?? null, derived: mean.derivedPairs > 0 };
   if (condition.durationMs !== null) return { ms: condition.durationMs, derived: false };
   const derived = condition.sessionDurationMs ?? null;
   return { ms: derived, derived: derived !== null };
@@ -306,6 +310,34 @@ function effectiveDuration(condition: ConditionReport | undefined): { ms: number
 function meanOrNull(values: readonly (number | null | undefined)[]): number | null {
   const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
   return nums.length === 0 ? null : nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+const MIXED_STATUS = "mixed";
+
+/**
+ * Per-arm aggregate facts for a synthesized mean condition, keyed by that condition
+ * object. Kept out of `ConditionReport` so the evidence read model is not widened.
+ */
+interface MeanArmStatus {
+  /** Status phrase for the header, e.g. `completed` or `completed in 2 of 3 pairs, task limit reached in 1`. */
+  readonly executionPhrase: string;
+  /** Badge phrase: the shared phrase when every pair agrees, otherwise `mixed`. */
+  readonly badgePhrase: string;
+  readonly gradedPairs: number;
+  readonly derivedPairs: number;
+  readonly totalPairs: number;
+}
+const MEAN_ARM_STATUS = new WeakMap<ConditionReport, MeanArmStatus>();
+
+/** `completed` when uniform; otherwise `completed in 2 of 3 pairs, task limit reached in 1`. */
+function aggregatePhrase(phrases: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const p of phrases) counts.set(p, (counts.get(p) ?? 0) + 1);
+  if (counts.size <= 1) return phrases[0] ?? "missing";
+  const parts = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  return parts
+    .map(([phrase, n], i) => (i === 0 ? `${phrase} in ${n} of ${phrases.length} pairs` : `${phrase} in ${n}`))
+    .join(", ");
 }
 
 /** Rounds to one decimal place; whole means still render without a trailing `.0`. */
@@ -340,8 +372,8 @@ function meanArmAccuracy(rubric: Rubric, pairs: readonly PairReport[], condition
  * Synthesizes a mean condition for one arm across every pair, for the tables that read
  * tokens, duration and status/gradeability from a single `ConditionReport`. Accuracy is
  * aggregated separately by `meanArmAccuracy`; this only feeds cost, latency and status.
- * Status, gradeability and stop cause are read from the first pair, since eligibility
- * already requires every pair to be graded before a mean is rendered.
+ * Status and gradeability are aggregated over every pair (see `MeanArmStatus`); the
+ * remaining condition fields are copied from the first pair.
  */
 function meanCondition(pairs: readonly PairReport[], conditionId: ConditionId): ConditionReport | undefined {
   const conditions = pairs.map((p) => findCondition(p, conditionId)).filter((c): c is ConditionReport => c !== undefined);
@@ -352,16 +384,34 @@ function meanCondition(pairs: readonly PairReport[], conditionId: ConditionId): 
   const meanMs = meanOrNull(durations.map((d) => d.ms));
   const derived = durations.some((d) => d.derived);
   const roundedMeanMs = meanMs === null ? null : Math.round(meanMs);
-  return {
+  const mean: ConditionReport = {
     ...base,
     consumedTokens: meanTokens === null ? null : Math.round(meanTokens),
     durationMs: derived ? null : roundedMeanMs,
     sessionDurationMs: derived ? roundedMeanMs : null,
   };
+  const phrases = conditions.map((c) => executionPhrase(c));
+  const uniform = new Set(phrases).size <= 1;
+  MEAN_ARM_STATUS.set(mean, {
+    executionPhrase: aggregatePhrase(phrases),
+    badgePhrase: uniform ? (phrases[0] ?? "missing") : MIXED_STATUS,
+    gradedPairs: conditions.filter((c) => c.gradeable && (c.rubricScore ?? null) !== null).length,
+    derivedPairs: durations.filter((d) => d.derived).length,
+    totalPairs: conditions.length,
+  });
+  return mean;
 }
 
-function withDerivedLabel(text: string, derived: boolean): string {
-  return derived && text !== NA ? `${text} (${SESSION_DERIVED_LABEL})` : text;
+/** `session-derived`, or `session-derived in 1 of 3 pairs` for a mean mixing recorded and derived durations. */
+function derivedLabel(condition: ConditionReport | undefined): string {
+  const mean = condition === undefined ? undefined : MEAN_ARM_STATUS.get(condition);
+  return mean !== undefined && mean.derivedPairs < mean.totalPairs
+    ? `${SESSION_DERIVED_LABEL} in ${mean.derivedPairs} of ${mean.totalPairs} pairs`
+    : SESSION_DERIVED_LABEL;
+}
+
+function withDerivedLabel(text: string, derived: boolean, condition?: ConditionReport): string {
+  return derived && text !== NA ? `${text} (${derivedLabel(condition)})` : text;
 }
 
 /** Builds the accuracy, cost and latency pillars shared by the rubric and legacy branches. */
@@ -402,8 +452,8 @@ function buildPillars(
     },
     latency: {
       label: "Latency",
-      baseline: withDerivedLabel(formatDuration(bDuration.ms), bDuration.derived),
-      treatment: withDerivedLabel(formatDuration(tDuration.ms), tDuration.derived),
+      baseline: withDerivedLabel(formatDuration(bDuration.ms), bDuration.derived, baseline),
+      treatment: withDerivedLabel(formatDuration(tDuration.ms), tDuration.derived, treatment),
       change: formatDurationDiff(bDuration.ms, tDuration.ms, { approximate }),
       baselineRawMs: bDuration.ms,
       treatmentRawMs: tDuration.ms,
@@ -419,7 +469,7 @@ function buildPillars(
 function buildCostLatencyTable(baseline: ConditionReport | undefined, treatment: ConditionReport | undefined): ScoredCostLatencyTable {
   const precise = (condition: ConditionReport | undefined): string => {
     const { ms, derived } = effectiveDuration(condition);
-    return withDerivedLabel(formatDuration(ms, { precise: true }), derived);
+    return withDerivedLabel(formatDuration(ms, { precise: true }), derived, condition);
   };
   return {
     rows: [
@@ -439,12 +489,22 @@ function buildStatusLine(
   treatment: ConditionReport | undefined,
   graded: (condition: ConditionReport | undefined) => boolean,
 ): string {
-  const phrase = (condition: ConditionReport | undefined): string =>
-    `${executionPhrase(condition)}, ${graded(condition) ? "graded" : "grading unavailable"}`;
+  const phrase = (condition: ConditionReport | undefined): string => {
+    const mean = condition === undefined ? undefined : MEAN_ARM_STATUS.get(condition);
+    if (mean === undefined) return `${executionPhrase(condition)}, ${graded(condition) ? "graded" : "grading unavailable"}`;
+    const grading =
+      mean.gradedPairs === mean.totalPairs
+        ? "graded"
+        : mean.gradedPairs === 0
+          ? "grading unavailable"
+          : `graded in ${mean.gradedPairs} of ${mean.totalPairs} pairs`;
+    return `${mean.executionPhrase}, ${grading}`;
+  };
   const b = phrase(baseline);
   const t = phrase(treatment);
   if (b === t) {
-    const joined = b.replace(", ", "; ");
+    const cut = b.lastIndexOf(", ");
+    const joined = `${b.slice(0, cut)}; ${b.slice(cut + 2)}`;
     return joined.charAt(0).toUpperCase() + joined.slice(1);
   }
   return `Without this skill: ${b} · With this skill: ${t}`;

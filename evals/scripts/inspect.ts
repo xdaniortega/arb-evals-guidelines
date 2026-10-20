@@ -23,7 +23,7 @@ import type { InspectViewName } from "../src/artifacts/queries.ts";
 
 const USAGE =
   `usage: eval:inspect (--receipt <path> | --latest [--case <id>]) --condition ${CONDITION_IDS.join("|")} ` +
-  `--view ${INSPECT_VIEWS.join("|")} [--pair <pair-id>] [--export jsonl|html|both]`;
+  `--view ${INSPECT_VIEWS.join("|")} [--pair <pair-id|rNNN>] [--export jsonl|html|both]`;
 
 interface Args {
   readonly receiptPath: string | null;

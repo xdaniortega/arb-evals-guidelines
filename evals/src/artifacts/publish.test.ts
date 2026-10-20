@@ -13,7 +13,7 @@ import { createFakeSandbox } from "../sandboxes/fake.ts";
 import { createInProcessValidatorRunner } from "../runner/validation.ts";
 import { disposeRunWorkDir, runPairedEvaluation } from "../runner/run.ts";
 import type { RunResult } from "../runner/run.ts";
-import { buildRunReport, formatRunReport } from "./queries.ts";
+import { buildRunReport, formatRunReport, inspectCondition } from "./queries.ts";
 import {
   EVAL_BEGIN_MARKER,
   EVAL_END_MARKER,
@@ -1107,5 +1107,17 @@ Some historical notes.
         ),
       ).toThrow();
     });
+  });
+
+  it("eval:inspect --pair accepts the short rNNN label and lists available pairs on a miss (B1)", async () => {
+    const runResult = await sealRun(undefined, 2);
+    const report = await buildRunReport(runResult.receiptPath);
+    const short = await inspectCondition({ receiptPath: runResult.receiptPath, conditionId: "treatment", view: "condition", pairId: "r002" });
+    expect(short.pairId).toBe(report.pairs[1]!.pairId);
+    const full = await inspectCondition({ receiptPath: runResult.receiptPath, conditionId: "treatment", view: "condition", pairId: report.pairs[1]!.pairId });
+    expect(full.pairId).toBe(short.pairId);
+    await expect(
+      inspectCondition({ receiptPath: runResult.receiptPath, conditionId: "treatment", view: "condition", pairId: "r009" }),
+    ).rejects.toThrow(/receipt has no pair r009\. Available: .*-r001, .*-r002/);
   });
 });

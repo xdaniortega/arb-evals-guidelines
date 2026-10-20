@@ -4,7 +4,7 @@
 Agent: Pi · google/gemini-3.8-flash  
 Skill: arbitrum-network  
 Run: 20260924T170734Z-b115674e · Pairs r001, r002, r003  
-Status: Completed; graded
+Status: Without this skill: completed in 2 of 3 pairs, task limit reached in 1, graded · With this skill: completed, graded
 
 ![AF-Evaluation: completed · 80%](https://img.shields.io/badge/AF--Evaluation-completed%20%C2%B7%2080%25-blue)
 

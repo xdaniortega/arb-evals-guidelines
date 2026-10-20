@@ -417,4 +417,46 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(generateBadge(createConditionReport("treatment", { status: "infrastructure-failure", stopCause: "external-cancellation" }), "", null).url)
       .toBe("https://img.shields.io/badge/AF--Evaluation-interrupted-orange");
   });
+
+  describe("mean mode aggregates status and derived durations across pairs", () => {
+    const pairN = (n: number, baseline: ConditionReport, treatment: ConditionReport): PairReport => ({
+      ...pairOf(baseline, treatment),
+      pairId: `run-001-r00${n}`,
+      repetition: n,
+    });
+
+    it("keeps the single-arm wording and badge when every pair agrees", () => {
+      const pairs = [1, 2, 3].map((n) => pairN(n, createConditionReport("baseline"), createConditionReport("treatment")));
+      const model = buildScoredReport(createRunReport({ pairs }), MOCK_RUBRIC, { mode: "mean", pairs });
+      expect(model.statusLine).toBe("Completed; graded");
+      expect(model.badgeUrl).toContain("-completed%20%C2%B7%20");
+      expect(model.pillars.latency.treatment).not.toContain("session-derived");
+    });
+
+    it("reports per-pair status counts and a mixed badge when pairs differ (B3)", () => {
+      const pairs = [
+        pairN(1, createConditionReport("baseline"), createConditionReport("treatment")),
+        pairN(2, createConditionReport("baseline", { status: "task-limit", stopCause: "wall-clock" }), createConditionReport("treatment")),
+        pairN(3, createConditionReport("baseline"), createConditionReport("treatment", { status: "task-limit", stopCause: "wall-clock" })),
+      ];
+      const model = buildScoredReport(createRunReport({ pairs }), MOCK_RUBRIC, { mode: "mean", pairs });
+      expect(model.statusLine).toBe(
+        "Completed in 2 of 3 pairs, task limit reached in 1; graded",
+      );
+      expect(model.badgeUrl).toMatch(/AF--Evaluation-mixed%20%C2%B7%20\d+%25-yellow$/);
+    });
+
+    it("labels a mean mixing recorded and session-derived durations with the pair count (B4)", () => {
+      const derived = { durationMs: null, sessionDurationMs: 30_000 };
+      const pairs = [
+        pairN(1, createConditionReport("baseline"), createConditionReport("treatment", { durationMs: 10_000 })),
+        pairN(2, createConditionReport("baseline"), createConditionReport("treatment", derived)),
+        pairN(3, createConditionReport("baseline"), createConditionReport("treatment", { durationMs: 20_000 })),
+      ];
+      const model = buildScoredReport(createRunReport({ pairs }), MOCK_RUBRIC, { mode: "mean", pairs });
+      expect(model.pillars.latency.treatment).toBe("20.0s (session-derived in 1 of 3 pairs)");
+      expect(model.pillars.latency.baseline).not.toContain("session-derived");
+      expect(model.pillars.latency.change).toContain("approximate");
+    });
+  });
 });
