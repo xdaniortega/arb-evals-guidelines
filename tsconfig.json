@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "eval-cases/*/validator*.ts",
+    "eval-cases/*/prepare.ts",
+    "eval-cases/*/prepare.test.ts",
+    "eval-cases/*/oracle-aux.ts",
+    "eval-cases/*/oracle-aux.test.ts",
+    "eval-cases/*/preparation-fixtures.ts"
+  ]
+}

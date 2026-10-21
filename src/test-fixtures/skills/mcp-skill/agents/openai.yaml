@@ -1,0 +1,13 @@
+# Test fixture only: same MCP shape as a documentation skill.
+interface:
+  display_name: "MCP Skill"
+  short_description: "Synthetic test fixture"
+  default_prompt: "Use $mcp-skill to answer this question."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "arbitrumDocs"
+      description: "Official Arbitrum documentation search and question answering"
+      transport: "streamable_http"
+      url: "https://mcp.inkeep.com/offchainlabs/mcp"

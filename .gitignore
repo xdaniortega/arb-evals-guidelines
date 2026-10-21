@@ -10,6 +10,7 @@ dist/
 .pi/
 .crew/
 .pnpm-store/
-evals/.state/
-evals/docs/
-evals/cases/*/runs/*/views/
+.state/
+/docs/
+eval-cases/*/runs/*/views/
+exported-evals/
