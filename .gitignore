@@ -13,3 +13,4 @@ dist/
 .state/
 /docs/
 eval-cases/*/runs/*/views/
+exported-evals/

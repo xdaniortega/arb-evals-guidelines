@@ -11,7 +11,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -213,6 +213,37 @@ describe("verifyRun", () => {
     const report = await verifyRun(copy);
     expect(report.ok).toBe(false);
     expect(report.extra).toEqual(["inputs/smuggled.json"]);
+  });
+
+  it("accepts both generated run exports at the run root and still names smuggled nested copies", async () => {
+    const result = await sealRun();
+    const copy = await copyRun(result.runDir);
+    await writeFile(join(copy, "EVALS.md"), "generated\n");
+    await writeFile(join(copy, "EVALS-FULL-REPORT.md"), "generated\n");
+    expect((await verifyRun(copy)).ok).toBe(true);
+
+    const nested = `pairs/${result.runId}-r001/EVALS.md`;
+    await writeFile(join(copy, nested), "smuggled\n");
+    const report = await verifyRun(copy);
+    expect(report.ok).toBe(false);
+    expect(report.extra).toEqual([nested]);
+  });
+
+  it("fails verification when a generated export name is a directory or a symlink", async () => {
+    const result = await sealRun();
+    const asDir = await copyRun(result.runDir);
+    await mkdir(join(asDir, "EVALS.md"));
+    await writeFile(join(asDir, "EVALS.md", "hidden.json"), "{}\n");
+    const dirReport = await verifyRun(asDir);
+    expect(dirReport.ok).toBe(false);
+    expect(dirReport.failures.map((failure) => failure.message).join("\n")).toContain("EVALS.md must be a regular file");
+
+    const asLink = await copyRun(result.runDir);
+    await writeFile(join(asLink, "target.md"), "x\n");
+    await symlink(join(asLink, "target.md"), join(asLink, "EVALS-FULL-REPORT.md"));
+    const linkReport = await verifyRun(asLink);
+    expect(linkReport.ok).toBe(false);
+    expect(linkReport.failures.map((failure) => failure.message).join("\n")).toContain("EVALS-FULL-REPORT.md must be a regular file");
   });
 
   it("fails when manifest.json itself is altered, even though every chained file is intact", async () => {
@@ -489,10 +520,10 @@ describe("run report", () => {
     const headers = ["Case", "Harness", "Provider", "Model", "Baseline", "Treatment", "Delta", "Tokens Δ", "Time Δ"];
     const context = ["network-config-01", "fake", "google", "fake-model-0"];
     expect(rows).toEqual([
-      headers, [...context, "0.500", "0.633", "+0.133", "+300", "+3.0s"],
+      headers, [...context, "0.500", "0.633", "+0.133", "+300", "+3,000 ms"],
       ["run_id", ...headers],
-      ["renderer-pair-1", ...context, "0.200", "1.000", "+0.800", "-1,800", "-2.5s"],
-      ["renderer-pair-2", ...context, "0.800", "0.400", "-0.400", "+2,400", "+8.5s"],
+      ["renderer-pair-1", ...context, "0.200", "1.000", "+0.800", "-1,800", "-2,500 ms"],
+      ["renderer-pair-2", ...context, "0.800", "0.400", "-0.400", "+2,400", "+8,500 ms"],
       ["renderer-pair-3", ...context, "0.500", "0.500", "0.000", "n/a", "n/a"],
     ]);
     const sectionPrefix = format === "markdown" ? "## " : "";

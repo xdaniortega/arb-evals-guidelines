@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.33.2",
-  "description": "Arbitrum evals guidelines: isolated paired evals for agent skills (extracted from arbitrum-agent-skills).",
+  "description": "Isolated paired evals for agent skills (evals-example).",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xdaniortega/evals-example"
+  },
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -19,7 +23,7 @@
     "eval": "node --experimental-strip-types scripts/run.ts",
     "eval:validate": "node --experimental-strip-types scripts/validate.ts",
     "eval:report": "node --experimental-strip-types scripts/report.ts",
-    "eval:publish": "node --experimental-strip-types scripts/publish.ts",
+    "eval:export": "node --experimental-strip-types scripts/export.ts",
     "eval:history": "node --experimental-strip-types scripts/history.ts",
     "eval:inspect": "node --experimental-strip-types scripts/inspect.ts",
     "eval:recover": "node --experimental-strip-types scripts/doctor.ts",

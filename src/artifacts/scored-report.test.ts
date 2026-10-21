@@ -1,3 +1,4 @@
+import { readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { Rubric, RubricScore } from "../runner/rubric.ts";
 import {
@@ -10,6 +11,8 @@ import {
   generateBadge,
   renderScoredJson,
   renderScoredMarkdown,
+  renderScoredSummaryMarkdown,
+  OUTCOME_CHECKS_HEADING,
   renderScoredTerminal,
   REPORT_JSON_SCHEMA_VERSION,
 } from "./scored-report.ts";
@@ -175,8 +178,8 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     // Pillars
     expect(md).toContain("| Accuracy | 20% | 100% | +80 percentage points |");
     expect(md).toContain("| Cost: recorded tokens | 10,000 | 15,000 | +5,000 (+50.0%) |");
-    expect(md).toContain("| Latency | 12.3s | 3m34s | +3m22s (+1633.1%) |");
-    expect(term).toMatch(/│ Accuracy\s+│\s+20% │\s+100% │ \+80 percentage points │/);
+    expect(md).toContain("| Latency | 12,345 ms | 213,947 ms | +201,602 ms (+1633.1%) |");
+    expect(term).toMatch(/│ Accuracy\s+│\s+20%\s+│\s+100%\s+│\s+\+80 percentage points\s+│/);
 
     // Accuracy: exactly two rows + total, no unhappy row
     expect(md).toContain("| Outcome correctness and completeness | 0/80 — 0% | 80/80 — 100% |");
@@ -188,15 +191,15 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(term).toContain("Outcome correctness and completeness");
     expect(term).toMatch(/├─+┼─+┼─+┤\n│ Accuracy total/);
 
-    // Outcome checks
-    expect(md).toContain("### Outcome checks");
+    // Accuracy Outcome Checks
+    expect(md).toContain("### Accuracy Outcome Checks");
     expect(md).toContain("| **Outcome total** | **0/80** | **80/80** |");
-    expect(term).toContain("Outcome checks (each check covers both production and staging):");
+    expect(term).toContain("Accuracy Outcome Checks (each check covers both production and staging):");
     expect(term).toContain("Outcome total");
 
     // Cost and latency
-    expect(md).toContain("| Time to completion or termination | 12.345s | 3m33.947s |");
-    expect(term).toContain("3m33.947s");
+    expect(md).toContain("| Time to completion or termination (ms) | 12,345 ms | 213,947 ms |");
+    expect(term).toContain("213,947 ms");
 
     // JSON
     expect(json.schemaVersion).toBe(3);
@@ -205,7 +208,7 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(json.scored.groups.constraints).toMatchObject({ points: 20, baselineGot: 20, treatmentGot: 20 });
     expect(json.scored.groups).not.toHaveProperty("unhappy");
     expect(json.scored.accuracy).toEqual({ baseline: 20, treatment: 100, changePercentagePoints: 80 });
-    expect(json.scored.latency.treatmentPrecise).toBe("3m33.947s");
+    expect(json.scored.latency.treatmentPrecise).toBe("213,947 ms");
     expect(json.scored.topics.find((t: { id: string }) => t.id === "chain-identity")).toEqual({
       id: "chain-identity",
       label: "Correct network identities",
@@ -220,14 +223,14 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
   it("--checks toggles the outcome checks table; --details is independent", () => {
     const report = createRunReport();
     const model = buildScoredReport(report, MOCK_RUBRIC);
-    expect(renderScoredMarkdown(model)).not.toContain("### Outcome checks");
-    expect(renderScoredTerminal(model)).not.toContain("Outcome checks");
+    expect(renderScoredMarkdown(model)).not.toContain("### Accuracy Outcome Checks");
+    expect(renderScoredTerminal(model)).not.toContain("Accuracy Outcome Checks");
 
     const withDetails = formatRunReport({ ...report, scored: model }, { format: "markdown", details: true });
-    expect(withDetails).not.toContain("### Outcome checks");
+    expect(withDetails).not.toContain("### Accuracy Outcome Checks");
     expect(withDetails).toContain("## Operational details");
     const both = formatRunReport({ ...report, scored: model }, { format: "markdown", details: true, checks: true });
-    expect(both).toContain("### Outcome checks");
+    expect(both).toContain("### Accuracy Outcome Checks");
     expect(both).toContain("## Operational details");
   });
 
@@ -244,11 +247,11 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(formatDuration(0)).toBe("0.0s");
     expect(formatDuration(null)).toBe("n/a");
 
-    expect(formatDurationDiff(10_000, 15_000)).toBe("+5.0s (+50.0%)");
-    expect(formatDurationDiff(2_959_239, 214_000)).toBe("−45m45s (−92.8%)");
-    expect(formatDurationDiff(2_959_239, 214_000, { approximate: true })).toBe("−45m45s (−92.8%, approximate)");
-    expect(formatDurationDiff(10_000, 10_000)).toBe("0.0s (0.0%)");
-    expect(formatDurationDiff(0, 5_000)).toBe("+5.0s (n/a)");
+    expect(formatDurationDiff(10_000, 15_000)).toBe("+5,000 ms (+50.0%)");
+    expect(formatDurationDiff(2_959_239, 214_000)).toBe("−2,745,239 ms (−92.8%)");
+    expect(formatDurationDiff(2_959_239, 214_000, { approximate: true })).toBe("−2,745,239 ms (−92.8%, approximate)");
+    expect(formatDurationDiff(10_000, 10_000)).toBe("0 ms (0.0%)");
+    expect(formatDurationDiff(0, 5_000)).toBe("+5,000 ms (n/a)");
     expect(formatDurationDiff(null, 5_000)).toBe("n/a");
 
     expect(formatSignedAccuracyDiff(60)).toBe("+60 percentage points");
@@ -278,7 +281,7 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(model.accuracyTable.totalRow.baseline).toBe("**30/100 — 30%**");
     expect(model.checksTable!.rows[0]!.baseline).toBe("0/10");
     expect(model.checksTable!.totalRow.baseline).toBe("**10/80**");
-    expect(model.pillars.latency.baseline).toBe("5m00s");
+    expect(model.pillars.latency.baseline).toBe("300,155 ms");
     expect(renderScoredMarkdown(model)).toContain(
       "Status: Without this skill: task limit reached, graded · With this skill: completed, graded\n",
     );
@@ -303,9 +306,9 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(model.pillars.accuracy.baseline).toBe("n/a");
     expect(model.pillars.accuracy.change).toBe("n/a");
     expect(model.pillars.cost.change).toBe("+90,020 (+18.8%)");
-    expect(model.pillars.latency.baseline).toBe("49m19s (session-derived)");
-    expect(model.pillars.latency.change).toBe("−45m45s (−92.8%, approximate)");
-    expect(model.costLatencyTable.rows[1]!.baseline).toBe("49m19.239s (session-derived)");
+    expect(model.pillars.latency.baseline).toBe("2,959,239 ms (session-derived)");
+    expect(model.pillars.latency.change).toBe("−2,745,239 ms (−92.8%, approximate)");
+    expect(model.costLatencyTable.rows[1]!.baseline).toBe("2,959,239 ms (session-derived)");
     for (const row of [...model.accuracyTable.rows, ...model.checksTable!.rows]) expect(row.baseline).toBe("n/a");
     expect(model.accuracyTable.totalRow.baseline).toBe("**n/a**");
     expect(model.accuracyTable.rows[0]!.treatment).toBe("60/80 — 75%");
@@ -386,7 +389,7 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
     expect(lines[1]).toBe("Agent:  Pi · google/fake-model-0");
     expect(text.indexOf("Cost and latency:")).toBeLessThan(text.indexOf("limits "));
     expect(text).toMatch(/\nreceipt\s+\/tmp\/fake-run\/receipt\.json\n/);
-    expect(text).toContain("publish   pnpm eval:publish --receipt /tmp/fake-run/receipt.json --checks");
+    expect(text).toContain("export    pnpm eval:export --receipt /tmp/fake-run/receipt.json");
   });
 
   it("derives skill label, title and scenario without fabricating", () => {
@@ -454,9 +457,54 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
         pairN(3, createConditionReport("baseline"), createConditionReport("treatment", { durationMs: 20_000 })),
       ];
       const model = buildScoredReport(createRunReport({ pairs }), MOCK_RUBRIC, { mode: "mean", pairs });
-      expect(model.pillars.latency.treatment).toBe("20.0s (session-derived in 1 of 3 pairs)");
+      expect(model.pillars.latency.treatment).toBe("20,000 ms (session-derived in 1 of 3 pairs)");
       expect(model.pillars.latency.baseline).not.toContain("session-derived");
       expect(model.pillars.latency.change).toContain("approximate");
     });
+  });
+});
+
+describe("renderScoredSummaryMarkdown", () => {
+  const DETAILS_URL = "https://github.com/example/evals/tree/HEAD/eval-cases/network-config-01/runs/run-001";
+  const RUN_HASH = "ab".repeat(32);
+  const golden = (name: string, actual: string): void => {
+    const path = new URL(`./__golden__/${name}`, import.meta.url);
+    if (process.env.UPDATE_GOLDEN === "1") writeFileSync(path, actual);
+    expect(actual).toBe(readFileSync(path, "utf8"));
+  };
+  const pairN = (n: number): PairReport => ({
+    ...pairOf(createConditionReport("baseline"), createConditionReport("treatment")),
+    pairId: `run-001-r00${n}`,
+    repetition: n,
+  });
+  const summary = (model: ReturnType<typeof buildScoredReport>, testDouble: boolean): string =>
+    renderScoredSummaryMarkdown(model, { detailsUrl: DETAILS_URL, testDouble, runHash: RUN_HASH });
+
+  it("uses one shared heading constant, renamed to Accuracy Outcome Checks", () => {
+    expect(OUTCOME_CHECKS_HEADING).toBe("Accuracy Outcome Checks");
+    const md = renderScoredMarkdown(buildScoredReport(createRunReport(), MOCK_RUBRIC), { checks: true });
+    expect(md).toContain("### Accuracy Outcome Checks");
+    expect(md).not.toContain("### Outcome checks");
+  });
+
+  it("matches the single-pair golden, has no Accuracy / Cost sections or markers, and ends with the link", () => {
+    const out = summary(buildScoredReport(createRunReport(), MOCK_RUBRIC), true);
+    expect(out).not.toContain("### Accuracy\n");
+    expect(out).not.toContain("### Cost and latency");
+    expect(out).not.toContain("AF-EVAL");
+    expect(out.trimEnd().split("\n").at(-1)).toBe(`For further details or to check run reproducibility see: ${DETAILS_URL}`);
+    expect(out).toContain(` · Hash: ${RUN_HASH}`);
+    expect(out).not.toContain("Status:");
+    golden("evals-summary.single.md", out);
+  });
+
+  it("matches the mean golden and omits the test-double banner and run hash when unavailable", () => {
+    const pairs = [1, 2, 3].map(pairN);
+    const model = buildScoredReport(createRunReport({ pairs, testDouble: false }), MOCK_RUBRIC, { mode: "mean", pairs });
+    const out = summary(model, false);
+    expect(out).toContain("Run: run-001 · Pairs r001, r002, r003");
+    expect(out).not.toContain("Warning");
+    golden("evals-summary.mean.md", out);
+    expect(renderScoredSummaryMarkdown(model, { detailsUrl: DETAILS_URL })).not.toContain("Hash:");
   });
 });

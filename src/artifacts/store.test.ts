@@ -265,6 +265,19 @@ describe("evidence store", () => {
     expect(isChainExcludedPath("pairs/p/pair.json")).toBe(false);
   });
 
+  it("excludes exactly the two generated export names at the run root, and reserves them from records", async () => {
+    const runDir = join(await tempRoot(), "run");
+    const store = await createEvidenceStore({ runDir });
+    for (const name of ["EVALS.md", "EVALS-FULL-REPORT.md"]) {
+      expect(isChainExcludedPath(name)).toBe(true);
+      await expect(store.writeRecord(name, { a: 1 })).rejects.toMatchObject({ code: "evidence-invalid" });
+      await expect(store.writeFile(name, "x")).rejects.toMatchObject({ code: "evidence-invalid" });
+      expect(isChainExcludedPath(`pairs/p/${name}`)).toBe(false);
+      expect(isChainExcludedPath(`${name}/x`)).toBe(false);
+    }
+    expect(isChainExcludedPath("evals.md")).toBe(false);
+  });
+
   it("rejects an unsafe evidence path before it is joined to the run directory", async () => {
     const runDir = join(await tempRoot(), "run");
     const store = await createEvidenceStore({ runDir });

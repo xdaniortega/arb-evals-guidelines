@@ -275,10 +275,22 @@ export const RECEIPT_FILE = "receipt.json";
 export const VIEWS_DIR = "views";
 export const RECOVERY_DIR = "recovery";
 
+/**
+ * Generated, regenerable run-folder exports. Exact root names only; they are outputs
+ * recomputed from sealed evidence, never evidence, and are never read by verification.
+ */
+export const RUN_EXPORT_FILES = ["EVALS.md", "EVALS-FULL-REPORT.md"] as const;
+
+/** True for exactly the two root-level generated export names. */
+export function isRunExportFile(relativePath: string): boolean {
+  return (RUN_EXPORT_FILES as readonly string[]).includes(relativePath);
+}
+
 /** Paths that are never part of the hash chain the manifest covers. */
 export function isChainExcludedPath(relativePath: string): boolean {
   return (
     relativePath === MANIFEST_FILE ||
+    isRunExportFile(relativePath) ||
     relativePath === RECEIPT_FILE ||
     relativePath === VIEWS_DIR ||
     relativePath === RECOVERY_DIR ||

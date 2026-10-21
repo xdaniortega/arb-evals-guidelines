@@ -28,6 +28,8 @@ export type PairSelection =
 export const REPORT_JSON_SCHEMA_VERSION = 3;
 export const LEGACY_RESULT_LABEL = "LEGACY RESULT — scored under an earlier rubric; not reweighted";
 export const SESSION_DERIVED_LABEL = "session-derived";
+export const OUTCOME_CHECKS_HEADING = "Accuracy Outcome Checks";
+export const TEST_DOUBLE_WARNING = "TEST-DOUBLE EVIDENCE — synthetic scores, not a measured result";
 
 const MINUS = "−";
 const NA = "n/a";
@@ -168,6 +170,13 @@ export function formatDuration(ms: number | null, options: { readonly precise?: 
   return hours > 0 ? `${sign}${hours}h${pad2(minutes)}m${pad2(seconds)}s` : `${sign}${minutes}m${pad2(seconds)}s`;
 }
 
+/** Latency in whole milliseconds, always: `191,000 ms`. */
+export function formatLatencyMs(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return NA;
+  const rounded = Math.round(Math.abs(ms));
+  return `${ms < 0 && rounded !== 0 ? MINUS : ""}${rounded.toLocaleString("en-US")} ms`;
+}
+
 function formatPercentChange(baseline: number, treatment: number): string {
   if (baseline === 0) return NA;
   const pct = ((treatment - baseline) / baseline) * 100;
@@ -176,7 +185,7 @@ function formatPercentChange(baseline: number, treatment: number): string {
   return pct > 0 ? `+${text}%` : `${MINUS}${text}%`;
 }
 
-/** Latency change: `−45m45s (−92.8%)`, with `, approximate` when either side is session-derived. */
+/** Latency change in ms: `−157,000 ms (−82.2%)`, with `, approximate` when either side is session-derived. */
 export function formatDurationDiff(
   baselineMs: number | null,
   treatmentMs: number | null,
@@ -186,8 +195,8 @@ export function formatDurationDiff(
     return NA;
   }
   const diffMs = treatmentMs - baselineMs;
-  const magnitude = formatDuration(Math.abs(diffMs));
-  const diff = magnitude === "0.0s" ? "0.0s" : diffMs > 0 ? `+${magnitude}` : `${MINUS}${magnitude}`;
+  const magnitude = formatLatencyMs(Math.abs(diffMs));
+  const diff = magnitude === "0 ms" ? "0 ms" : diffMs > 0 ? `+${magnitude}` : `${MINUS}${magnitude}`;
   const suffix = options.approximate ? ", approximate" : "";
   return `${diff} (${formatPercentChange(baselineMs, treatmentMs)}${suffix})`;
 }
@@ -452,8 +461,8 @@ function buildPillars(
     },
     latency: {
       label: "Latency",
-      baseline: withDerivedLabel(formatDuration(bDuration.ms), bDuration.derived, baseline),
-      treatment: withDerivedLabel(formatDuration(tDuration.ms), tDuration.derived, treatment),
+      baseline: withDerivedLabel(formatLatencyMs(bDuration.ms), bDuration.derived, baseline),
+      treatment: withDerivedLabel(formatLatencyMs(tDuration.ms), tDuration.derived, treatment),
       change: formatDurationDiff(bDuration.ms, tDuration.ms, { approximate }),
       baselineRawMs: bDuration.ms,
       treatmentRawMs: tDuration.ms,
@@ -469,7 +478,7 @@ function buildPillars(
 function buildCostLatencyTable(baseline: ConditionReport | undefined, treatment: ConditionReport | undefined): ScoredCostLatencyTable {
   const precise = (condition: ConditionReport | undefined): string => {
     const { ms, derived } = effectiveDuration(condition);
-    return withDerivedLabel(formatDuration(ms, { precise: true }), derived, condition);
+    return withDerivedLabel(formatLatencyMs(ms), derived, condition);
   };
   return {
     rows: [
@@ -478,7 +487,7 @@ function buildCostLatencyTable(baseline: ConditionReport | undefined, treatment:
         baseline: formatTokens(baseline?.consumedTokens ?? null),
         treatment: formatTokens(treatment?.consumedTokens ?? null),
       },
-      { label: "Time to completion or termination", baseline: precise(baseline), treatment: precise(treatment) },
+      { label: "Time to completion or termination (ms)", baseline: precise(baseline), treatment: precise(treatment) },
     ],
   };
 }
@@ -620,7 +629,7 @@ export function buildScoredReport(
     const outcomeTotal = (acc: ScoredArmAccuracy): string =>
       bold(acc.outcome.got !== null ? `${acc.outcome.got}/${acc.outcome.max}` : NA);
     checksTable = {
-      heading: "Outcome checks",
+      heading: OUTCOME_CHECKS_HEADING,
       note: "Each check covers both production and staging.",
       rows: rubric.topics.map((t, index) => ({
         id: t.id,
@@ -685,39 +694,27 @@ export function renderScoredMarkdown(
     readonly checks?: boolean;
     readonly details?: boolean;
     readonly footer?: string;
+    /** First-line heading text; defaults to `EVALS.MD: <case title>`. */
+    readonly heading?: string;
+    /** Sealed manifest tree sha256, appended to the `Run:` line. */
+    readonly runHash?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];
-  const table = (headers: readonly string[], rows: readonly (readonly string[])[]): void => {
-    lines.push(`| ${headers.join(" | ")} |`);
-    lines.push(`|---|${headers.slice(1).map(() => "---:").join("|")}|`);
-    for (const row of rows) lines.push(`| ${row.join(" | ")} |`);
-    lines.push("");
-  };
+  const table = markdownTable(lines);
 
   if (model.isLegacy) {
     lines.push(`> **Warning:** ${model.legacyLabel ?? LEGACY_RESULT_LABEL}\n`);
   }
 
-  lines.push(`# EVALS.MD: ${model.caseTitle}\n`);
-  const fields = headerFields(model);
-  fields.forEach(([label, value], index) => {
-    lines.push(`${label}: ${value}${index < fields.length - 1 ? "  " : ""}`);
-  });
-  lines.push("");
-  lines.push(`![${model.badgeAlt}](${model.badgeUrl})\n`);
-
-  table(["Pillar", ...ARM_HEADERS, "Change"], pillarRows(model));
-
-  lines.push(`## Scenario: ${model.caseScenario}\n`);
+  lines.push(`# ${options.heading ?? `EVALS.MD: ${model.caseTitle}`}\n`);
+  pushHeaderBlock(lines, model, table, { runHash: options.runHash ?? null });
 
   lines.push("### Accuracy\n");
   table(["Check", ...ARM_HEADERS], [...model.accuracyTable.rows, model.accuracyTable.totalRow].map(armRow));
 
   if (options.checks && model.checksTable) {
-    lines.push(`### ${model.checksTable.heading}\n`);
-    lines.push(`${model.checksTable.note}\n`);
-    table(["Check", ...ARM_HEADERS], [...model.checksTable.rows, model.checksTable.totalRow].map(armRow));
+    pushChecksSection(lines, model.checksTable, table);
   }
 
   lines.push("### Cost and latency\n");
@@ -729,6 +726,75 @@ export function renderScoredMarkdown(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * The compact EVALS.md summary: header, badge, pillars, scenario and the
+ * Accuracy Outcome Checks table, then a details link (the run hash sits on the `Run:` line; no Status line).
+ * No Accuracy or Cost and latency sections and no markers.
+ */
+export function renderScoredSummaryMarkdown(
+  model: ScoredReportModel,
+  options: {
+    readonly detailsUrl: string;
+    readonly testDouble?: boolean;
+    /** Sealed manifest tree sha256 from the receipt; the line is omitted when unavailable. */
+    readonly runHash?: string | null;
+  },
+): string {
+  const lines: string[] = [];
+  const table = markdownTable(lines);
+  if (options.testDouble) lines.push(`> **Warning:** ${TEST_DOUBLE_WARNING}\n`);
+  if (model.isLegacy) lines.push(`> **Warning:** ${model.legacyLabel ?? LEGACY_RESULT_LABEL}\n`);
+  lines.push(`# EVALS.MD: ${model.caseTitle}\n`);
+  pushHeaderBlock(lines, model, table, { omitStatus: true, runHash: options.runHash ?? null });
+  if (model.checksTable) pushChecksSection(lines, model.checksTable, table);
+  lines.push(`For further details or to check run reproducibility see: ${options.detailsUrl}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function markdownTable(lines: string[]) {
+  return (headers: readonly string[], rows: readonly (readonly string[])[]): void => {
+    lines.push(`| ${headers.join(" | ")} |`);
+    lines.push(`|---|${headers.slice(1).map(() => "---:").join("|")}|`);
+    for (const row of rows) lines.push(`| ${row.join(" | ")} |`);
+    lines.push("");
+  };
+}
+
+function pushChecksSection(
+  lines: string[],
+  checks: ScoredChecksTable,
+  table: (headers: readonly string[], rows: readonly (readonly string[])[]) => void,
+): void {
+  lines.push(`### ${checks.heading}\n`);
+  lines.push(`${checks.note}\n`);
+  table(["Check", ...ARM_HEADERS], [...checks.rows, checks.totalRow].map(armRow));
+}
+
+function pushHeaderBlock(
+  lines: string[],
+  model: ScoredReportModel,
+  table: (headers: readonly string[], rows: readonly (readonly string[])[]) => void,
+  options: { readonly omitStatus?: boolean; readonly runHash?: string | null } = {},
+): void {
+  const fields = headerFields(model)
+    .filter(([label]) => !(options.omitStatus && label === "Status"))
+    .map(([label, value]): readonly [string, string] =>
+      label === "Run" && options.runHash ? [label, `${value} · Hash: ${options.runHash}`] : [label, value],
+    );
+  fields.forEach(([label, value], index) => {
+    // Keep the Markdown line break on every line but the last of the full header, so the summary
+    // and the full report render identical header lines.
+    const keepBreak = options.omitStatus || index < fields.length - 1;
+    lines.push(`${label}: ${value}${keepBreak ? "  " : ""}`);
+  });
+  lines.push("");
+  lines.push(`![${model.badgeAlt}](${model.badgeUrl})\n`);
+
+  table(["Pillar", ...ARM_HEADERS, "Change"], pillarRows(model));
+
+  lines.push(`## Scenario: ${model.caseScenario}\n`);
 }
 
 /** Box-drawing table with right-aligned numeric columns; the last `totalRows` rows sit below a rule. */

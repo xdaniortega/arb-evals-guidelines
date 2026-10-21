@@ -17,18 +17,18 @@ import { buildRunReport, formatRunReport, inspectCondition } from "./queries.ts"
 import {
   EVAL_BEGIN_MARKER,
   EVAL_END_MARKER,
-  publishRun,
+  exportRun,
   replaceGeneratedSection,
-  resolveDefaultRepoRoot,
-  resolvePublicationTarget,
-  validateAndResolveDestination,
 } from "./publish.ts";
 import { createSkillSnapshot } from "../runner/skill-snapshot.ts";
 import { EvalError } from "../core/types.ts";
+import { buildRunReportUrl } from "../core/report-links.ts";
+import { renderRunExports, writeRunExports } from "./run-exports.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
 const evalsRoot = repoRoot;
+const REPO_URL = "https://github.com/example/evals";
 
 const tempRoots: string[] = [];
 const workDirs: string[] = [];
@@ -42,7 +42,13 @@ afterAll(async () => {
   }
 });
 
-async function sealRun(script?: FakeHarnessScript, repetitions: number = 1): Promise<RunResult> {
+async function sealRun(script?: FakeHarnessScript, repetitions: number = 1, withExports: boolean = true): Promise<RunResult> {
+  const result = await sealRunRaw(script, repetitions);
+  if (withExports) await writeRunExports(result.runDir, await renderRunExports(result.receiptPath, { repoUrl: REPO_URL }));
+  return result;
+}
+
+async function sealRunRaw(script?: FakeHarnessScript, repetitions: number = 1): Promise<RunResult> {
   const root = await mkdtemp(join(tmpdir(), "eval-publish-test-"));
   tempRoots.push(root);
   const workDir = await mkdtemp(join(tmpdir(), "eval-publish-work-"));
@@ -323,214 +329,7 @@ Middle
   });
 });
 
-describe("default repo root and pure target resolver (Blocker 1)", () => {
-  it("resolveDefaultRepoRoot resolves the actual repository root (two parent traversals)", () => {
-    const root = resolveDefaultRepoRoot();
-    expect(root).toBe(repoRoot);
-    expect(existsSync(join(root, "package.json"))).toBe(true);
-    expect(existsSync(join(root, "eval-cases"))).toBe(true);
-  });
-
-  it("pure resolver resolvePublicationTarget targets <repo>/skills/<recorded-skill>/EVALS.md without --repo-root and without mutating", () => {
-    const target = resolvePublicationTarget({ skillSourcePath: "skills/arbitrum-docs" });
-    expect(target.repoRoot).toBe(repoRoot);
-    expect(target.targetDir).toBe(join(repoRoot, "skills", "arbitrum-docs"));
-    expect(target.targetPath).toBe(join(repoRoot, "skills", "arbitrum-docs", "EVALS.md"));
-    expect(target.relativeTargetPath).toBe("skills/arbitrum-docs/EVALS.md");
-  });
-});
-
-describe("validateAndResolveDestination path safety (Blocker 2)", () => {
-  it("rejects absolute skillSourcePath", async () => {
-    await expect(
-      validateAndResolveDestination("/etc/passwd", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("must be repository-relative"),
-      }),
-    );
-  });
-
-  it("rejects traversal skillSourcePath (.. segments)", async () => {
-    await expect(
-      validateAndResolveDestination("../skills/arbitrum-docs", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("traversal segments"),
-      }),
-    );
-
-    await expect(
-      validateAndResolveDestination("skills/arbitrum-docs/../../etc", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("traversal segments"),
-      }),
-    );
-  });
-
-  it("rejects empty or dot skillSourcePath", async () => {
-    await expect(
-      validateAndResolveDestination(".", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-      }),
-    );
-
-    await expect(
-      validateAndResolveDestination("", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-      }),
-    );
-  });
-
-  it("rejects unnormalized skillSourcePath", async () => {
-    await expect(
-      validateAndResolveDestination("skills//arbitrum-docs", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-      }),
-    );
-
-    await expect(
-      validateAndResolveDestination("skills/./arbitrum-docs", { repoRoot }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-      }),
-    );
-  });
-
-  it("rejects non-existent skill directory and does not create it (no mkdir)", async () => {
-    const tempRepo = await mkdtemp(join(tmpdir(), "eval-dest-test-"));
-    tempRoots.push(tempRepo);
-
-    await expect(
-      validateAndResolveDestination("skills/nonexistent-skill", { repoRoot: tempRepo }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("does not exist"),
-      }),
-    );
-
-    expect(existsSync(join(tempRepo, "skills", "nonexistent-skill"))).toBe(false);
-  });
-
-  it("rejects symlinked skill directory", async () => {
-    const tempRepo = await mkdtemp(join(tmpdir(), "eval-dest-test-"));
-    tempRoots.push(tempRepo);
-
-    const realSkillDir = await mkdtemp(join(tmpdir(), "eval-real-skill-"));
-    tempRoots.push(realSkillDir);
-
-    const skillsDir = join(tempRepo, "skills");
-    await mkdir(skillsDir, { recursive: true });
-    await symlink(realSkillDir, join(skillsDir, "symlinked-skill"));
-
-    await expect(
-      validateAndResolveDestination("skills/symlinked-skill", { repoRoot: tempRepo }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("symlink"),
-      }),
-    );
-  });
-
-  it("rejects symlink in parent path component of skill directory", async () => {
-    const tempRepo = await mkdtemp(join(tmpdir(), "eval-dest-test-"));
-    tempRoots.push(tempRepo);
-
-    const realTargetDir = await mkdtemp(join(tmpdir(), "eval-real-target-"));
-    tempRoots.push(realTargetDir);
-    await mkdir(join(realTargetDir, "nested-skill"), { recursive: true });
-
-    await symlink(realTargetDir, join(tempRepo, "symlink-parent"));
-
-    await expect(
-      validateAndResolveDestination("symlink-parent/nested-skill", { repoRoot: tempRepo }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("symlink"),
-      }),
-    );
-  });
-
-  it("rejects symlinked destination EVALS.md", async () => {
-    const tempRepo = await mkdtemp(join(tmpdir(), "eval-dest-test-"));
-    tempRoots.push(tempRepo);
-
-    const skillDir = join(tempRepo, "skills", "arbitrum-docs");
-    await mkdir(skillDir, { recursive: true });
-
-    const outsideFile = join(tempRepo, "outside.md");
-    await writeFile(outsideFile, "# Outside", "utf8");
-    await symlink(outsideFile, join(skillDir, "EVALS.md"));
-
-    await expect(
-      validateAndResolveDestination("skills/arbitrum-docs", { repoRoot: tempRepo }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("destination EVALS.md is a symlink"),
-      }),
-    );
-  });
-
-  it("rejects non-regular file destination EVALS.md (directory)", async () => {
-    const tempRepo = await mkdtemp(join(tmpdir(), "eval-dest-test-"));
-    tempRoots.push(tempRepo);
-
-    const skillDir = join(tempRepo, "skills", "arbitrum-docs");
-    await mkdir(join(skillDir, "EVALS.md"), { recursive: true });
-
-    await expect(
-      validateAndResolveDestination("skills/arbitrum-docs", { repoRoot: tempRepo }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("destination EVALS.md is not a regular file"),
-      }),
-    );
-  });
-
-  it("accepts valid real skill directory inside repo root", async () => {
-    const tempRepo = await mkdtemp(join(tmpdir(), "eval-dest-test-"));
-    tempRoots.push(tempRepo);
-
-    const skillDir = join(tempRepo, "skills", "arbitrum-docs");
-    await mkdir(skillDir, { recursive: true });
-
-    const resolved = await validateAndResolveDestination("skills/arbitrum-docs", { repoRoot: tempRepo });
-    expect(resolved.repoRoot).toBe(tempRepo);
-    expect(resolved.targetDir).toBe(skillDir);
-    expect(resolved.targetPath).toBe(join(skillDir, "EVALS.md"));
-    expect(resolved.relativeTargetPath).toBe(join("skills", "arbitrum-docs", "EVALS.md"));
-  });
-});
-
-describe("publishRun", () => {
+describe("exportRun", () => {
   it("successfully publishes to EVALS.md and is idempotent on repeat calls", async () => {
     const runResult = await sealRun();
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
@@ -551,9 +350,9 @@ Coverage note survives verbatim.
     await writeFile(evalsPath, initialAuthored, "utf8");
 
     // First publish
-    const pubResult1 = await publishRun({
+    const pubResult1 = await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
     expect(pubResult1.runId).toBe(runResult.runId);
 
@@ -563,13 +362,13 @@ Coverage note survives verbatim.
     expect(contentAfterFirst).toContain(EVAL_BEGIN_MARKER);
     expect(contentAfterFirst).toContain(EVAL_END_MARKER);
     expect(contentAfterFirst).toContain("# EVALS.MD:");
-    expect(contentAfterFirst).toContain("Status: Completed; graded\n");
+    expect(contentAfterFirst).not.toContain("Status:");
     expect(contentAfterFirst).not.toContain("Placeholder");
 
     // Second publish (idempotency test)
-    const pubResult2 = await publishRun({
+    const pubResult2 = await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
     const contentAfterSecond = await readFile(evalsPath, "utf8");
 
@@ -594,9 +393,9 @@ Some historical notes.
     const evalsPath = join(tempSkillDir, "EVALS.md");
     await writeFile(evalsPath, initialAuthored, "utf8");
 
-    await publishRun({
+    await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
 
     const content = await readFile(evalsPath, "utf8");
@@ -606,9 +405,9 @@ Some historical notes.
     expect(content).toContain("## Historical notes\nSome historical notes.");
 
     // Republishing replaces within markers idempotently
-    await publishRun({
+    await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
     const content2 = await readFile(evalsPath, "utf8");
     expect(content2).toBe(content);
@@ -631,11 +430,11 @@ Some historical notes.
     await writeFile(validationFile, raw + " ", "utf8");
 
     await expect(
-      publishRun({
+      exportRun({
         receiptPath: runResult.receiptPath,
-        targetSkillDir: tempSkillDir,
+        to: tempSkillDir, repoUrl: REPO_URL,
       }),
-    ).rejects.toThrow(/Publication refused: evidence verification failed/);
+    ).rejects.toThrow(/Export refused: evidence verification failed/);
 
     // Destination file must not be modified
     const currentContent = await readFile(evalsPath, "utf8");
@@ -646,13 +445,13 @@ Some historical notes.
     const runResult = await sealRun();
     const base = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(base);
-    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: join(base, "absent") }))
-      .rejects.toThrow(/skill directory does not exist/);
+    await expect(exportRun({ receiptPath: runResult.receiptPath, to: join(base, "absent"), repoUrl: REPO_URL }))
+      .rejects.toThrow(/destination directory does not exist/);
     const real = join(base, "real");
     await mkdir(real);
     const link = join(base, "link");
     await symlink(real, link);
-    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: link }))
+    await expect(exportRun({ receiptPath: runResult.receiptPath, to: link, repoUrl: REPO_URL }))
       .rejects.toThrow(/real directory, not a symlink/);
   });
 
@@ -665,29 +464,11 @@ Some historical notes.
     await rm(join(runResult.runDir, "inputs", "rubric.json"), { force: true });
 
     await expect(
-      publishRun({
+      exportRun({
         receiptPath: runResult.receiptPath,
-        targetSkillDir: tempSkillDir,
+        to: tempSkillDir, repoUrl: REPO_URL,
       }),
-    ).rejects.toThrow(/Publication refused/);
-  });
-
-  it("refuses when destination skill cannot be derived from skill-snapshot", async () => {
-    const runResult = await sealRun();
-    const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
-    tempRoots.push(tempSkillDir);
-
-    // Overwrite skill-snapshot.json to remove sourcePath
-    const snapshotPath = join(runResult.runDir, "inputs", "skill-snapshot.json");
-    await chmod(snapshotPath, 0o644);
-    await writeFile(snapshotPath, JSON.stringify({ schemaVersion: 2, files: [] }), "utf8");
-
-    await expect(
-      publishRun({
-        receiptPath: runResult.receiptPath,
-        targetSkillDir: tempSkillDir,
-      }),
-    ).rejects.toThrow(/Publication refused/);
+    ).rejects.toThrow(/Export refused/);
   });
 
   it("publishes verified task-limit run with actual status and n/a measurements (no mock scores)", async () => {
@@ -700,16 +481,16 @@ Some historical notes.
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    const pubResult = await publishRun({
+    const pubResult = await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
 
     const evalsPath = join(tempSkillDir, "EVALS.md");
     const content = await readFile(evalsPath, "utf8");
 
     // Must show task-limit status
-    expect(content).toContain("Status: Task limit reached; graded\n");
+    expect(content).not.toContain("Status:");
     // Badge must reflect task-limit status
     expect(content).toMatch(/AF--Evaluation-task%20limit%20%C2%B7%20\d+%25-yellow/);
     // Badge must NOT claim certification
@@ -730,15 +511,15 @@ Some historical notes.
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    await publishRun({
+    await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
 
     const evalsPath = join(tempSkillDir, "EVALS.md");
     const content = await readFile(evalsPath, "utf8");
 
-    expect(content).toContain("Status: Without this skill: task limit reached, graded · With this skill: completed, graded\n");
+    expect(content).not.toContain("Status:");
   });
 
   it("refuses to publish a run with an ungraded arm instead of publishing n/a", async () => {
@@ -749,8 +530,8 @@ Some historical notes.
     );
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
-    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: tempSkillDir }))
-      .rejects.toThrow(/Publication refused: .* has ungraded arm\(s\): baseline/);
+    await expect(exportRun({ receiptPath: runResult.receiptPath, to: tempSkillDir, repoUrl: REPO_URL }))
+      .rejects.toThrow(/Export refused: .* has ungraded arm\(s\): baseline/);
     await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
   });
 
@@ -763,7 +544,7 @@ Some historical notes.
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    const result = await publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: tempSkillDir });
+    const result = await exportRun({ receiptPath: runResult.receiptPath, to: tempSkillDir, repoUrl: REPO_URL });
     expect(result.mode).toBe("mean");
     expect(result.pairIds).toEqual(report.pairs.map((pair) => pair.pairId));
 
@@ -772,10 +553,10 @@ Some historical notes.
     expect(content).toContain(`Run: ${report.runId} · Pairs ${labels.join(", ")}`);
     expect(content).not.toContain("Pair r001  \n");
     expect(content).not.toContain("repetitions)");
-    // Same table headers as a single-pair publication: no extra columns or notes.
+    // Same table headers as a single-pair export: no extra columns or notes.
     expect(content).toContain("| Pillar | Without this skill | With this skill | Change |");
     expect(content).toContain("| Check | Without this skill | With this skill |");
-    expect(content).toContain("| Metric | Without this skill | With this skill |");
+    expect(content).not.toContain("| Metric |");
   });
 
   it("--pair on a multi-pair run publishes only that pair, unaffected by an ungraded pair elsewhere", async () => {
@@ -796,7 +577,7 @@ Some historical notes.
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    const result = await publishRun({ receiptPath: runResult.receiptPath, pairId: pair1Id, targetSkillDir: tempSkillDir });
+    const result = await exportRun({ receiptPath: runResult.receiptPath, pairId: pair1Id, to: tempSkillDir, repoUrl: REPO_URL });
     expect(result.mode).toBe("single");
     expect(result.pairIds).toEqual([pair1Id]);
 
@@ -818,8 +599,8 @@ Some historical notes.
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    await expect(publishRun({ receiptPath: runResult.receiptPath, targetSkillDir: tempSkillDir }))
-      .rejects.toThrow(/Publication refused: pair r002 of run .* has ungraded arm\(s\): baseline/);
+    await expect(exportRun({ receiptPath: runResult.receiptPath, to: tempSkillDir, repoUrl: REPO_URL }))
+      .rejects.toThrow(/Export refused: pair r002 of run .* has ungraded arm\(s\): baseline/);
     await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
   });
 
@@ -828,9 +609,9 @@ Some historical notes.
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    await publishRun({
+    await exportRun({
       receiptPath: runResult.receiptPath,
-      targetSkillDir: tempSkillDir,
+      to: tempSkillDir, repoUrl: REPO_URL,
     });
 
     const evalsPath = join(tempSkillDir, "EVALS.md");
@@ -891,92 +672,18 @@ Some historical notes.
     expect(snap2.files).toEqual(snap1.files);
   });
 
-  it("refuses to publish when derived skill directory does not exist and does NOT create it", async () => {
+  it("refuses a destination directory that does not exist and does NOT create it", async () => {
     const runResult = await sealRun();
-    const tempRepoRoot = await mkdtemp(join(tmpdir(), "eval-no-mkdir-repo-"));
-    tempRoots.push(tempRepoRoot);
-
-    // tempRepoRoot does NOT have skills/arbitrum-docs
-    await expect(
-      publishRun({
-        receiptPath: runResult.receiptPath,
-        repoRoot: tempRepoRoot,
-      }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("does not exist"),
-      }),
+    const base = await mkdtemp(join(tmpdir(), "eval-no-mkdir-"));
+    tempRoots.push(base);
+    const missing = join(base, "skills", "arbitrum-docs");
+    await expect(exportRun({ receiptPath: runResult.receiptPath, to: missing, repoUrl: REPO_URL })).rejects.toThrowError(
+      expect.objectContaining({ name: "EvalError", code: "evidence-invalid", message: expect.stringContaining("does not exist") }),
     );
-
-    // Ensure no outside directory was created
-    expect(existsSync(join(tempRepoRoot, "skills"))).toBe(false);
+    expect(existsSync(join(base, "skills"))).toBe(false);
   });
 
-  it("refuses to publish when derived skill directory is a symlink and leaves target untouched", async () => {
-    const runResult = await sealRun();
-    const tempRepoRoot = await mkdtemp(join(tmpdir(), "eval-symlink-repo-"));
-    tempRoots.push(tempRepoRoot);
-
-    const outsideSkillDir = await mkdtemp(join(tmpdir(), "eval-outside-skill-"));
-    tempRoots.push(outsideSkillDir);
-    const outsideEvals = join(outsideSkillDir, "EVALS.md");
-    const originalContent = "# Untouched Outside File\n";
-    await writeFile(outsideEvals, originalContent, "utf8");
-
-    const skillsDir = join(tempRepoRoot, "skills");
-    await mkdir(skillsDir, { recursive: true });
-    await symlink(outsideSkillDir, join(skillsDir, "arbitrum-docs"));
-
-    await expect(
-      publishRun({
-        receiptPath: runResult.receiptPath,
-        repoRoot: tempRepoRoot,
-      }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("symlink"),
-      }),
-    );
-
-    // Outside file must remain untouched
-    expect(await readFile(outsideEvals, "utf8")).toBe(originalContent);
-  });
-
-  it("refuses to publish when destination EVALS.md is a symlink and leaves target untouched", async () => {
-    const runResult = await sealRun();
-    const tempRepoRoot = await mkdtemp(join(tmpdir(), "eval-symlink-file-repo-"));
-    tempRoots.push(tempRepoRoot);
-
-    const skillDir = join(tempRepoRoot, "skills", "arbitrum-docs");
-    await mkdir(skillDir, { recursive: true });
-
-    const outsideTarget = join(tempRepoRoot, "outside-target.md");
-    const originalContent = "# Untouched Target\n";
-    await writeFile(outsideTarget, originalContent, "utf8");
-
-    await symlink(outsideTarget, join(skillDir, "EVALS.md"));
-
-    await expect(
-      publishRun({
-        receiptPath: runResult.receiptPath,
-        repoRoot: tempRepoRoot,
-      }),
-    ).rejects.toThrowError(
-      expect.objectContaining({
-        name: "EvalError",
-        code: "evidence-invalid",
-        message: expect.stringContaining("destination EVALS.md is a symlink"),
-      }),
-    );
-
-    expect(await readFile(outsideTarget, "utf8")).toBe(originalContent);
-  });
-
-  it("refuses to publish when test-only targetSkillDir has a symlinked EVALS.md and leaves target untouched", async () => {
+  it("refuses to export when destination EVALS.md is a symlink and leaves target untouched", async () => {
     const runResult = await sealRun();
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-targetdir-symlink-"));
     tempRoots.push(tempSkillDir);
@@ -988,28 +695,25 @@ Some historical notes.
     await symlink(outsideTarget, join(tempSkillDir, "EVALS.md"));
 
     await expect(
-      publishRun({
+      exportRun({
         receiptPath: runResult.receiptPath,
-        targetSkillDir: tempSkillDir,
+        to: tempSkillDir, repoUrl: REPO_URL,
       }),
     ).rejects.toThrowError(
       expect.objectContaining({
         name: "EvalError",
         code: "evidence-invalid",
-        message: expect.stringContaining("destination EVALS.md is a symlink"),
+        message: expect.stringContaining("destination file is a symlink"),
       }),
     );
 
     expect(await readFile(outsideTarget, "utf8")).toBe(originalContent);
   });
 
-  it("refuses to publish when destination EVALS.md has malformed/duplicate/reversed markers and leaves file byte-for-byte unchanged", async () => {
+  it("refuses to export when destination EVALS.md has malformed/duplicate/reversed markers and leaves file byte-for-byte unchanged", async () => {
     const runResult = await sealRun();
-    const tempRepoRoot = await mkdtemp(join(tmpdir(), "eval-malformed-marker-repo-"));
-    tempRoots.push(tempRepoRoot);
-
-    const skillDir = join(tempRepoRoot, "skills", "arbitrum-docs");
-    await mkdir(skillDir, { recursive: true });
+    const skillDir = await mkdtemp(join(tmpdir(), "eval-malformed-marker-"));
+    tempRoots.push(skillDir);
     const evalsPath = join(skillDir, "EVALS.md");
 
     // 1. Duplicate begins
@@ -1017,9 +721,10 @@ Some historical notes.
     await writeFile(evalsPath, duplicateBegins, "utf8");
 
     await expect(
-      publishRun({
+      exportRun({
         receiptPath: runResult.receiptPath,
-        repoRoot: tempRepoRoot,
+        to: skillDir,
+        repoUrl: REPO_URL,
       }),
     ).rejects.toThrowError(
       expect.objectContaining({
@@ -1034,9 +739,10 @@ Some historical notes.
     await writeFile(evalsPath, reversedMarkers, "utf8");
 
     await expect(
-      publishRun({
+      exportRun({
         receiptPath: runResult.receiptPath,
-        repoRoot: tempRepoRoot,
+        to: skillDir,
+        repoUrl: REPO_URL,
       }),
     ).rejects.toThrowError(
       expect.objectContaining({
@@ -1052,9 +758,10 @@ Some historical notes.
     await writeFile(evalsPath, unpairedBegin, "utf8");
 
     await expect(
-      publishRun({
+      exportRun({
         receiptPath: runResult.receiptPath,
-        repoRoot: tempRepoRoot,
+        to: skillDir,
+        repoUrl: REPO_URL,
       }),
     ).rejects.toThrowError(
       expect.objectContaining({
@@ -1066,41 +773,39 @@ Some historical notes.
     expect(await readFile(evalsPath, "utf8")).toBe(unpairedBegin);
   });
 
-  describe("eval:publish CLI subprocess execution", () => {
-    const publishScript = resolve(repoRoot, "scripts/publish.ts");
+  describe("eval:export CLI subprocess execution", () => {
+    const exportScript = resolve(repoRoot, "scripts/export.ts");
 
-    it("publishes via CLI subprocess and honors --checks", async () => {
+    it("exports via CLI subprocess with an injected --repo-url", async () => {
       const runResult = await sealRun();
-      const tempRepoRoot = await mkdtemp(join(tmpdir(), "eval-cli-repo-"));
-      tempRoots.push(tempRepoRoot);
-
-      const skillDir = join(tempRepoRoot, "skills", "arbitrum-docs");
-      await mkdir(skillDir, { recursive: true });
+      const skillDir = await mkdtemp(join(tmpdir(), "eval-cli-skill-"));
+      tempRoots.push(skillDir);
       await writeFile(join(skillDir, "EVALS.md"), "# arbitrum-docs — evaluation results\n\nAuthored text\n", "utf8");
 
       const stdout = execFileSync(
         process.execPath,
-        ["--experimental-strip-types", publishScript, "--receipt", runResult.receiptPath, "--repo-root", tempRepoRoot, "--checks"],
+        ["--experimental-strip-types", exportScript, "--receipt", runResult.receiptPath, "--to", skillDir, "--repo-url", REPO_URL],
         { cwd: repoRoot, encoding: "utf8" },
       );
-
-      expect(stdout).toContain(`Published evaluation results for run ${runResult.runId}`);
+      expect(stdout).toContain(`Exported evaluation results for run ${runResult.runId}`);
 
       const content = await readFile(join(skillDir, "EVALS.md"), "utf8");
       expect(content).toContain(EVAL_BEGIN_MARKER);
       expect(content).toContain(EVAL_END_MARKER);
       expect(content).toContain("Authored text");
-      // --checks was passed, so the outcome checks table must be present
-      expect(content).toContain("### Outcome checks");
+      expect(content).toContain("### Accuracy Outcome Checks");
+      expect(content).not.toContain("### Outcome checks");
       expect(content).toContain("Correct network identities");
+      expect(content).toContain(
+        `For further details or to check run reproducibility see: ${REPO_URL}/blob/HEAD/eval-cases/${(await buildRunReport(runResult.receiptPath)).caseId}/runs/${runResult.runId}/EVALS-FULL-REPORT.md`,
+      );
     });
 
     it("refuses with non-zero exit when verification fails", async () => {
       const runResult = await sealRun();
-      const tempRepoRoot = await mkdtemp(join(tmpdir(), "eval-cli-repo-"));
-      tempRoots.push(tempRepoRoot);
+      const skillDir = await mkdtemp(join(tmpdir(), "eval-cli-skill-"));
+      tempRoots.push(skillDir);
 
-      // Tamper with receipt
       const pairId = `${runResult.runId}-r001`;
       const validationFile = join(runResult.runDir, "pairs", pairId, "treatment", "validation.json");
       const raw = await readFile(validationFile, "utf8");
@@ -1110,21 +815,78 @@ Some historical notes.
       expect(() =>
         execFileSync(
           process.execPath,
-          ["--experimental-strip-types", publishScript, "--receipt", runResult.receiptPath, "--repo-root", tempRepoRoot],
+          ["--experimental-strip-types", exportScript, "--receipt", runResult.receiptPath, "--to", skillDir, "--repo-url", REPO_URL],
           { cwd: repoRoot, encoding: "utf8", stdio: "pipe" },
         ),
       ).toThrow();
     });
 
-    it("refuses when --receipt argument is missing", () => {
-      expect(() =>
-        execFileSync(
-          process.execPath,
-          ["--experimental-strip-types", publishScript],
-          { cwd: repoRoot, encoding: "utf8", stdio: "pipe" },
-        ),
-      ).toThrow();
+    it("refuses when --receipt or --to is missing", () => {
+      for (const args of [[], ["--receipt", "x"], ["--to", "y"]]) {
+        expect(() =>
+          execFileSync(process.execPath, ["--experimental-strip-types", exportScript, ...args], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            stdio: "pipe",
+          }),
+        ).toThrow();
+      }
     });
+
+    it("eval:publish no longer exists", async () => {
+      const pkg = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+      expect(pkg.scripts["eval:publish"]).toBeUndefined();
+      expect(pkg.scripts["eval:export"]).toBeDefined();
+      expect(existsSync(join(repoRoot, "scripts", "publish.ts"))).toBe(false);
+    });
+  });
+
+  it("creates a missing destination file with markers, writes to a named .md file, and records the run hash and link", async () => {
+    const runResult = await sealRun();
+    const report = await buildRunReport(runResult.receiptPath);
+    const dir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(dir);
+
+    await exportRun({ receiptPath: runResult.receiptPath, to: dir, repoUrl: REPO_URL });
+    const created = await readFile(join(dir, "EVALS.md"), "utf8");
+    expect(created.startsWith(`${EVAL_BEGIN_MARKER}\n> **Warning:** TEST-DOUBLE EVIDENCE`)).toBe(true);
+    expect(created).toContain("# EVALS.MD:");
+    expect(created.endsWith(`${EVAL_END_MARKER}\n`)).toBe(true);
+    expect(created).not.toContain("### Accuracy\n");
+    expect(created).not.toContain("### Cost and latency");
+    expect(created).toMatch(/^Run: .* · Hash: [0-9a-f]{64}  $/m);
+    const url = buildRunReportUrl({
+      repoUrl: REPO_URL,
+      runRelativeDir: `eval-cases/${report.caseId}/runs/${report.runId}`,
+      target: "full-report",
+    });
+    expect(created).toContain(`For further details or to check run reproducibility see: ${url}\n${EVAL_END_MARKER}`);
+
+    const named = join(dir, "OUT.md");
+    await exportRun({ receiptPath: runResult.receiptPath, to: named, repoUrl: REPO_URL });
+    expect(await readFile(named, "utf8")).toBe(created);
+    // Neither file leaks host paths.
+    expect(created).not.toContain(runResult.receiptPath);
+    expect(created).not.toContain(tmpdir());
+  });
+
+  it("exports a body equal to the run-folder EVALS.md and refuses a stale or missing run-folder file", async () => {
+    const runResult = await sealRun();
+    const dir = await mkdtemp(join(tmpdir(), "eval-export-fresh-"));
+    tempRoots.push(dir);
+    await exportRun({ receiptPath: runResult.receiptPath, to: dir, repoUrl: REPO_URL });
+    const folderSummary = await readFile(join(runResult.runDir, "EVALS.md"), "utf8");
+    const exported = await readFile(join(dir, "EVALS.md"), "utf8");
+    expect(exported).toBe(`${EVAL_BEGIN_MARKER}\n${folderSummary.trim()}\n${EVAL_END_MARKER}\n`);
+
+    await writeFile(join(runResult.runDir, "EVALS.md"), `${folderSummary}tampered\n`);
+    await expect(exportRun({ receiptPath: runResult.receiptPath, to: dir, repoUrl: REPO_URL })).rejects.toThrow(/missing or stale.*--regenerate/s);
+    // A named pair does not depend on the run-folder EVALS.md, only on the full report.
+    await exportRun({ receiptPath: runResult.receiptPath, to: dir, repoUrl: REPO_URL, pairId: "r001" });
+    await rm(join(runResult.runDir, "EVALS-FULL-REPORT.md"));
+    await expect(
+      exportRun({ receiptPath: runResult.receiptPath, to: dir, repoUrl: REPO_URL, pairId: "r001" }),
+    ).rejects.toThrow(/EVALS-FULL-REPORT\.md.*missing or stale/s);
   });
 
   it("eval:inspect --pair accepts the short rNNN label and lists available pairs on a miss (B1)", async () => {

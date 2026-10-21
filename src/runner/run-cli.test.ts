@@ -11,14 +11,37 @@
 
 import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAllowlistedEnv } from "../test-guards.ts";
 import { resolveTargetConfiguration } from "./models.ts";
 import { parseArgs } from "../../scripts/run.ts";
 
 const RUN_SCRIPT = resolve(process.cwd(), "scripts/run.ts");
+
+// The CLI always writes under eval-cases/<case>/runs. Fake-mode runs started by this file are
+// test debris, so remove exactly the new test-double run folders afterwards (never sealed real runs).
+const RUNS_DIR = resolve(process.cwd(), "eval-cases/network-config-01/runs");
+const runsBefore = new Set<string>();
+beforeAll(() => {
+  if (existsSync(RUNS_DIR)) for (const name of readdirSync(RUNS_DIR)) runsBefore.add(name);
+});
+afterAll(() => {
+  if (!existsSync(RUNS_DIR)) return;
+  for (const name of readdirSync(RUNS_DIR)) {
+    if (runsBefore.has(name)) continue;
+    const dir = resolve(RUNS_DIR, name);
+    try {
+      const receipt = JSON.parse(readFileSync(resolve(dir, "receipt.json"), "utf8")) as { testDouble?: boolean };
+      if (receipt.testDouble !== true) continue;
+    } catch {
+      continue;
+    }
+    execFileSync("chmod", ["-R", "u+w", dir]);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function runCli(
   args: readonly string[],
@@ -305,6 +328,9 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(parsed.target.model).toBe("fake-model-0");
     expect(parsed.target.thinking).toBe("off");
     expect(parsed.testDouble).toBe(true);
+    // A verified run also gets both generated exports next to its receipt (outside the hash chain).
+    expect(existsSync(resolve(dirname(parsed.receipt), "EVALS.md"))).toBe(true);
+    expect(existsSync(resolve(dirname(parsed.receipt), "EVALS-FULL-REPORT.md"))).toBe(true);
     const policy = JSON.parse(readFileSync(resolve(dirname(parsed.receipt), "inputs/policy.json"), "utf8"));
     // Fresh runs are unlimited across all four task budgets, represented explicitly as null.
     expect(policy.limits.wallClockMs).toBeNull();

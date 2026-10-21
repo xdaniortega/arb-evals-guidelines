@@ -191,13 +191,13 @@ describe("Process-level automatic table and report contract", () => {
       const costLatencyRows = tableRows(runTables[2]!);
       expect(costLatencyRows[0]).toEqual(["Metric", "Without this skill", "With this skill"]);
       expect(costLatencyRows[1]?.[0]).toBe("Total recorded tokens, including cached input");
-      expect(costLatencyRows[2]?.[0]).toBe("Time to completion or termination");
+      expect(costLatencyRows[2]?.[0]).toBe("Time to completion or termination (ms)");
 
       expect(stdout).toMatch(/^network configuration migration$/m);
       expect(stdout).toMatch(/^Run:\s+\S+ · Pair r001$/m);
       expect(stdout).toMatch(/^Status: Completed; graded$/m);
       expect(stdout).not.toMatch(/^Pair outcomes$/m);
-      expect(stdout).toMatch(/^publish\s+pnpm eval:publish --receipt \S+ --checks$/m);
+      expect(stdout).toMatch(/^export\s+pnpm eval:export --receipt \S+$/m);
       expect(stdout).not.toMatch(/^Averages$/m);
       expect(stdout).not.toContain("Gradeable pairs:");
       expect(stdout).not.toContain("In averages:");
@@ -467,7 +467,7 @@ describe("Process-level automatic table and report contract", () => {
 
       const checksMdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--checks"]);
       expect(checksMdRes.status).toBe(0);
-      expect(checksMdRes.stdout).toContain("### Outcome checks");
+      expect(checksMdRes.stdout).toContain("### Accuracy Outcome Checks");
       expect(checksMdRes.stdout).toContain("| Correct network identities |");
 
       const checksJsonRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--checks"]);
@@ -969,10 +969,10 @@ describe("Population regression, cache accounting, and telemetry denominators", 
     expect(tables).toHaveLength(2);
     expect(tableRows(tables[0]!)[0]).toEqual(RESULT_COLUMNS);
     expect(tableRows(tables[1]!)[0]).toEqual(PAIR_COLUMNS);
-    const expectedMeanRow = ["example-case", "pi", "google", "scripted-model", "0.500", "0.500", "0.000", "+120", "+1.5s"];
+    const expectedMeanRow = ["example-case", "pi", "google", "scripted-model", "0.500", "0.500", "0.000", "+120", "+1,500 ms"];
     const expectedPairRows = [
-      [`${runId}-r001`, "example-case", "pi", "google", "scripted-model", "0.200", "0.600", "+0.400", "+120", "+1.5s"],
-      [`${runId}-r002`, "example-case", "pi", "google", "scripted-model", "0.800", "0.400", "-0.400", "n/a", "+1.5s"],
+      [`${runId}-r001`, "example-case", "pi", "google", "scripted-model", "0.200", "0.600", "+0.400", "+120", "+1,500 ms"],
+      [`${runId}-r002`, "example-case", "pi", "google", "scripted-model", "0.800", "0.400", "-0.400", "n/a", "+1,500 ms"],
       [`${runId}-r003`, "example-case", "pi", "google", "scripted-model", "1.000", "n/a", "n/a", "n/a", "n/a"],
     ];
     expect(tableRows(tables[0]!).slice(1)).toEqual([expectedMeanRow]);

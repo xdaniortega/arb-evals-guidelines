@@ -33,7 +33,7 @@ import { decodePartialLimits, EvalError, LIMIT_KEYS, STOP_CAUSES } from "../core
 import { EVAL_CASES_DIR, listCaseDirectories } from "../runner/case-loader.ts";
 import type { CandidateMode, ConditionId, PartialLimits, StopCause, StructuredFailure, ValidationOutcome } from "../core/types.ts";
 import type { NormalizedMessage, NormalizedToolStep } from "../harnesses/harness.ts";
-import { MANIFEST_FILE, RECEIPT_FILE, VIEWS_DIR, isChainExcludedPath } from "./store.ts";
+import { MANIFEST_FILE, RECEIPT_FILE, VIEWS_DIR, isChainExcludedPath, isRunExportFile } from "./store.ts";
 import { exportSessionFileToHtml } from "../harnesses/pi/export-viewer.ts";
 import { decodeRubric, isRubricScore, scoreWithRubric } from "../runner/rubric.ts";
 import type { Rubric, RubricScore } from "../runner/rubric.ts";
@@ -115,7 +115,13 @@ async function walkChainFiles(runDir: string, excludeDerived = true): Promise<Re
     });
     for (const entry of [...entries].sort((left, right) => (left.name < right.name ? -1 : 1))) {
       const relativePath = [...relative, entry.name].join("/");
-      if (excludeDerived && isChainExcludedPath(relativePath)) continue;
+      if (excludeDerived && isChainExcludedPath(relativePath)) {
+        // A skipped generated export must be a plain regular file, so nothing can hide under it.
+        if (isRunExportFile(relativePath) && (entry.isSymbolicLink() || !entry.isFile())) {
+          throw new EvalError("evidence-invalid", `generated export ${relativePath} must be a regular file`, { at: relativePath });
+        }
+        continue;
+      }
       if (entry.isSymbolicLink()) {
         throw new EvalError(
           "evidence-invalid",
@@ -567,6 +573,8 @@ export interface RunReceipt {
   readonly createdAt: string;
   readonly finalizedAt?: string;
   readonly planSha256: string;
+  readonly source?: { readonly revision?: string; readonly dirty?: boolean };
+  readonly evaluatorBuild?: string;
   readonly manifest: { readonly treeSha256: string; readonly fileSha256: string };
   readonly pairs: readonly ReceiptPairRef[];
   readonly cleanup: readonly unknown[];
@@ -715,6 +723,13 @@ export interface RunReport {
   readonly caseTitle?: string;
   readonly caseScenario?: string;
   readonly scored?: ScoredReportModel | null;
+  /** Sealed manifest hashes recorded in receipt.json (run-binding hashes). */
+  readonly receiptManifest?: { readonly treeSha256: string; readonly fileSha256: string };
+  /** Evaluator source identity recorded at run time; absent in older evidence. */
+  readonly source?: { readonly revision?: string; readonly dirty?: boolean };
+  readonly evaluatorBuild?: string;
+  /** Skill snapshot identity: tree hash and the SKILL.md sha256; absent when not recorded. */
+  readonly skillSnapshot?: { readonly treeSha256?: string; readonly skillMdSha256?: string };
 }
 
 async function readCondition(
@@ -906,12 +921,20 @@ export async function buildRunReport(
   const isLegacy = rubric === null || receipt.rubricVersion === undefined;
 
   let skillSourcePath: string | undefined;
+  let skillSnapshot: { treeSha256?: string; skillMdSha256?: string } | undefined;
   try {
     const snapshotPath = join(runDir, "inputs", "skill-snapshot.json");
     const snapshot = (await readJsonFile(snapshotPath, "inputs/skill-snapshot.json")) as Record<string, unknown>;
     if (typeof snapshot?.sourcePath === "string" && snapshot.sourcePath.length > 0) {
       skillSourcePath = snapshot.sourcePath;
     }
+    const skillMd = Array.isArray(snapshot?.files)
+      ? (snapshot.files as Array<Record<string, unknown>>).find((file) => file?.path === "SKILL.md")
+      : undefined;
+    skillSnapshot = {
+      ...(typeof snapshot?.treeSha256 === "string" ? { treeSha256: snapshot.treeSha256 } : {}),
+      ...(typeof skillMd?.sha256 === "string" ? { skillMdSha256: skillMd.sha256 } : {}),
+    };
   } catch {
     skillSourcePath = undefined;
   }
@@ -1217,6 +1240,10 @@ export async function buildRunReport(
     caseTitle,
     caseScenario,
     scored: null,
+    receiptManifest: { treeSha256: receipt.manifest.treeSha256, fileSha256: receipt.manifest.fileSha256 },
+    ...(receipt.source !== undefined ? { source: receipt.source } : {}),
+    ...(receipt.evaluatorBuild !== undefined ? { evaluatorBuild: receipt.evaluatorBuild } : {}),
+    ...(skillSnapshot !== undefined ? { skillSnapshot } : {}),
   };
 
   // No explicit `--pair`: a single-pair run keeps today's single-pair rendering; a
@@ -1263,9 +1290,11 @@ function formatTokensDelta(tokens: number | null): string {
 
 function formatTimeDelta(seconds: number | null): string {
   if (seconds === null || Number.isNaN(seconds)) return "n/a";
-  if (Math.abs(seconds) < 0.05) return "0.0s";
-  const formatted = Math.abs(seconds).toFixed(1);
-  return seconds > 0 ? `+${formatted}s` : `-${formatted}s`;
+  // Latency is always reported in milliseconds.
+  const ms = Math.round(seconds * 1000);
+  if (ms === 0) return "0 ms";
+  const formatted = Math.abs(ms).toLocaleString("en-US");
+  return ms > 0 ? `+${formatted} ms` : `-${formatted} ms`;
 }
 
 function renderTable(headers: readonly string[], rows: readonly (readonly string[])[], numericColumns: readonly number[], markdown = false): string {
@@ -1344,7 +1373,7 @@ function renderPairTable(report: RunReport, markdown: boolean): string {
   );
 }
 
-function formatLimits(limits: PartialLimits | undefined): string {
+export function formatLimits(limits: PartialLimits | undefined): string {
   if (limits === undefined) return "n/a (not recorded)";
   const time = limits.wallClockMs === null ? "unlimited" : limits.wallClockMs === undefined
     ? "n/a" : `${limits.wallClockMs / 1000}s`;
@@ -1355,7 +1384,7 @@ function formatLimits(limits: PartialLimits | undefined): string {
   return `per arm: time=${time}, output tokens=${budget(limits.maxOutputTokens)}, tool steps=${budget(limits.maxToolSteps)}, provider requests=${budget(limits.maxProviderRequests)}`;
 }
 
-function renderPairDetails(report: RunReport): string {
+export function renderPairDetails(report: RunReport): string {
   const lines: string[] = [];
   for (const pair of report.pairs) {
     lines.push(`pair ${pair.pairId} (repetition ${pair.repetition})`);
@@ -1520,7 +1549,7 @@ export function formatRunReport(
 
   const multiplePairs = report.pairs.length > 1;
 
-  const publishCommand = `pnpm eval:publish --receipt ${report.receiptPath} --checks`;
+  const exportCommand = `pnpm eval:export --receipt ${report.receiptPath}`;
 
   // Rubric-scored Markdown output (same layout as the published EVALS.md) for single-pair runs.
   // Operational data stays in a footer, below the scored sections.
@@ -1567,7 +1596,7 @@ export function formatRunReport(
     }
     field("Receipt", report.receiptPath);
     field("Inspect", inspect);
-    field("Publish", publishCommand);
+    field("Export", exportCommand);
     return lines.join("\n");
   }
 

@@ -12,9 +12,10 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runIdFor } from "../src/core/experiment.ts";
 import type { Target } from "../src/core/experiment.ts";
@@ -50,6 +51,8 @@ import {
   type RunProgressEvent,
 } from "../src/runner/run.ts";
 import { buildRunReport, formatRunReport, REPORT_JSON_SCHEMA_VERSION } from "../src/artifacts/queries.ts";
+import { renderRunExports, writeRunExports } from "../src/artifacts/run-exports.ts";
+import { resolveRepositoryUrl } from "../src/core/report-links.ts";
 
 /** Invocation clock begins at CLI module entry, before credentials, probes and source hashing. */
 const CLI_STARTED_AT_MS = Date.now();
@@ -559,6 +562,26 @@ export async function runCli(
     const report = await buildRunReport(result.receiptPath);
     const formatted = formatRunReport(report, { format: args.format, details: args.details, checks: args.checks });
     process.stdout.write(`${formatted}\n`);
+
+    // Derived run-folder exports (outside the hash chain): written only after the chain verified.
+    // A failure here warns and never changes the exit code or any sealed evidence.
+    if (report.verification.ok) {
+      const note = args.format === "json" ? process.stderr : process.stdout;
+      try {
+        const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { repository?: string | { url?: string } };
+        const repoUrl = resolveRepositoryUrl(undefined, typeof pkg.repository === "string" ? pkg.repository : pkg.repository?.url);
+        const exports = await renderRunExports(result.receiptPath, { repoUrl });
+        await writeRunExports(result.runDir, exports);
+        const rel = relative(repoRoot, result.runDir);
+        const shown = rel.startsWith("..") ? result.runDir : rel;
+        note.write(`exports  ${exports.summary === null ? "" : `${shown}/EVALS.md, `}${shown}/EVALS-FULL-REPORT.md\n`);
+      } catch (error: unknown) {
+        process.stderr.write(
+          `WARNING: could not write run exports (${toStructuredFailure(error, "evidence-invalid").message}). ` +
+            `Run \`pnpm eval:export -- --receipt ${result.receiptPath} --regenerate\` to retry.\n`,
+        );
+      }
+    }
 
     return {
       code: report.verification.ok && result.status === "complete" ? 0 : 1,

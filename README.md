@@ -1,11 +1,11 @@
 # Evals Guidelines
 
 
-Does a skill help an agent do a task better? The Arbitrum evals guidelines compare the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
+Does a skill help an agent do a task better? The Arbitrum evals guidelines compare the same agent **with and without a selected skill**, check its work, and keep the evidence so you can inspect the result.
 
 Start with one pair to understand the workflow. Repeat the comparison to learn whether an improvement is consistent.
 
-The skills under test live in a separate repository, [arbitrum-skills-evals](https://github.com/xdaniortega/arbitrum-skills-evals) (branch `feat/evals-guidelines`). This repository holds the runner, the eval cases and the sealed run evidence. You clone the skills repository separately, anywhere you like, and pass the path of one skill directory to `--skill`.
+The skill under test can be any directory containing `SKILL.md`, anywhere on disk. This repository holds the runner, the eval cases and the sealed run evidence. You pass the path of one skill directory to `--skill`.
 
 ## 1. What is an eval?
 
@@ -31,13 +31,14 @@ For a measured evaluation, you need:
 - **Apple-silicon macOS**, with Apple Container installed and running. Check with `container system status`.
 - **Node.js 24.21.0**, the selected evaluation baseline, and **pnpm 10.33.2**.
 - This repository and its dependencies, installed with `pnpm install --frozen-lockfile`.
-- A checkout of the [skills repository](https://github.com/xdaniortega/arbitrum-skills-evals), for example in `../arbitrum-skills-evals` (see step 2).
+- A skill directory containing `SKILL.md`, anywhere on disk (for an existing run, its frozen copy under `runs/<run-id>/inputs/frozen/skill/`; see 2.2).
 - An API key for the selected provider in the git-ignored `.env` file at the repository root: `GEMINI_API_KEY` for Google or `ANTHROPIC_API_KEY` for Anthropic.
-## 2. Quick start (How to add your eval)
 
-The steps below use the existing case, `network-config-01`, as the worked example. Replace the names with your own skill and case id.
+## 2. Quickstart (how to run an existing eval case)
 
-### Step 1: Set up once
+Re-run the existing case `network-config-01` without a skill of your own: every committed run keeps a frozen copy of the skill it evaluated. Results are not expected to be identical (the model's answers vary); the goal is a comparable run. To evaluate your own skill, see [3. How to create your own eval](#3-how-to-create-your-own-eval).
+
+### 2.1 Set up once
 
 ```bash
 pnpm install --frozen-lockfile
@@ -48,134 +49,90 @@ cp -n .env.example .env
 
 Edit `.env` and fill in the key for your chosen provider. For the example below, use `GEMINI_API_KEY`. Keep credentials out of command arguments and committed files.
 
-### Step 2: Choose the skill
+### 2.2 Run, export and inspect
 
-Clone the [skills repository](https://github.com/xdaniortega/arbitrum-skills-evals) next to this one and pick a skill. It must have a pinned body (the registry `commit` and `digest`). Check out that commit, then confirm the digest, which is the sha256 of `SKILL.md`:
+The skill used by a run is already in its folder, at `eval-cases/<case-id>/runs/<run-id>/inputs/frozen/skill/`.
+
+**a. Export.** The run already generated `EVALS.md` and `EVALS-FULL-REPORT.md` inside its run folder. To (re)generate them for a given run, pass its receipt (no other option needed; it runs no git commands):
 
 ```bash
-git clone -b feat/evals-guidelines https://github.com/xdaniortega/arbitrum-skills-evals.git ../arbitrum-skills-evals
-git -C ../arbitrum-skills-evals checkout <pinned-commit>
-shasum -a 256 ../arbitrum-skills-evals/skills/arbitrum-docs/SKILL.md   # must equal the registry digest
+pnpm eval:export -- --receipt eval-cases/network-config-01/runs/20260924T151721Z-bfb34c20/receipt.json
 ```
 
-The skill directory path (`../arbitrum-skills-evals/skills/arbitrum-docs` below) is what you pass to `--skill`.
+By default the files are written next to the receipt, in `eval-cases/network-config-01/runs/<run-id>/`. `EVALS.md` is the file to share and copy wherever it is needed; `EVALS-FULL-REPORT.md` stays in this repository. To also copy the summary into another existing directory, add `--to <output_dir>`. See [Exports](#exports-evalsmd-and-evals-full-reportmd).
 
-### Step 3: Create the case folder
-
-Create `eval-cases/<case-id>/`, for example `eval-cases/network-config-01/`. The folder name must equal the case id, and case ids are unique. A case is not tied to a skill: you choose the treatment skill with `--skill <path>` when you run it, and the run records that choice in its evidence. Note in the case README which skill the case was written for.
-
-### Step 4: Write the case data
-
-- `case.json`: `id`, `version`, `prompt`, `outputPath`, `allowedTools` and `validator`.
-- `fixture/`: the starting workspace shared by both arms.
-- `oracle.json`: the expected answers, as `sources[{url, locator, fields, verifiedAt}]`. It stays hidden from the agent.
-- `rubric.json`: rubric v0.2. Outcome checks total 80 points and constraint checks total 20.
-
-### Step 5: Write the validator and its tests
-
-Write `validator.ts` (deterministic checks) and `validator.test.ts` (node:test, with wrong-answer and accepted-variant cases). Run them:
+**b. Run one pair.** In case you want to run one pair on your own (paid provider requests; one baseline arm and one treatment arm):
 
 ```bash
-pnpm test:eval-cases
-```
-
-### Step 6: Document the case
-
-Write the case `README.md` as described in [section 7](#7-documenting-a-case).
-
-### Step 7: Check the inputs offline
-
-```bash
-pnpm eval:validate -- --case network-config-01 --skill ../arbitrum-skills-evals/skills/arbitrum-docs
-```
-
-### Step 8: Check readiness
-
-```bash
-# Check environment readiness; sends no completion requests
-pnpm eval:doctor -- --model gemini-3.8-flash --thinking low
-```
-
-### Step 9: Run one pair
-
-```bash
-# Run one baseline/treatment pair with paid provider requests
 pnpm eval -- --case network-config-01 \
-  --skill ../arbitrum-skills-evals/skills/arbitrum-docs \
+  --skill "$SKILL_PATH" \
   --model gemini-3.8-flash \
   --limit wallClockMs=300000
 ```
-The `wallClockMs=300000` limit gives each arm five minutes, starting when its prompt begins.
 
-### Step 10: Inspect the run
+`wallClockMs=300000` gives each arm five minutes, starting when its prompt begins. Add `--repetitions N` to see how consistent the difference is. For every `pnpm eval` option (model, provider, thinking, limits, reasoning capture), see [Options for `pnpm eval`](#options-for-pnpm-eval). When the run is verified, it prints the receipt path and writes `EVALS.md` and `EVALS-FULL-REPORT.md` into the run folder.
 
-Follow [section 5](#5-how-to-inspect-a-run). Inspection sends no model requests.
-
-### Step 11: Repeat
-
-Run again with `--repetitions N` to see how consistent the difference is. The guidelines set no minimum number of pairs.
-
-### Step 12: Publish
+**c. Inspect the run** (reads saved evidence; sends no model requests). This prints the paths of the full agent transcript, a `.jsonl` file and an `.html` file you can open in a browser:
 
 ```bash
-pnpm eval:publish -- --receipt "<receipt-path>" --checks \
-  --skill-dir ../arbitrum-skills-evals/skills/arbitrum-docs
+pnpm eval:inspect -- --latest --case network-config-01 \
+  --condition treatment --view session --export both
 ```
 
-This writes the full `EVALS.md` block into that skill directory for the digest that was evaluated. Before committing, reduce it as described in [Exporting results to a skills repository](#exporting-results-to-a-skills-repository). Then commit the change in your skills checkout on a new branch and push it:
+Want more ways to inspect (other views, specific pairs, older runs)? See [section 5](#5-reference-inspect-options-and-exports).
 
-```bash
-git -C ../arbitrum-skills-evals switch -c evals/arbitrum-docs-network-config-01
-git -C ../arbitrum-skills-evals add skills/arbitrum-docs/EVALS.md
-git -C ../arbitrum-skills-evals commit -m "evals: arbitrum-docs network-config-01"
-git -C ../arbitrum-skills-evals push -u origin HEAD
-```
+## 3. How to create your own eval
 
-### Step 13: Submit for review
+A case is a folder under `eval-cases/`; adding one needs no change to `src/`.
 
-Open a pull request to arbitrum-skills-evals with the `EVALS.md` change, and a pull request to this repository with the case (and its evidence, if the owners ask for it). DevRel reviews both.
-
-
-### Options
-
-Options for `pnpm eval`:
-
-| Option | What it does |
-|---|---|
-| `--case <id>` | Case to run. Required. |
-| `--skill <path>` | Treatment skill directory: an absolute path, or one relative to the current directory, that may live outside this repository, for example `../arbitrum-skills-evals/skills/arbitrum-docs`. It must contain `SKILL.md`; symlinks in the skill tree, or between the skill and its checkout root, are refused. Evidence records only `skills/<name>` (or `<name>` when the folder is not under `skills/`), never the host path. URLs are not accepted. The baseline arm receives none. Required, unless you use the legacy `--suite` flag. |
-| `--model <id>` | Model to call. Required for a measured run. The provider is inferred from the model id. |
-| `--provider <google\|anthropic>` | Asserts or disambiguates the provider when the model id alone is not enough. |
-| `--thinking <level>` | Reasoning effort. Default `low`. Names are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; a model may reject some of them. |
-| `--repetitions <n>` | How many baseline/treatment pairs to run. Default `1`. |
-| `--capture-reasoning` | Keeps the model's reasoning in the saved session. Off by default, because it makes the session much larger. |
-| `--limit <key>=<value>` | Overrides one budget. Repeat the flag for several keys. Task budgets (`wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests`) take a positive integer, or `0` / `none` for unlimited. Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, `maxExportedFiles`, `maxExportedFileBytes`, `maxWorkspaceBytes`) stay finite. |
-
-
-The example case asks the agent to migrate an application's production and staging configuration from Ethereum to Arbitrum One and Arbitrum Sepolia, while preserving unrelated settings. Read its [prompt](eval-cases/network-config-01/case.json) and [starting configuration](eval-cases/network-config-01/fixture/config.json) to understand the task before interpreting its score.
-
-## 3. How scoring works
-
-### A shared scoring rubric
+### 3.1 Create your scoring rubric
 
 The guidelines standardize how we score; each case defines what a correct outcome means.
 
-| Pillar | Common definition | What each case supplies |
-|---|---|---|
-| Accuracy | A percentage of how well the agent fulfilled the requested task. | Expected outcomes, checks, evidence and passing conditions. |
-| Cost | Resources consumed to perform the task, in tokens or monetary terms. | Cost delta: baseline vs treatment mean over at least X runs. |
-| Latency | Time from task start to completion or termination (ms or s). | Time delta: baseline vs treatment mean over at least X runs. |
+| Pillar | Measured as |
+|---|---|
+| Accuracy | Points out of 100 from the case's checks. **Outcome** (80): did the agent correctly and fully deliver what was asked, including the expected response to any predefined failure or invalid input? **Constraints** (20): did it respect the task boundaries and preserve what must not change? |
+| Cost | Recorded tokens, including cached input. |
+| Latency | Milliseconds from the arm's prompt to completion or termination. |
 
-Accuracy is split into two parts:
+Each pillar is reported as a baseline → treatment change; with several pairs, as the mean over the pairs.
 
-| Accuracy pillar | Weight | Question it answers |
-|---|---:|---|
-| Outcome correctness and completeness | 80% | Did the agent correctly and fully deliver everything requested? Check that the result matches the expected facts, values, behavior or state across the full requested scope. Where the case introduces a predefined failure, invalid input or unmet prerequisite, check that the agent identifies it and responds as expected (recover, ask, or stop). |
-| Constraints and preservation | 20% | Did the agent respect permissions and task boundaries while preserving what should remain unchanged? |
+Declare the checks in `rubric.json` (id, group, display topic, points; `outcome` checks sum to 80 and `constraints` checks to 20) and implement them in `validator.ts` as deterministic predicates. Each check earns its full points or 0, and a full pass needs every check.
+
+### 3.2 Eval case layout
+
+Use `network-config-01` as a template:
+
+```text
+eval-cases/
+└── network-config-01/
+    ├── README.md            # Optional case documentation (see below)
+    ├── case.json            # Task prompt, output path and allowed tools
+    ├── fixture/             # Agent workspace: the starting files both arms receive
+    ├── oracle.json          # Hidden golden answers and their sources; never shown to the agent
+    ├── rubric.json          # Checks and weights (rubric v0.2)
+    ├── validator.ts         # Scores the final workspace against the oracle, in a separate container
+    ├── validator.test.ts    # Wrong-answer and accepted-variant tests
+    └── runs/                # Sealed evidence and generated reports (views/ is git-ignored)
+```
+
+**Case `README.md` (optional).** Documentation only, not evidence; no tool reads it. Use the same sections in every case: Why this case exists · The task · How to run it · Scoring rubric (one row per check) · Provenance · Additional context (optional) · Results. See the [network-config-01 README](eval-cases/network-config-01/README.md).
+
+### 3.3 Run your new eval with your skill
+
+There is no import step: `--skill` takes any directory containing `SKILL.md` (no symlinks, no URLs). The runner freezes and hashes a copy into `runs/<run-id>/inputs/frozen/skill/`; never edit it.
+
+```bash
+pnpm eval:validate -- --case <case-id> --skill <path_to_skill>      # offline input check
+pnpm eval:doctor -- --model <model-id>                              # readiness; no completion requests
+pnpm eval -- --case <case-id> --skill <path_to_skill> --model <model-id> [--repetitions N]
+```
+
+A verified run writes `EVALS.md` (the file to share) and `EVALS-FULL-REPORT.md` into its run folder. See [Exports](#exports-evalsmd-and-evals-full-reportmd).
 
 ## 4. Read the output
 
-A single-pair run prints the same sections, labels and values as the `EVALS.md` block that `eval:publish` writes, followed by an operational footer. Example (illustrative values):
+A single-pair run prints a header and the pillar table, then the Accuracy and Cost and latency tables and a footer with the receipt, inspect and export commands. Example (illustrative values):
 
 ```text
 network configuration migration
@@ -190,43 +147,17 @@ Evaluation pillars:
 ├───────────────────────┼────────────────────┼─────────────────┼───────────────────────┤
 │ Accuracy              │                30% │             85% │ +55 percentage points │
 │ Cost: recorded tokens │          2,106,273 │         921,312 │   −1,184,961 (−56.3%) │
-│ Latency               │              5m00s │           1m30s │       −3m30s (−70.0%) │
+│ Latency               │         300,155 ms │       89,975 ms │  −210,180 ms (−70.0%) │
 └───────────────────────┴────────────────────┴─────────────────┴───────────────────────┘
-
-Scenario: Migrate production and staging network configuration to Arbitrum
-
-Accuracy:
-┌──────────────────────────────────────┬────────────────────┬─────────────────┐
-│ Check                                │ Without this skill │ With this skill │
-├──────────────────────────────────────┼────────────────────┼─────────────────┤
-│ Outcome correctness and completeness │        10/80 — 13% │     65/80 — 81% │
-│ Constraints and preservation         │       20/20 — 100% │    20/20 — 100% │
-├──────────────────────────────────────┼────────────────────┼─────────────────┤
-│ Accuracy total                       │       30/100 — 30% │    85/100 — 85% │
-└──────────────────────────────────────┴────────────────────┴─────────────────┘
-
-Cost and latency:
-┌───────────────────────────────────────────────┬────────────────────┬─────────────────┐
-│ Metric                                        │ Without this skill │ With this skill │
-├───────────────────────────────────────────────┼────────────────────┼─────────────────┤
-│ Total recorded tokens, including cached input │          2,106,273 │         921,312 │
-│ Time to completion or termination             │          5m00.155s │       1m29.975s │
-└───────────────────────────────────────────────┴────────────────────┴─────────────────┘
-
-limits    per arm: time=300s, output tokens=unlimited, tool steps=unlimited, provider requests=unlimited
-elapsed   5m13s wall time
-receipt   eval-cases/network-config-01/runs/20261002T101500Z-3f9a1c2d/receipt.json
-inspect   pnpm eval:inspect --receipt <receipt> --pair r001 --condition treatment --view session --export both
-publish   pnpm eval:publish --receipt <receipt> --checks
 ```
 
-- Add `--checks` to `eval`, `eval:report` or `eval:publish` to include the **Outcome checks** table (one row per display topic, with an **Outcome total**).
-- An arm without grading evidence (for example, interrupted before its workspace was exported) shows `n/a` in every accuracy cell and in the change column. When its recorded duration is missing, latency is derived from the native session and labelled `(session-derived)`; changes that use it are labelled `approximate`.
+- `--checks` (on `eval` or `eval:report`) adds the **Accuracy Outcome Checks** table: one row per display topic, with an **Outcome total**.
+- An arm without grading evidence shows `n/a` for accuracy. If its recorded duration is missing, latency comes from the native session, labelled `(session-derived)`, and changes using it are labelled `approximate`.
+- For a complete real report, see [this run's EVALS-FULL-REPORT.md](eval-cases/network-config-01/runs/20260924T170734Z-b115674e/EVALS-FULL-REPORT.md).
 
+## 5. Reference: inspect, options and exports
 
-## 5. How to inspect a run
-
-Inspection reads saved evidence and sends no new model requests. Every command below follows the same shape: `pnpm eval:inspect -- --latest --case <case-id> --condition <baseline|treatment> --view <name>`.
+Inspection reads saved evidence and sends no model requests. Commands follow one shape: `pnpm eval:inspect -- --latest --case <case-id> --condition <baseline|treatment> --view <name>`. To pin a specific run, replace `--latest --case <case-id>` with `--receipt "<receipt-path>"`.
 
 ### Step 1: find your run
 
@@ -234,123 +165,92 @@ Inspection reads saved evidence and sends no new model requests. Every command b
 pnpm eval:history -- --latest --case network-config-01
 ```
 
-This prints the receipt path and pair identifiers for your most recent run of that case. For several repetitions, note a specific `--pair <pair-id>` here; every command below accepts it.
+This prints the receipt path and pair ids of your latest run. With several repetitions, pass `--pair <pair-id>` to the commands below.
 
 ### Step 2: open the session
 
-The **session** is the agent's actual transcript: every message, tool call, tool result, and the model's reasoning, in order.
+The **session** is the agent's transcript: every message, tool call and tool result, in order.
 
 ```bash
 pnpm eval:inspect -- --latest --case network-config-01 \
   --condition treatment --view session --export both
 ```
 
-This prints two paths: a `.jsonl` file (Pi's native session, one JSON record per line) and an `.html` file. **Open the HTML path in a browser.** It shows the same transcript as a collapsible page: messages, reasoning, tool calls, and tool results. Guarded secrets appear as `[REDACTED:<label>]`; everything else is exactly what the model produced.
+This prints a `.jsonl` path (Pi's native session) and an `.html` path. **Open the HTML in a browser.** Guarded secrets appear as `[REDACTED:<label>]`. Repeat with `--condition baseline` and compare.
 
-Repeat with `--condition baseline` to see the same task without the skill, and compare the two transcripts side by side.
-
-> **This evidence is private.** When captured with `--capture-reasoning`, a session keeps the model's reasoning verbatim; treat it like any other local debugging artifact: it lives only in your `eval-cases/<case-id>/runs/<run-id>/` directory and is never uploaded anywhere by the runner. Sanitization removes guarded secrets, not the reasoning itself — don't paste a session export somewhere public.
->
-> The `--capture-reasoning` CLI flag exists so that model reasoning can be retained when we specifically want to analyze the model's reasoning; it is off by default because reasoning substantially increases session artifact size.
+> **Private evidence.** With `--capture-reasoning`, sessions keep the model's reasoning verbatim. They stay in the local run folder and are never uploaded by the runner; do not publish session exports.
 
 ### Step 3: check the result
 
 ```bash
-# See the final answer
-pnpm eval:inspect -- --latest --case network-config-01 \
-  --condition treatment --view candidate
-
-# See which checks passed or failed, and why
-pnpm eval:inspect -- --latest --case network-config-01 \
-  --condition treatment --view validation
+pnpm eval:inspect -- --latest --case network-config-01 --condition treatment --view candidate    # final answer
+pnpm eval:inspect -- --latest --case network-config-01 --condition treatment --view validation   # each check and why
+pnpm eval:report  -- --receipt "<receipt-path>" --checks                                          # the saved comparison
 ```
-
-Compare the session's tool calls with the final answer and the validator's explanations to understand *why* a run scored the way it did. Available sessions may be incomplete after an interrupted run.
 
 ### Other views
 
-| `--view`      | Shows                                                              |
-| ------------- | ------------------------------------------------------------------- |
-| `session`     | The full transcript: messages, tool calls, reasoning (see Step 2). |
-| `messages`    | Just the message text, derived from the session.                   |
-| `tools`       | Just the tool calls and their results, derived from the session.   |
-| `candidate`   | The final answer the validator scored.                              |
-| `validation`  | Per-check pass/fail and the resulting score.                        |
-| `workspace`   | The files the agent left behind.                                    |
-| `condition`   | Status, timing, and usage for one arm.                               |
-| `errors`      | What went wrong, for a failed or infrastructure-failed arm.          |
-| `runtime`     | The resolved model, provider, and thinking level actually used.      |
-| `attestation` | The observed guest policy (tools, network, skill) the arm actually ran under. |
-| `redactions`  | How many secret occurrences were redacted, and where.                |
+| `--view` | Shows |
+|---|---|
+| `session` | The full transcript (see Step 2). |
+| `messages` | Only the message text. |
+| `tools` | Only the tool calls and results. |
+| `candidate` | The final answer the validator scored. |
+| `validation` | Per-check pass/fail and the score. |
+| `workspace` | The files the agent left behind. |
+| `condition` | Status, timing and usage for one arm. |
+| `errors` | What went wrong in a failed arm. |
+| `runtime` | The model, provider and thinking level actually used. |
+| `attestation` | The guest policy (tools, network, skill) the arm ran under. |
+| `redactions` | How many secrets were redacted, and where. |
 
-To keep inspecting one specific run as newer runs arrive, replace `--latest --case network-config-01` with `--receipt "<receipt-path>"`:
+### Options for `pnpm eval`
+
+| Option | What it does |
+|---|---|
+| `--case <id>` | Case to run. Required. |
+| `--skill <path>` | Treatment skill: any directory containing `SKILL.md` (no symlinks, no URLs). Evidence records only the skill name, never the host path. The baseline gets none. Required. |
+| `--model <id>` | Model to call. Required. The provider is inferred from the id. |
+| `--provider <google\|anthropic>` | Asserts the provider when the model id is ambiguous. |
+| `--thinking <level>` | Reasoning effort: `off`, `minimal`, `low` (default), `medium`, `high`, `xhigh`, `max`. |
+| `--repetitions <n>` | Number of pairs. Default `1`. |
+| `--capture-reasoning` | Keeps reasoning in the saved session. Off by default (much larger sessions). |
+| `--limit <key>=<value>` | Overrides one budget; repeatable. `wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests` take a positive integer or `0`/`none` (unlimited, the default). Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, …) stay finite. |
+
+### Exports: `EVALS.md` and `EVALS-FULL-REPORT.md`
+
+Each run folder holds two generated files next to `receipt.json`:
+
+- **`EVALS.md`**: the summary (header with the run hash, badge, pillar table, scenario and **Accuracy Outcome Checks**). **The only file to share.**
+- **`EVALS-FULL-REPORT.md`**: the complete report (case description, all tables, per-pair results, verification, operational details, reproducibility). It stays in this repository; `EVALS.md` links to it.
 
 ```bash
-# Print the saved comparison again; replace the placeholder with a real receipt path
-pnpm eval:report -- --receipt "<receipt-path>" --format table
+pnpm eval:export -- --receipt <receipt>                                   # (re)generate both files in the run folder
+pnpm eval:export -- --receipt <receipt> --to <dir|file.md> [--pair rNNN]  # also write EVALS.md elsewhere
+pnpm eval:export -- --check --all                                         # fail if any file is missing or stale (CI)
 ```
 
-### Publishing verified evaluation results
+- Evidence is verified first; nothing is written if verification fails. Export runs no git commands.
+- Both files are outside the hash chain, regenerated from sealed evidence, and carry the run's `manifest.treeSha256`.
+- Without `--pair`, a multi-pair run exports the mean over every pair. Export is refused if any rendered pair has an ungraded arm.
+- With `--to`, the summary goes between `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->`; authored text outside the markers is kept, and repeating the export changes no bytes. Symlinked destinations are refused.
+- The full-report link uses `--repo-url` or the `repository` field of `package.json`. It resolves once the run folder is merged, so merge this repository's PR before the skills repository's.
+- `pnpm eval` and `eval:report` never modify a skill's `EVALS.md`.
 
-After verifying evaluation evidence, publish the scored report to the evaluated skill's `EVALS.md`:
+### Evidence and cleanup
 
-```bash
-pnpm eval:publish -- --receipt "<receipt-path>" [--checks] [--skill-dir <skill-dir>]
-```
+Evidence is sealed in `eval-cases/<case-id>/runs/<run-id>/` and committed. A receipt and manifest hash the retained files; `eval:report` and `eval:inspect` verify that chain, so editing a sealed file breaks verification. `views/` (git-ignored) and the two generated reports are outside the chain.
 
-The publish command:
-- Verifies run evidence first (`verifyRun`); refuses to publish if verification fails.
-- Writes to the skill directory given by `--skill-dir <path>` (the checkout of the skills repository, e.g. `../arbitrum-skills-evals/skills/arbitrum-docs`); it must exist and not be a symlink. Without `--skill-dir` it derives the destination from `inputs/skill-snapshot.json.sourcePath` (`skills/<name>`) relative to the repository root, or to `--repo-root <path>` (e.g. `--repo-root ../arbitrum-skills-evals`). Sealed evidence never contains the absolute path of the skill.
-- Updates a bounded generated results section delimited by `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->` in the skill's `EVALS.md`.
-- Idempotently replaces the generated block on subsequent runs while preserving all authored coverage notes verbatim outside the markers.
-- Includes an AF-Evaluation status badge (`<status> · <treatment accuracy>%`; describes execution/grading status, non-certifying).
-- Refuses single-pair runs where either arm is ungraded; re-run the case instead of publishing `n/a`.
-- Keeps the receipt path and operational footer outside `EVALS.md`.
-- Ordinary `eval` and `eval:report` commands never modify `EVALS.md`.
-
-Evidence is stored in `eval-cases/<case-id>/runs/<run-id>/`. The generated `views/` folder is git-ignored; whether the sealed run evidence itself is committed is still an open owner decision. A receipt and manifest record hashes of the retained files; `eval:report` and `eval:inspect` verify that chain before trusting the result, so editing a sealed file invalidates verification. Session exports (`views/*.jsonl`, `views/*.html`) are generated read-only views outside that chain and never change the sealed evidence.
-
-If an interrupted run leaves containers or networks behind, clean up its recorded resources with `pnpm eval:recover -- --run <run-id>`.
-
-### Exporting results to a skills repository
-
-`eval:publish` always writes the full block: header, status, badge, pillar table, scenario, **Accuracy**, **Outcome checks** (with `--checks`) and **Cost and latency**. The copy committed to arbitrum-skills-evals is a reduced export: the `### Accuracy` and `### Cost and latency` sections are removed by hand and everything else stays. The full tables stay available here with `pnpm eval:report -- --receipt "<receipt-path>" --checks`.
-
-1. Publish with `--checks` into the skill directory of your skills checkout:
-
-   ```bash
-   SKILL_DIR=../arbitrum-skills-evals/skills/arbitrum-docs
-   pnpm eval:publish -- --receipt "<receipt-path>" --checks --skill-dir "$SKILL_DIR"
-   ```
-
-   To leave the checkout untouched until the export is ready, copy its `EVALS.md` into a scratch folder, publish there with `--skill-dir <scratch-folder>`, reduce it, and copy it back.
-
-2. Remove the two sections. The command edits only the text between the markers, and changes nothing if the sections are already gone:
-
-   ```bash
-   perl -0777 -pi -e 's{(<!-- AF-EVAL:BEGIN generated -->\n.*?\n<!-- AF-EVAL:END generated -->)}{my $s = $1; $s =~ s/^### Accuracy\n\n(?:\|[^\n]*\n)+\n//m; $s =~ s/^\n### Cost and latency\n\n(?:\|[^\n]*\n)+//m; $s}se' "$SKILL_DIR/EVALS.md"
-   ```
-
-   By hand: delete from the `### Accuracy` line through the blank line after its table, and from the blank line before `### Cost and latency` through the last row of its table. The block then ends with the `**Outcome total**` row, followed directly by `<!-- AF-EVAL:END generated -->`.
-
-3. Check before committing:
-
-   ```bash
-   grep -nE '^### (Accuracy|Cost and latency)$' "$SKILL_DIR/EVALS.md"   # prints nothing
-   git -C "$SKILL_DIR" diff -- EVALS.md                                  # only those lines removed
-   ```
-
-Keep both `AF-EVAL` markers, and keep every line outside them unchanged. Publishing into the same file again rewrites the whole block and brings the two tables back, so repeat step 2 after every publish.
+If an interrupted run leaves containers or networks behind: `pnpm eval:recover -- --run <run-id>`.
 
 ## 6. Project layout
 
 ```text
-README.md  AGENTS.md  REVIEW.md      # Human guide, agent guide, reviewer guide
+README.md  AGENTS.md                 # Human guide, agent guide
 package.json  pnpm-lock.yaml         # Scripts and dependencies
 tsconfig.json  vitest.config.ts      # TypeScript and unit-test configuration
 .env.example                         # Credential template; copy locally to .env
-.gitignore
-.github/workflows/ci.yml             # Lock check, typecheck, tests, offline case validation
+.github/workflows/ci.yml             # Lock check, typecheck, tests, offline case validation, export freshness
 container/                           # Guest image, network setup, locked runtime and image lock
 scripts/                             # Command-line entrypoints and the guest runtime build
 src/
@@ -358,82 +258,9 @@ src/
 ├── runner/                          # Setup, case loading and paired-run orchestration
 ├── harnesses/                       # Agent execution through Pi or test doubles
 ├── sandboxes/                       # Container lifecycle and test doubles
-├── artifacts/                       # Saved evidence, verification and report readers
+├── artifacts/                       # Saved evidence, verification, reports and exports
 └── test-fixtures/skills/            # Synthetic skills used only by tests
-eval-cases/
-└── network-config-01/               # Application configuration migration case
-    ├── README.md                    # Full explanation of the case
-    ├── case.json                    # Task prompt, output path and allowed tools
-    ├── fixture/                     # Starting workspace shared by both arms
-    ├── oracle.json                  # Hidden expected answers and their sources
-    ├── rubric.json                  # Scoring rubric v0.2
-    ├── validator.ts                 # Deterministic checks, run in a separate container
-    ├── validator.test.ts            # Wrong-answer and accepted-variant tests
-    └── runs/                        # Sealed evidence created by runs (views/ is git-ignored)
+eval-cases/<case-id>/                # One folder per case (see 3.2)
 ```
 
-Skill coverage and result summaries live alongside the evaluated skill in [arbitrum-skills-evals](https://github.com/xdaniortega/arbitrum-skills-evals), for example [`skills/arbitrum-docs/EVALS.md`](https://github.com/xdaniortega/arbitrum-skills-evals/blob/feat/evals-guidelines/skills/arbitrum-docs/EVALS.md). Single-pair records carry their own context; they do not establish a statistical result.
-
-To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest` to refresh generated artifacts and locks. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need the skills repository.
-
-## 7. Documenting a case
-
-Each case README should answer these questions; the validator defines the actual scoring and passing rules.
-
-- **Provenance** — the reference answers, their sources and when those sources were checked.
-- **Checks and weights** — each check, its group (`outcome` or `constraints`), its points and rationale, and any facts grouped within a check.
-- **Unhappy paths** — which outcome checks exercise a predefined failure, invalid input or unmet prerequisite, and the expected response.
-- **Accepted variants** — which differences are harmless (such as permitted formatting) and which requirements must remain exact.
-- **Preservation** — what must remain unchanged and which constraint checks enforce it.
-- **Score endpoints** — the expected score and pass result for correct, unchanged, malformed and missing answers.
-
-See the [network-config-01 README](eval-cases/network-config-01/README.md) for an example.
-
-## 8. How eval results reach the registry
-
-> This section describes the intended integration. The registry owner should review the wording, because the registry schema does not carry an `evals` field yet.
-
-### Eval results linked to EVALS.md
-
-- Each skill's `EVALS.md` in arbitrum-skills-evals is a reduced export of the published report: status, badge, pillar table and outcome checks. The full report comes from `pnpm eval:report` on the sealed evidence here.
-- The registry entry carries an `evals` summary that is generated from that report, not typed by hand. It holds:
-  - the digest that was evaluated
-  - the eval case and its version
-  - the agent harness and model
-  - the number of pairs
-  - accuracy, tokens and latency without the skill, with it, and the change
-  - a link to `EVALS.md` at that digest
-- The badge is just `evals`. It is present when a report exists and absent otherwise.
-- There is no pass or fail. Reports are non-certifying and define no threshold. The numbers sit next to the badge.
-- The summary resets when the pinned digest changes.
-- DevRel provides this repository as a reference. Teams may use it but do not have to, and submitted evals are reviewed. Having no badge is not a failure.
-
-Caveats:
-
-- Compare skills only within the same case and model.
-- Latency is the agent's wall-clock time to finish the task. It is not the speed of the skill's API or transactions, which would need a separate benchmark.
-- Only entries with a pinned body can be scanned or evaluated. Metadata-only `external` entries stay `listed`, with neither.
-
-### Capabilities grouped for display
-
-| Group | Capabilities |
-|---|---|
-| Read-only | `ecosystem-data`, `market-data`, `read-chain` |
-| Offchain API | `offchain-api` (external services, including credentials or payment) |
-| Onchain transactions | `prepare-tx` (prepares value-moving transactions) |
-
-A trading skill can be scan-clean and reviewed and still prepare onchain transactions. Users see both.
-
-### GitHub labels on pull requests
-
-CI applies these labels to each submission pull request:
-
-- `category: <slug>`
-- `tier: listed|identity-verified|reviewed`
-- `capabilities: read-only|offchain-api|onchain-tx`
-- `scan: clean` or `scan: findings`
-- `evals`
-- `needs-review`, on any pull request that changes the digest of a `reviewed` entry
-
-<!-- TODO(registry owner): the label list was cut off in the source brief; add the remaining labels and confirm whether the `arbitrum-maintained` tier needs one. -->
-
+To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest`. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need an external skills checkout.
