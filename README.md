@@ -59,7 +59,7 @@ The skill used by a run is already in its folder, at `eval-cases/<case-id>/runs/
 pnpm eval:export -- --receipt eval-cases/network-config-01/runs/20260924T151721Z-bfb34c20/receipt.json
 ```
 
-By default the files are written next to the receipt, in `eval-cases/network-config-01/runs/<run-id>/`. `EVALS.md` is the file to share and copy wherever it is needed; `EVALS-FULL-REPORT.md` stays in this repository. To also copy the summary into another existing directory, add `--to <output_dir>`. See [Exports](#exports-evalsmd-and-evals-full-reportmd).
+For all export options, see [Export](eval-cases/README.md#6-export-evalsmd-and-evals-full-reportmd).
 
 **b. Run one pair.** In case you want to run one pair on your own (paid provider requests; one baseline arm and one treatment arm):
 
@@ -70,7 +70,7 @@ pnpm eval -- --case network-config-01 \
   --limit wallClockMs=300000
 ```
 
-`wallClockMs=300000` gives each arm five minutes, starting when its prompt begins. Add `--repetitions N` to see how consistent the difference is. For every `pnpm eval` option (model, provider, thinking, limits, reasoning capture), see [Options for `pnpm eval`](#options-for-pnpm-eval). When the run is verified, it prints the receipt path and writes `EVALS.md` and `EVALS-FULL-REPORT.md` into the run folder.
+For every `pnpm eval` option (model, provider, thinking, limits, reasoning capture), see [Options for `pnpm eval`](eval-cases/README.md#options-for-pnpm-eval).
 
 **c. Inspect the run** (reads saved evidence; sends no model requests). This prints the paths of the full agent transcript, a `.jsonl` file and an `.html` file you can open in a browser:
 
@@ -79,56 +79,22 @@ pnpm eval:inspect -- --latest --case network-config-01 \
   --condition treatment --view session --export both
 ```
 
-Want more ways to inspect (other views, specific pairs, older runs)? See [section 5](#5-reference-inspect-options-and-exports).
+Want more ways to inspect (other views, specific pairs, older runs)? See [Inspect a run](eval-cases/README.md#5-inspect-a-run).
 
 ## 3. How to create your own eval
 
-A case is a folder under `eval-cases/`; adding one needs no change to `src/`.
+A case is a folder under `eval-cases/`; adding one needs no change to `src/`. Everything specific to eval cases lives in [`eval-cases/README.md`](eval-cases/README.md):
 
-### 3.1 Create your scoring rubric
+- [What an eval case is](eval-cases/README.md#1-what-is-an-eval-case) and how the runner uses each file.
+- [The scoring rubric](eval-cases/README.md#2-scoring-rubric): pillars, checks and weights.
+- [The case layout](eval-cases/README.md#3-case-layout), using `network-config-01` as a template.
+- [Running your eval with your skill](eval-cases/README.md#4-run-your-eval-with-your-skill).
+- [Inspecting a run and every `pnpm eval` option](eval-cases/README.md#5-inspect-a-run).
+- [Exporting `EVALS.md` and `EVALS-FULL-REPORT.md`](eval-cases/README.md#6-export-evalsmd-and-evals-full-reportmd).
+- [Evidence and cleanup](eval-cases/README.md#7-evidence-and-cleanup).
+- [The project layout](eval-cases/README.md#8-project-layout).
 
-The guidelines standardize how we score; each case defines what a correct outcome means.
-
-| Pillar | Measured as |
-|---|---|
-| Accuracy | Points out of 100 from the case's checks. **Outcome** (80): did the agent correctly and fully deliver what was asked, including the expected response to any predefined failure or invalid input? **Constraints** (20): did it respect the task boundaries and preserve what must not change? |
-| Cost | Recorded tokens, including cached input. |
-| Latency | Milliseconds from the arm's prompt to completion or termination. |
-
-Each pillar is reported as a baseline → treatment change; with several pairs, as the mean over the pairs.
-
-Declare the checks in `rubric.json` (id, group, display topic, points; `outcome` checks sum to 80 and `constraints` checks to 20) and implement them in `validator.ts` as deterministic predicates. Each check earns its full points or 0, and a full pass needs every check.
-
-### 3.2 Eval case layout
-
-Use `network-config-01` as a template:
-
-```text
-eval-cases/
-└── network-config-01/
-    ├── README.md            # Optional case documentation (see below)
-    ├── case.json            # Task prompt, output path and allowed tools
-    ├── fixture/             # Agent workspace: the starting files both arms receive
-    ├── oracle.json          # Hidden golden answers and their sources; never shown to the agent
-    ├── rubric.json          # Checks and weights (rubric v0.2)
-    ├── validator.ts         # Scores the final workspace against the oracle, in a separate container
-    ├── validator.test.ts    # Wrong-answer and accepted-variant tests
-    └── runs/                # Sealed evidence and generated reports (views/ is git-ignored)
-```
-
-**Case `README.md` (optional).** Documentation only, not evidence; no tool reads it. Use the same sections in every case: Why this case exists · The task · How to run it · Scoring rubric (one row per check) · Provenance · Additional context (optional) · Results. See the [network-config-01 README](eval-cases/network-config-01/README.md).
-
-### 3.3 Run your new eval with your skill
-
-There is no import step: `--skill` takes any directory containing `SKILL.md` (no symlinks, no URLs). The runner freezes and hashes a copy into `runs/<run-id>/inputs/frozen/skill/`; never edit it.
-
-```bash
-pnpm eval:validate -- --case <case-id> --skill <path_to_skill>      # offline input check
-pnpm eval:doctor -- --model <model-id>                              # readiness; no completion requests
-pnpm eval -- --case <case-id> --skill <path_to_skill> --model <model-id> [--repetitions N]
-```
-
-A verified run writes `EVALS.md` (the file to share) and `EVALS-FULL-REPORT.md` into its run folder. See [Exports](#exports-evalsmd-and-evals-full-reportmd).
+When your case is ready, see [How to submit your eval case](#how-to-submit-your-eval-case).
 
 ## 4. Read the output
 
@@ -155,112 +121,33 @@ Evaluation pillars:
 - An arm without grading evidence shows `n/a` for accuracy. If its recorded duration is missing, latency comes from the native session, labelled `(session-derived)`, and changes using it are labelled `approximate`.
 - For a complete real report, see [this run's EVALS-FULL-REPORT.md](eval-cases/network-config-01/runs/20260924T170734Z-b115674e/EVALS-FULL-REPORT.md).
 
-## 5. Reference: inspect, options and exports
+## 5. Inspect a run and options
 
-Inspection reads saved evidence and sends no model requests. Commands follow one shape: `pnpm eval:inspect -- --latest --case <case-id> --condition <baseline|treatment> --view <name>`. To pin a specific run, replace `--latest --case <case-id>` with `--receipt "<receipt-path>"`.
+How to inspect a run (sessions, answers, validation and other views) and every `pnpm eval` option are described in [`eval-cases/README.md`](eval-cases/README.md#5-inspect-a-run).
 
-### Step 1: find your run
+## How to submit your eval case
 
-```bash
-pnpm eval:history -- --latest --case network-config-01
-```
+Open a PR against this repository that adds your case under `eval-cases/<case-id>/`. Use [`network-config-01`](eval-cases/network-config-01/) as the reference: your PR must contain the same content.
 
-This prints the receipt path and pair ids of your latest run. With several repetitions, pass `--pair <pair-id>` to the commands below.
+1. **The case files:** `case.json`, `fixture/`, `oracle.json`, `rubric.json`, `validator.ts` and `validator.test.ts`, plus a case `README.md` with the standard sections (see [Case layout](eval-cases/README.md#3-case-layout)).
+2. **At least one sealed run** under `eval-cases/<case-id>/runs/<run-id>/`, produced by `pnpm eval` with the skill you evaluated, including its generated `EVALS.md` and `EVALS-FULL-REPORT.md`. Do not edit anything in the run folder by hand.
+3. **Passing checks** before you open the PR:
 
-### Step 2: open the session
+   ```bash
+   pnpm test:eval-cases
+   pnpm eval:validate -- --case <case-id> --skill <path_to_skill>
+   pnpm eval:export -- --check --all
+   ```
 
-The **session** is the agent's transcript: every message, tool call and tool result, in order.
+4. **No secrets and no local files.** Keep `.env`, `.state/` and `views/` out of the PR.
 
-```bash
-pnpm eval:inspect -- --latest --case network-config-01 \
-  --condition treatment --view session --export both
-```
+If your skill lives in another repository, merge this PR first so the full-report link in its `EVALS.md` resolves (see [Export](eval-cases/README.md#6-export-evalsmd-and-evals-full-reportmd)).
 
-This prints a `.jsonl` path (Pi's native session) and an `.html` path. **Open the HTML in a browser.** Guarded secrets appear as `[REDACTED:<label>]`. Repeat with `--condition baseline` and compare.
+## Contributing
 
-> **Private evidence.** With `--capture-reasoning`, sessions keep the model's reasoning verbatim. They stay in the local run folder and are never uploaded by the runner; do not publish session exports.
+Contributions to the Evals Guidelines code (runner, harnesses, sandboxes, scoring, reporting and documentation) are welcome. Open a PR against this repository with your proposed changes.
 
-### Step 3: check the result
+- Read [`AGENTS.md`](AGENTS.md) first: it lists the guarantees that must not be weakened and which checks to run for each kind of change.
+- Use Conventional Commits (for example `fix(evals): refuse export of ungraded pairs`).
 
-```bash
-pnpm eval:inspect -- --latest --case network-config-01 --condition treatment --view candidate    # final answer
-pnpm eval:inspect -- --latest --case network-config-01 --condition treatment --view validation   # each check and why
-pnpm eval:report  -- --receipt "<receipt-path>" --checks                                          # the saved comparison
-```
-
-### Other views
-
-| `--view` | Shows |
-|---|---|
-| `session` | The full transcript (see Step 2). |
-| `messages` | Only the message text. |
-| `tools` | Only the tool calls and results. |
-| `candidate` | The final answer the validator scored. |
-| `validation` | Per-check pass/fail and the score. |
-| `workspace` | The files the agent left behind. |
-| `condition` | Status, timing and usage for one arm. |
-| `errors` | What went wrong in a failed arm. |
-| `runtime` | The model, provider and thinking level actually used. |
-| `attestation` | The guest policy (tools, network, skill) the arm ran under. |
-| `redactions` | How many secrets were redacted, and where. |
-
-### Options for `pnpm eval`
-
-| Option | What it does |
-|---|---|
-| `--case <id>` | Case to run. Required. |
-| `--skill <path>` | Treatment skill: any directory containing `SKILL.md` (no symlinks, no URLs). Evidence records only the skill name, never the host path. The baseline gets none. Required. |
-| `--model <id>` | Model to call. Required. The provider is inferred from the id. |
-| `--provider <google\|anthropic>` | Asserts the provider when the model id is ambiguous. |
-| `--thinking <level>` | Reasoning effort: `off`, `minimal`, `low` (default), `medium`, `high`, `xhigh`, `max`. |
-| `--repetitions <n>` | Number of pairs. Default `1`. |
-| `--capture-reasoning` | Keeps reasoning in the saved session. Off by default (much larger sessions). |
-| `--limit <key>=<value>` | Overrides one budget; repeatable. `wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests` take a positive integer or `0`/`none` (unlimited, the default). Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, …) stay finite. |
-
-### Exports: `EVALS.md` and `EVALS-FULL-REPORT.md`
-
-Each run folder holds two generated files next to `receipt.json`:
-
-- **`EVALS.md`**: the summary (header with the run hash, badge, pillar table, scenario and **Accuracy Outcome Checks**). **The only file to share.**
-- **`EVALS-FULL-REPORT.md`**: the complete report (case description, all tables, per-pair results, verification, operational details, reproducibility). It stays in this repository; `EVALS.md` links to it.
-
-```bash
-pnpm eval:export -- --receipt <receipt>                                   # (re)generate both files in the run folder
-pnpm eval:export -- --receipt <receipt> --to <dir|file.md> [--pair rNNN]  # also write EVALS.md elsewhere
-pnpm eval:export -- --check --all                                         # fail if any file is missing or stale (CI)
-```
-
-- Evidence is verified first; nothing is written if verification fails. Export runs no git commands.
-- Both files are outside the hash chain, regenerated from sealed evidence, and carry the run's `manifest.treeSha256`.
-- Without `--pair`, a multi-pair run exports the mean over every pair. Export is refused if any rendered pair has an ungraded arm.
-- With `--to`, the summary goes between `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->`; authored text outside the markers is kept, and repeating the export changes no bytes. Symlinked destinations are refused.
-- The full-report link uses `--repo-url` or the `repository` field of `package.json`. It resolves once the run folder is merged, so merge this repository's PR before the skills repository's.
-- `pnpm eval` and `eval:report` never modify a skill's `EVALS.md`.
-
-### Evidence and cleanup
-
-Evidence is sealed in `eval-cases/<case-id>/runs/<run-id>/` and committed. A receipt and manifest hash the retained files; `eval:report` and `eval:inspect` verify that chain, so editing a sealed file breaks verification. `views/` (git-ignored) and the two generated reports are outside the chain.
-
-If an interrupted run leaves containers or networks behind: `pnpm eval:recover -- --run <run-id>`.
-
-## 6. Project layout
-
-```text
-README.md  AGENTS.md                 # Human guide, agent guide
-package.json  pnpm-lock.yaml         # Scripts and dependencies
-tsconfig.json  vitest.config.ts      # TypeScript and unit-test configuration
-.env.example                         # Credential template; copy locally to .env
-.github/workflows/ci.yml             # Lock check, typecheck, tests, offline case validation, export freshness
-container/                           # Guest image, network setup, locked runtime and image lock
-scripts/                             # Command-line entrypoints and the guest runtime build
-src/
-├── core/                            # Schemas, comparison rules, limits and redaction
-├── runner/                          # Setup, case loading and paired-run orchestration
-├── harnesses/                       # Agent execution through Pi or test doubles
-├── sandboxes/                       # Container lifecycle and test doubles
-├── artifacts/                       # Saved evidence, verification, reports and exports
-└── test-fixtures/skills/            # Synthetic skills used only by tests
-eval-cases/<case-id>/                # One folder per case (see 3.2)
-```
-
-To develop the runner, use `pnpm eval:validate`, `pnpm test:evals`, `pnpm test:eval-cases` and `pnpm test:container`. After changing guest runtime sources, run `pnpm build:eval-guest`. Tests use the synthetic skills in `src/test-fixtures/skills/` and never need an external skills checkout.
+To add a new eval case, see [How to submit your eval case](#how-to-submit-your-eval-case) instead.
