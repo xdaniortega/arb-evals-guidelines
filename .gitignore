@@ -14,3 +14,4 @@ dist/
 /docs/
 eval-cases/*/runs/*/views/
 exported-evals/
+*plan.md
