@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guide for coding agents working in this repository. Operator how-to (running, inspecting, exporting) lives in [`README.md`](README.md); this file covers what to know and what not to break when changing code.
+Guide for coding agents working in this repository. The root [`README.md`](README.md) is the onboarding page (what an eval is, requirements, quickstart) and routes to the human guides in `docs/`; operator how-to (running, inspecting, exporting) lives in [`docs/running-evals.md`](docs/running-evals.md). This file covers what to know and what not to break when changing code.
 
 ## What this repository does
 
@@ -13,7 +13,7 @@ The only permitted difference between the arms is the skill (its prose plus the 
 
 It is not a benchmark, a statistical authority, an offline sandbox, a plugin framework or an LLM judge.
 
-Source comments may cite `docs/ARCHITECTURE.md`. That is the owner-held contract; it is local-only (`/docs/` is git-ignored), and this file is its tracked summary. Without it, treat the rules here as the contract and ask before changing a guarantee.
+Source comments may cite `docs/ARCHITECTURE.md`. That is the owner-held contract; it is local-only (`/docs/ARCHITECTURE.md` is git-ignored; the rest of `docs/` is tracked human documentation), and this file is its tracked summary. Without it, treat the rules here as the contract and ask before changing a guarantee.
 
 ## Layout
 
@@ -118,4 +118,21 @@ Run the checks that match what you touched:
 - Do not decide rubric, scoring, badge, task-limit, variability or MCP questions on the owner's behalf.
 - Do not reintroduce `--from` reproduction, ablation or determinism guarantees.
 - Do not modify owner-authored case files to wire tests in.
-- Do not commit local-only files (`*plan.md`, `.crew/`, `.state/`, `.pi/`, `/docs/`, `.env`). Never force-add ignored files.
+- Do not commit local-only files (`*plan.md`, `.crew/`, `.state/`, `.pi/`, `docs/ARCHITECTURE.md`, `.env`). Never force-add ignored files.
+
+## Project knowledge (maintained by /crew)
+
+### Architecture
+
+- Human documentation is the root `README.md` plus flow-based files in `docs/` (`how-it-works.md`, `running-evals.md`, `create-an-eval-case.md`, `contributing.md`). There is no `docs/README.md`: the root README is the only router (its header nav and callout), so a new guide gets a nav link there.
+
+### Specification constraints
+
+- The root `README.md` holds only the header, a short purpose intro, "What is an eval?", "Requirements" and "Quickstart", and those sections do not link into `docs/`. Other material belongs in the `docs/` file for its reader.
+- The project name in prose is "Evals Guidelines". The `package.json` name and the repository name are unchanged.
+- Sandbox descriptions must not call the agent guest an offline sandbox: it has public IPv4 egress (`container/configure-egress.sh`).
+
+### Decisions from accepted work
+
+- `docs/` is tracked; only `docs/ARCHITECTURE.md` stays git-ignored (`.gitignore`), so the owner's local contract is never committed.
+- `eval-cases/README.md` is only a pointer; the case-author, operator and concept material lives in `docs/create-an-eval-case.md`, `docs/running-evals.md` and `docs/how-it-works.md`. Update those files, not the pointer, when the case format or CLI changes.

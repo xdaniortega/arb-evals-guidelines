@@ -1,6 +1,6 @@
 # Eval cases
 
-This folder holds every eval case and its sealed run evidence. This guide explains what a case is, how it is scored, how to run it with your skill, how to export the results and how the evidence is kept. To run an existing case for the first time, start with the [Quickstart](../README.md#2-quickstart-how-to-run-an-existing-eval-case) in the root README. To submit a case, see [How to submit your eval case](../README.md#how-to-submit-your-eval-case).
+This folder holds every eval case and its sealed run evidence. This guide explains what a case is, how it is scored, how to run it with your skill, how to export the results and how the evidence is kept. To run an existing case for the first time, start with the [Quickstart](../README.md#quickstart) in the root README. To submit a case, see [How to submit your eval case](../docs/create-an-eval-case.md#how-to-submit-your-eval-case). Each section below ends with a link to the guide in [`docs/`](../docs/) that explains it further.
 
 ## 1. What is an eval case?
 
@@ -16,6 +16,8 @@ For each pair, the runner uses the case like this:
 4. **The runner scores centrally** from the frozen `rubric.json` and the result of each check, and seals everything into the run folder.
 
 A good case has an answer that can be checked by code, has a known correct result with sources, and is one where a skill could plausibly make a difference.
+
+> Further explanation: [What is an eval case?](../docs/create-an-eval-case.md#what-is-an-eval-case) in Create an eval case.
 
 ## 2. Scoring rubric
 
@@ -38,6 +40,8 @@ Declare the checks in `rubric.json` and implement them in `validator.ts`:
 - **Task failures and infrastructure failures are kept apart.** If the agent fails the task, the arm is still graded and may score 0. If the infrastructure fails, the arm has no score, and no change is reported for that pair.
 - **Test your validator.** `validator.test.ts` must show that wrong answers fail and that accepted variants pass.
 
+> Further explanation: [Scoring rubric](../docs/how-it-works.md#scoring-rubric) in How it works.
+
 ## 3. Case layout
 
 Use `network-config-01` as a template:
@@ -57,6 +61,8 @@ eval-cases/
 
 **Case `README.md` (optional).** Documentation only, not evidence; no tool reads it. Use the same sections in every case: Why this case exists · The task · How to run it · Scoring rubric (one row per check) · Provenance · Additional context (optional) · Results. See the [network-config-01 README](network-config-01/README.md).
 
+> Further explanation: [Case layout](../docs/create-an-eval-case.md#case-layout) in Create an eval case.
+
 ## 4. Run your eval with your skill
 
 There is no import step: `--skill` takes any directory containing `SKILL.md` (no symlinks, no URLs). The runner freezes and hashes a copy into `runs/<run-id>/inputs/frozen/skill/`; never edit it.
@@ -69,6 +75,8 @@ pnpm eval -- --case <case-id> --skill <path_to_skill> --model <model-id> [--repe
 ```
 
 A verified run writes `EVALS.md` and `EVALS-FULL-REPORT.md` into its run folder (see [Export](#6-export-evalsmd-and-evals-full-reportmd)). For every `pnpm eval` option and for inspecting a run, see [Inspect a run](#5-inspect-a-run).
+
+> Further explanation: [Run your eval with your skill](../docs/create-an-eval-case.md#run-your-eval-with-your-skill) in Create an eval case.
 
 ## 5. Inspect a run
 
@@ -132,6 +140,8 @@ pnpm eval:report  -- --receipt "<receipt-path>" --checks                        
 | `--capture-reasoning` | Keeps reasoning in the saved session. Off by default (much larger sessions). |
 | `--limit <key>=<value>` | Overrides one budget; repeatable. `wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests` take a positive integer or `0`/`none` (unlimited, the default). Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, …) stay finite. |
 
+> Further explanation: [Inspect a run](../docs/running-evals.md#inspect-a-run) and [Options for `pnpm eval`](../docs/running-evals.md#options-for-pnpm-eval) in Running evals.
+
 ## 6. Export: `EVALS.md` and `EVALS-FULL-REPORT.md`
 
 Each run folder holds two generated files next to `receipt.json`:
@@ -152,11 +162,15 @@ pnpm eval:export -- --check --all                                         # fail
 - The full-report link uses `--repo-url` or the `repository` field of `package.json`. It resolves once the run folder is merged, so merge this repository's PR before the skills repository's.
 - `pnpm eval` and `eval:report` never modify a skill's `EVALS.md`.
 
+> Further explanation: [Export](../docs/running-evals.md#export-evalsmd-and-evals-full-reportmd) in Running evals.
+
 ## 7. Evidence and cleanup
 
 Evidence is sealed in `eval-cases/<case-id>/runs/<run-id>/` and committed. A receipt and manifest hash the retained files; `eval:report` and `eval:inspect` verify that chain, so editing a sealed file breaks verification. `views/` (git-ignored) and the two generated reports are outside the chain.
 
 If an interrupted run leaves containers or networks behind: `pnpm eval:recover -- --run <run-id>`.
+
+> Further explanation: [Evidence and cleanup](../docs/how-it-works.md#evidence-and-cleanup) and the [Sandboxed environment](../docs/how-it-works.md#sandboxed-environment) in How it works.
 
 ## 8. Project layout
 
@@ -177,3 +191,5 @@ src/
 └── test-fixtures/skills/            # Synthetic skills used only by tests
 eval-cases/<case-id>/                # One folder per case (see 3)
 ```
+
+> Further explanation: [Project layout](../docs/contributing.md#project-layout) in Contributing.

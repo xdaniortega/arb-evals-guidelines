@@ -11,7 +11,7 @@ dist/
 .crew/
 .pnpm-store/
 .state/
-/docs/
+/docs/ARCHITECTURE.md
 eval-cases/*/runs/*/views/
 exported-evals/
 *plan.md
