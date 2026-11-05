@@ -34,6 +34,16 @@ import { promises as dns } from "node:dns";
 import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { setDefaultResultOrder } from "node:dns";
+import { setDefaultAutoSelectFamily } from "node:net";
+
+// IPv4-only outbound connections, set once for every mode (the agent exec loads this same
+// file). The egress lock drops ALL IPv6, so Happy Eyeballs (Node's default
+// autoSelectFamily, 250 ms per attempt) can only lose: a host with one A and one AAAA
+// record (for example mcp.inkeep.com) whose IPv4 handshake takes longer than 250 ms falls
+// through to the dropped IPv6 address and the whole fetch fails with ETIMEDOUT.
+setDefaultResultOrder("ipv4first");
+setDefaultAutoSelectFamily(false);
 
 const SCHEMA_VERSION = 1;
 const EVAL_UID = 10001;

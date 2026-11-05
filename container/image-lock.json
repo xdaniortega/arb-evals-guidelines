@@ -39,7 +39,7 @@
         "Containerfile": "sha256:22348091a94e0ff460cff1da40b206da03c4cef8a40526843419dd328a97198c",
         ".dockerignore": "sha256:9901c94acc2dac0366fda1bdffb26a838c081eb1a4283f6ec0a405ba4def875f",
         "configure-egress.sh": "sha256:0a2bb7a175f62fbf7fb8318dd26c6afe4ceffc2592d81989db95c50d916e6c9b",
-        "run-measured.mjs": "sha256:ce6b837aa0cf6ab30810c5f7c3cc53f23a9f9cb75ea7fe58f97dcda4e423cf75",
+        "run-measured.mjs": "sha256:9b90602bef89f70854ca542bed767a9d16dd8498956d11fe7189d89fd143ce20",
         "guest-runtime/artifact-lock.json": "sha256:62acba9cdbf3a30c32e0933930e6013af55b6d2de69eee4d603a98a508f8784a",
         "guest-runtime/src/core/types.mjs": "sha256:9bf1e3f12eb8ca139077d0af3fe981e7d3d78ad88841ba2daa5c744ad1c61efa",
         "guest-runtime/src/core/timing.mjs": "sha256:75061b5d3b14718ba0eafd905586e8cf8359f8b6cc1e1bcd6678b02b2770d805",
