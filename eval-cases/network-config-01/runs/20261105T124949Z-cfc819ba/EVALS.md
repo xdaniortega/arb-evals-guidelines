@@ -8,7 +8,7 @@ Run: 20261105T124949Z-cfc819ba · Pairs r001, r002, r003, r004, r005, r006, r007
 
 | Pillar | Without this skill | With this skill | Change |
 |---|---:|---:|---:|
-| Accuracy | 20% | 69% | +49 percentage points |
+| Accuracy | 20% | 69% | +49% |
 | Cost: recorded tokens | 698,606 | 173,219 | −525,387 (−75.2%) |
 | Latency | 300,012 ms | 133,444 ms | −166,568 ms (−55.5%) |
 
