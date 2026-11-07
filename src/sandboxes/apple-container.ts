@@ -539,11 +539,11 @@ async function loadLockedProfile(contextDir: string, runtimeProfileId: string): 
     pi === undefined ||
     pi.package !== "@earendil-works/pi-coding-agent" ||
     typeof pi.version !== "string" ||
-    pi.version !== "0.85.0"
+    pi.version !== "1.5.0"
   ) {
     throw new EvalError(
       "evidence-invalid",
-      `${lockPath} must pin @earendil-works/pi-coding-agent version 0.85.0`,
+      `${lockPath} must pin @earendil-works/pi-coding-agent version 1.5.0`,
       { at: lockPath },
     );
   }

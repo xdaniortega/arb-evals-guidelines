@@ -6,7 +6,7 @@
  * silently drift over time, and preview models may be deprecated or altered without notice.
  *
  * We freeze `gemini-3.8-flash`: an exact, stable, non-preview, non-alias model present in
- * the pinned Pi 0.85.0 catalog.
+ * the pinned Pi 1.5.0 catalog.
  *
  * WHY the thinking level is `low`, which is neither the cheapest nor the obvious choice:
  *
@@ -40,7 +40,7 @@ export const FROZEN_TARGET = {
     thinking: FROZEN_THINKING_LEVEL,
 };
 /**
- * Full catalog of Google models in pinned Pi 0.85.0.
+ * Full catalog of Google models in pinned Pi 1.5.0.
  */
 export const PINNED_PI_GOOGLE_MODELS = [
     "deep-research-max-preview-04-2026",
@@ -51,9 +51,7 @@ export const PINNED_PI_GOOGLE_MODELS = [
     "gemini-2.5-pro",
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-image",
     "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-live-preview",
     "gemini-3.1-pro-preview",
     "gemini-3.1-pro-preview-customtools",
     "gemini-3.5-flash",
@@ -61,33 +59,40 @@ export const PINNED_PI_GOOGLE_MODELS = [
     "gemini-3.6-flash",
     "gemini-3.7-flash",
     "gemini-3.8-flash",
+    "gemini-4-argon",
     "gemini-flash-latest",
     "gemini-flash-lite-latest",
+    "gemini-pro-latest",
+    "gemini-robotics-er-2-preview",
     "gemma-4-26b-a4b-it",
     "gemma-4-31b-it",
 ];
 export const DISALLOWED_GOOGLE_MODEL_ALIASES = [
     "gemini-flash-latest",
     "gemini-flash-lite-latest",
+    "gemini-pro-latest",
 ];
 /**
- * Full catalog of Anthropic models in pinned Pi 0.85.0.
+ * Full catalog of Anthropic models in pinned Pi 1.5.0.
  */
 export const PINNED_PI_ANTHROPIC_MODELS = [
     "claude-fable-5",
     "claude-fable-5-1",
     "claude-haiku-4-5",
     "claude-haiku-4-5-20251001",
+    "claude-haiku-5-5",
     "claude-opus-4-5",
     "claude-opus-4-5-20251101",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    "claude-opus-5-5",
     "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929",
     "claude-sonnet-4-6",
     "claude-sonnet-5",
+    "claude-sonnet-5-5",
 ];
 export const VALID_THINKING_LEVELS = [
     "off",
@@ -134,7 +139,7 @@ export function resolveTargetConfiguration(input) {
 export function validateTargetModel(provider, model) {
     if (provider === "google") {
         if (!PINNED_PI_GOOGLE_MODELS.includes(model)) {
-            throw new EvalError("input-invalid", `model '${model}' is not in the pinned Pi 0.85.0 Google catalog`, { at: "target.model" });
+            throw new EvalError("input-invalid", `model '${model}' is not in the pinned Pi 1.5.0 Google catalog`, { at: "target.model" });
         }
         if (DISALLOWED_GOOGLE_MODEL_ALIASES.includes(model)) {
             throw new EvalError("input-invalid", `moving alias '${model}' is disallowed because aliases destroy reproducibility; use exact model '${FROZEN_MODEL_ID}'`, { at: "target.model" });
@@ -145,7 +150,7 @@ export function validateTargetModel(provider, model) {
     }
     else if (provider === "anthropic") {
         if (!PINNED_PI_ANTHROPIC_MODELS.includes(model)) {
-            throw new EvalError("input-invalid", `model '${model}' is not in the pinned Pi 0.85.0 Anthropic catalog`, { at: "target.model" });
+            throw new EvalError("input-invalid", `model '${model}' is not in the pinned Pi 1.5.0 Anthropic catalog`, { at: "target.model" });
         }
         if (model.includes("-preview")) {
             throw new EvalError("input-invalid", `preview model '${model}' is disallowed for measured evaluations`, { at: "target.model" });

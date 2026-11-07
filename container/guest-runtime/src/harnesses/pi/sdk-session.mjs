@@ -2,7 +2,7 @@
  * Guest Pi SDK session wrapper.
  *
  * Implements the in-guest SDK session contract:
- * - Instantiates the ACTUAL pinned SDK session (@earendil-works/pi-coding-agent@0.85.0).
+ * - Instantiates the ACTUAL pinned SDK session (@earendil-works/pi-coding-agent@1.5.0).
  * - Creates ONE fresh session per arm.
  * - Enforces strict arm isolation: baseline loads zero skills; treatment loads exactly one frozen skill.
  * - Suppresses ambient AGENTS.md, global skills, settings, and extensions.
@@ -21,7 +21,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import { EvalError } from "../../core/types.mjs";
 import { validateTargetConfiguration } from "../../runner/models.mjs";
 import { createMcpClient, MCP_CLIENT_POLICY, MCP_CLIENT_TOOL_NAME } from "./mcp-tools.mjs";
-/** @notice Recognize only the observed Pi 0.85.0 post-run usage dereference, failing closed elsewhere. */
+/** @notice Recognize only the observed Pi 1.5.0 post-run usage dereference, failing closed elsewhere. */
 function isPinnedPostRunUsageError(error) {
     if (!(error instanceof TypeError) || !/^Cannot read properties of undefined \(reading '(input|output)'\)$/.test(error.message))
         return false;
@@ -192,10 +192,13 @@ export async function createPiSdkSession(options) {
             maxRetries: 0,
         });
     });
-    // 5. Settings manager: disable retry and compaction for evaluation arms
+    // 5. Settings manager: disable retry, compaction and cache warming for evaluation arms.
+    // Cache warming (default "streaming" since Pi 1.x) sends provider requests outside the
+    // agent loop, which would escape the provider-request budget and observer.
     const settingsManager = SettingsManager.create(options.cwd, agentDir);
     settingsManager.setRetryEnabled(false);
     settingsManager.setCompactionEnabled(false);
+    settingsManager.setCacheWarmingMode("off");
     // 6. Resource loader: strict ambient suppression and exact skill loading
     const additionalSkillPaths = options.arm === "treatment" && options.skillPath ? [options.skillPath] : [];
     const resourceLoader = new DefaultResourceLoader({
@@ -223,10 +226,12 @@ export async function createPiSdkSession(options) {
         "appendMessage",
         "appendThinkingLevelChange",
         "appendModelChange",
+        "appendUsage",
         "appendCompaction",
         "appendCustomEntry",
         "appendSessionInfo",
         "appendCustomMessageEntry",
+        "appendContextEdit",
         "appendLabelChange",
         "branchWithSummary",
     ];
@@ -234,26 +239,30 @@ export async function createPiSdkSession(options) {
     if (options.nativeSessionRecorder) {
         const header = sessionManager.getHeader();
         if (header === null) {
-            throw new EvalError("protocol-drift", "Pi 0.85.0 in-memory SessionManager returned no native header");
+            throw new EvalError("protocol-drift", "Pi 1.5.0 in-memory SessionManager returned no native header");
         }
         options.nativeSessionRecorder.record(structuredClone(header));
         const mutableManager = sessionManager;
         for (const methodName of decoratedAppendMethods) {
             const original = mutableManager[methodName];
             if (typeof original !== "function") {
-                throw new EvalError("protocol-drift", `Pi 0.85.0 SessionManager is missing public ${methodName}`);
+                throw new EvalError("protocol-drift", `Pi 1.5.0 SessionManager is missing public ${methodName}`);
             }
             mutableManager[methodName] = (...args) => {
-                const id = original.apply(sessionManager, args);
+                const result = original.apply(sessionManager, args);
+                // appendUsage returns the appended entry; every other pinned append returns its ID.
+                const id = methodName === "appendUsage"
+                    ? result?.id
+                    : result;
                 if (typeof id !== "string" || id === "") {
-                    throw new EvalError("protocol-drift", `Pi 0.85.0 ${methodName} returned no native entry ID`);
+                    throw new EvalError("protocol-drift", `Pi 1.5.0 ${methodName} returned no native entry ID`);
                 }
                 const actual = sessionManager.getEntry(id);
                 if (actual === undefined) {
-                    throw new EvalError("protocol-drift", `Pi 0.85.0 ${methodName} entry ${id} was not retrievable`);
+                    throw new EvalError("protocol-drift", `Pi 1.5.0 ${methodName} entry ${id} was not retrievable`);
                 }
                 options.nativeSessionRecorder.record(structuredClone(actual));
-                return id;
+                return result;
             };
             restoredAppendMethods.push(() => { mutableManager[methodName] = original; });
         }
@@ -317,8 +326,8 @@ export async function createPiSdkSession(options) {
         toolSteps += 1;
         return previous;
     };
-    // Pi 0.85.0 treats a returned AgentToolResult as successful regardless of its
-    // isError property. Preserve this client's sanitized failure flag in native evidence.
+    // Pi (observed in 0.85.0) treats a returned AgentToolResult as successful regardless
+    // of its isError property; forcing the flag is harmless where Pi already honors it. Preserve this client's sanitized failure flag in native evidence.
     const previousAfterToolCall = session.agent.afterToolCall;
     session.agent.afterToolCall = async (context, signal) => {
         const previous = await previousAfterToolCall?.(context, signal);
@@ -327,26 +336,32 @@ export async function createPiSdkSession(options) {
         }
         return previous;
     };
-    const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
-    session.agent.shouldStopAfterTurn = async (context, signal) => {
-        if (await previousShouldStopAfterTurn?.(context, signal))
-            return true;
+    // Pi 1.x replaced shouldStopAfterTurn with finishTurn: { action: "end" } stops the run.
+    // Unlike the 0.85 hook, finishTurn also fires for error/aborted turns (whose decision Pi
+    // ignores); those are skipped so a provider failure is never relabelled as a task limit.
+    const previousFinishTurn = session.agent.finishTurn;
+    session.agent.finishTurn = async (turn, signal) => {
+        const previous = (await previousFinishTurn?.(turn, signal)) ?? undefined;
+        if (previous?.action === "end")
+            return previous;
+        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted")
+            return previous;
         if (!budget)
-            return false;
+            return previous;
         if (taskLimitReason !== null)
-            return true;
-        const needsContinuation = context.message.content.some((block) => block.type === "toolCall");
+            return { action: "end" };
+        const needsContinuation = turn.message.content.some((block) => block.type === "toolCall");
         if (budget.maxProviderRequests !== null && providerRequests >= budget.maxProviderRequests && needsContinuation) {
             setTaskLimit(`provider requests budget of ${budget.maxProviderRequests} exhausted`);
-            return true;
+            return { action: "end" };
         }
         if (budget.maxOutputTokens !== null &&
             (usageTotals.output > budget.maxOutputTokens ||
                 (usageTotals.output === budget.maxOutputTokens && needsContinuation))) {
             setTaskLimit(`output token budget of ${budget.maxOutputTokens} exhausted`);
-            return true;
+            return { action: "end" };
         }
-        return false;
+        return previous;
     };
     const unsubscribeBudgetObserver = session.subscribe((event) => {
         if (event.type !== "message_end" || event.message.role !== "assistant")
@@ -452,7 +467,7 @@ export async function createPiSdkSession(options) {
             await session.prompt(promptText);
         }
         catch (error) {
-            // Pi 0.85.0's post-run overflow check dereferences the statically-required
+            // Pi 1.5.0's post-run overflow check dereferences the statically-required
             // usage object even when a test-double response intentionally omits it. The
             // native agent turn and session entry are already finalized at this point.
             // Treat only that narrow telemetry-unavailable case as settled; every model,

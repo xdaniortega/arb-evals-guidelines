@@ -19,10 +19,12 @@ const NATIVE_ENTRY_TYPES = new Set([
     "message",
     "thinking_level_change",
     "model_change",
+    "usage",
     "compaction",
     "custom",
     "session_info",
     "custom_message",
+    "context_edit",
     "label",
     "branch_summary",
 ]);
@@ -35,7 +37,7 @@ function validateNativeRecord(entry, at, entries) {
     }
     const record = entry;
     if (typeof record.type !== "string" || !NATIVE_ENTRY_TYPES.has(record.type)) {
-        throw evidenceInvalid(`${at} has an unknown Pi 0.85.0 entry type`, at);
+        throw evidenceInvalid(`${at} has an unknown Pi native entry type`, at);
     }
     if (record.type === "session") {
         if (entries.length !== 0 || typeof record.id !== "string" || record.id === "") {

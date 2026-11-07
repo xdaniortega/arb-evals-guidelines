@@ -10,7 +10,7 @@
   "profiles": {
     "default": {
       "runtimeProfileId": "default",
-      "description": "Common guest runtime: pinned Node, egress packages, Pi 0.85.0, and the source/compiler-locked framed SDK agent.",
+      "description": "Common guest runtime: pinned Node, egress packages, Pi 1.5.0, and the source/compiler-locked framed SDK agent.",
       "platform": "linux/arm64",
       "base": {
         "reference": "docker.io/library/node:24.21.0-trixie-slim",
@@ -23,7 +23,7 @@
       },
       "pi": {
         "package": "@earendil-works/pi-coding-agent",
-        "version": "0.85.0"
+        "version": "1.5.0"
       },
       "aptPackages": [
         "iptables",
@@ -36,23 +36,23 @@
         "gid": 10001
       },
       "buildContextFiles": {
-        "Containerfile": "sha256:22348091a94e0ff460cff1da40b206da03c4cef8a40526843419dd328a97198c",
+        "Containerfile": "sha256:cbbdbe78af38b285e23d4f23b8ea453774079129280ea9f86b05cb58860d3b6d",
         ".dockerignore": "sha256:9901c94acc2dac0366fda1bdffb26a838c081eb1a4283f6ec0a405ba4def875f",
         "configure-egress.sh": "sha256:0a2bb7a175f62fbf7fb8318dd26c6afe4ceffc2592d81989db95c50d916e6c9b",
         "run-measured.mjs": "sha256:9b90602bef89f70854ca542bed767a9d16dd8498956d11fe7189d89fd143ce20",
-        "guest-runtime/artifact-lock.json": "sha256:62acba9cdbf3a30c32e0933930e6013af55b6d2de69eee4d603a98a508f8784a",
+        "guest-runtime/artifact-lock.json": "sha256:17bb62664dd696c58b467688a8fcdff4eb6c656d4874696a39a8c2a7cd6d80fb",
         "guest-runtime/src/core/types.mjs": "sha256:9bf1e3f12eb8ca139077d0af3fe981e7d3d78ad88841ba2daa5c744ad1c61efa",
         "guest-runtime/src/core/timing.mjs": "sha256:75061b5d3b14718ba0eafd905586e8cf8359f8b6cc1e1bcd6678b02b2770d805",
         "guest-runtime/src/core/experiment.mjs": "sha256:49e1643f58369930ed423c5b0501324f3a0d27322f96decbd98dba2455b08683",
         "guest-runtime/src/core/secret-scan.mjs": "sha256:950e2dc60308f2807e900d07297a16301d182099772f63c94a1e508b03f1c721",
         "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
-        "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
-        "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:d060337a355a105d9ddee21887ffa715c78d75837c42c3404ac56159605f67f0",
+        "guest-runtime/src/runner/models.mjs": "sha256:cab2cf608a6a8c45c06986e62a746e20bbb365ec9b40c6cc209ac13a37f8847b",
+        "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:45ad091b60ed836437e2830e63e83c08fef30a2210488de2b83c5e4306e85e77",
         "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:daead10fb84a4fad22dca6bf800a68890ea2576026657b41b3a9df10168df36d",
         "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:cf1639a26b2079c8932200298b79efad93641c27c41cb111c6bbdf9dc54f855d",
         "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:bf59dccbe72174031e28386a2ecd235f27f0c8298333db55569737f50fb4cf12",
         "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
-        "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:a44143bf1d9d2475e5284cad7216964e41d47b1b8ec1159922b5774bcfe9ed40",
+        "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:e26767447900364f2f22df6cfa88dfaa96438e0c2e393bde3224aafde426b615",
         "guest-runtime/src/harnesses/pi/terminal-classification.mjs": "sha256:b3a89e5b6942d441eba9f59e4b66f17f81de05e949a278a5536343dc90414160",
         "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:f35b0983483242aba3a14b8a5f3d87db8bb9a2082a456cf1e2ae7d7e4964b7e3"
       },
@@ -74,13 +74,13 @@
           "src/core/experiment.ts": "sha256:aa8527cda31ae9159e48b1f7ecfadab78c19c90e19030edb4d8ce46f5c1de694",
           "src/core/secret-scan.ts": "sha256:d013f50c254ea1c968ab79be2d0e204cc89b34e3ddad0e91d3f8c40856e852bd",
           "src/transport-blocker.ts": "sha256:c2d69fec78cf18115a1c1494a9b1f654102c52538d5e3836475094df747257e6",
-          "src/runner/models.ts": "sha256:c2ea4b9729a8160e33fbf714be98bf655c2ad445cd40f76cb5a5d0f222b9d8dd",
-          "src/artifacts/native-prefix.ts": "sha256:f4e5f846c4d43f7f8a008e726f2300a54042d799559535a4347be920262a46b0",
+          "src/runner/models.ts": "sha256:0b503f2db0ee143d918c15e8a940e098efae3dd34d1f49dbca24b5c0a516657e",
+          "src/artifacts/native-prefix.ts": "sha256:bb2d28c853f287464d61cfaa60604e48cb3d07749a23e6274765ed4683330f07",
           "src/harnesses/pi/export-viewer.ts": "sha256:1c969ae1227598f2c05fba1926e1839f73b1f891060dfcf2f55711914a81dbcc",
-          "src/harnesses/pi/scripted-stream.ts": "sha256:bc88665085ec7720000de6ada4c338fce127aecd21f598430f88c60a199f825d",
+          "src/harnesses/pi/scripted-stream.ts": "sha256:a5444a1d32333b4d4da89fff38163a9807ed935d516b0077b6973ccec05d8ccf",
           "src/harnesses/pi/mcp-http-client.ts": "sha256:1df95f0a5312c39d733ba8cdf8fc53c7257cc78530b3da83bd15e91b83629f41",
           "src/harnesses/pi/mcp-tools.ts": "sha256:8fb611b4f324cf5ecce4e0a30bbe885454e454c9c5b9041078d56ec5aa36b10e",
-          "src/harnesses/pi/sdk-session.ts": "sha256:3d89ca7baa1761e7bb8ff42e547d108bdb75aece4dc549430b53737181f24371",
+          "src/harnesses/pi/sdk-session.ts": "sha256:a42fb4a0762779f2404e573ba7395b66dd7a9ffcc87b1a300e86d6074be61fe3",
           "src/harnesses/pi/terminal-classification.ts": "sha256:b5be4883612a9d64f63bcdefd8668d7c92886a6ab04f5d93e6bf8ab882b5e7a4",
           "src/harnesses/pi/guest-agent.ts": "sha256:ede64f3f56eb7d39b21cc4c59c36a99edf9d003d642fb5e1e90a66ffa09ea6bb"
         },
@@ -90,13 +90,13 @@
           "guest-runtime/src/core/experiment.mjs": "sha256:49e1643f58369930ed423c5b0501324f3a0d27322f96decbd98dba2455b08683",
           "guest-runtime/src/core/secret-scan.mjs": "sha256:950e2dc60308f2807e900d07297a16301d182099772f63c94a1e508b03f1c721",
           "guest-runtime/src/transport-blocker.mjs": "sha256:434895d8cb0a73c2f79fa25e5ab66d5c5e5cda79d7dcbc08bfb06f15371a3242",
-          "guest-runtime/src/runner/models.mjs": "sha256:3dbc125a48ec82f090d999ba7d6c813de152d45f4b5ee78b65ce411ed70f5a80",
-          "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:d060337a355a105d9ddee21887ffa715c78d75837c42c3404ac56159605f67f0",
+          "guest-runtime/src/runner/models.mjs": "sha256:cab2cf608a6a8c45c06986e62a746e20bbb365ec9b40c6cc209ac13a37f8847b",
+          "guest-runtime/src/artifacts/native-prefix.mjs": "sha256:45ad091b60ed836437e2830e63e83c08fef30a2210488de2b83c5e4306e85e77",
           "guest-runtime/src/harnesses/pi/export-viewer.mjs": "sha256:daead10fb84a4fad22dca6bf800a68890ea2576026657b41b3a9df10168df36d",
           "guest-runtime/src/harnesses/pi/scripted-stream.mjs": "sha256:cf1639a26b2079c8932200298b79efad93641c27c41cb111c6bbdf9dc54f855d",
           "guest-runtime/src/harnesses/pi/mcp-http-client.mjs": "sha256:bf59dccbe72174031e28386a2ecd235f27f0c8298333db55569737f50fb4cf12",
           "guest-runtime/src/harnesses/pi/mcp-tools.mjs": "sha256:bae83158bd4a26876ddc9ea436e68a1e99aa56c41cb7c820ef47ce98cab468dc",
-          "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:a44143bf1d9d2475e5284cad7216964e41d47b1b8ec1159922b5774bcfe9ed40",
+          "guest-runtime/src/harnesses/pi/sdk-session.mjs": "sha256:e26767447900364f2f22df6cfa88dfaa96438e0c2e393bde3224aafde426b615",
           "guest-runtime/src/harnesses/pi/terminal-classification.mjs": "sha256:b3a89e5b6942d441eba9f59e4b66f17f81de05e949a278a5536343dc90414160",
           "guest-runtime/src/harnesses/pi/guest-agent.mjs": "sha256:f35b0983483242aba3a14b8a5f3d87db8bb9a2082a456cf1e2ae7d7e4964b7e3"
         }

@@ -173,7 +173,7 @@ export function createScriptedStreamSimple(stepsOrDriver: readonly ScriptedStep[
             type: "toolCall",
             id: tc.id ?? generateToolCallId(),
             name: tc.name,
-            arguments: tc.arguments,
+            arguments: tc.arguments as ToolCall["arguments"],
           }));
           const stopReason = step.stopReason ?? "toolUse";
           const msg = {

@@ -5,7 +5,7 @@
  * without spending provider credits:
  * 1. Platform is Apple-silicon macOS (darwin arm64).
  * 2. Apple Container runtime is installed and running (`container system status`).
- * 3. Container image lock verifies and Pi is present at pinned version 0.85.0.
+ * 3. Container image lock verifies and Pi is present at pinned version 1.5.0.
  * 4. Provider credential is present and non-blank in git-ignored .env, WITHOUT printing or hashing it.
  * 5. Guest readiness: a credential-free guest starts, attests, and destroys cleanly.
  *
@@ -127,19 +127,19 @@ export async function runReadinessDoctor(options: DoctorOptions): Promise<Doctor
       };
     };
     const pi = lock.profiles?.default?.pi;
-    if (pi?.package === "@earendil-works/pi-coding-agent" && pi?.version === "0.85.0") {
+    if (pi?.package === "@earendil-works/pi-coding-agent" && pi?.version === "1.5.0") {
       const containerfilePath = join(options.evalsRoot, "container", "Containerfile");
       const containerfile = await readFile(containerfilePath, "utf8");
       // Match the install of the pinned package without pinning npm's flag order:
-      // `npm install -g --save-exact <pkg>@0.85.0` must verify exactly like the bare form.
-      if (/npm install -g[^\n]*@earendil-works\/pi-coding-agent@0\.85\.0/.test(containerfile)) {
+      // `npm install -g --save-exact <pkg>@1.5.0` must verify exactly like the bare form.
+      if (/npm install -g[^\n]*@earendil-works\/pi-coding-agent@1\.5\.0/.test(containerfile)) {
         lockOk = true;
-        lockDetail = "image lock verified, @earendil-works/pi-coding-agent@0.85.0 pinned";
+        lockDetail = "image lock verified, @earendil-works/pi-coding-agent@1.5.0 pinned";
       } else {
-        lockDetail = "Containerfile does not install @earendil-works/pi-coding-agent@0.85.0";
+        lockDetail = "Containerfile does not install @earendil-works/pi-coding-agent@1.5.0";
       }
     } else {
-      lockDetail = `image-lock.json does not pin Pi 0.85.0 (found ${String(pi?.version)})`;
+      lockDetail = `image-lock.json does not pin Pi 1.5.0 (found ${String(pi?.version)})`;
     }
   } catch (error) {
     lockDetail = `image lock verification failed: ${error instanceof Error ? error.message : String(error)}`;

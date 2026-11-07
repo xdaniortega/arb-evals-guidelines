@@ -81,11 +81,11 @@ describe("no-request readiness doctor", () => {
 
   it("verifies the actual pinned pi install line, whatever npm flags it carries", async () => {
     // Regression: the check previously required the exact substring
-    // `npm install -g @earendil-works/pi-coding-agent@0.85.0`, so adding npm's
+    // `npm install -g @earendil-works/pi-coding-agent@1.5.0`, so adding npm's
     // `--save-exact` flag to the Containerfile made a correctly pinned image report
     // NOT READY and skipped guest readiness behind it.
     const containerfile = await readFile(`${process.cwd()}/container/Containerfile`, "utf8");
-    expect(containerfile).toMatch(/npm install -g[^\n]*@earendil-works\/pi-coding-agent@0\.85\.0/);
+    expect(containerfile).toMatch(/npm install -g[^\n]*@earendil-works\/pi-coding-agent@1\.5\.0/);
 
     const report = await runReadinessDoctor({
       evalsRoot: process.cwd(),
@@ -94,7 +94,7 @@ describe("no-request readiness doctor", () => {
     });
     const pinned = report.checks.find((check) => check.id === "image-pi-pinned");
     expect(pinned?.passed).toBe(true);
-    expect(pinned?.detail).toContain("@earendil-works/pi-coding-agent@0.85.0 pinned");
+    expect(pinned?.detail).toContain("@earendil-works/pi-coding-agent@1.5.0 pinned");
   });
 
   it("checks a selected Anthropic target using only its synthetic credential", async () => {

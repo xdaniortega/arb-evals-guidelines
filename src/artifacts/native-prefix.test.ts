@@ -64,6 +64,12 @@ describe("bounded durable native prefixes", () => {
       manager.appendSessionInfo("session name"),
       manager.appendCustomMessageEntry("test", "custom message", false),
     ];
+    // appendUsage is the one pinned append that returns the entry instead of its ID.
+    ids.push(manager.appendUsage("cache_warm", "google", "gemini-3.8-flash", {
+      input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    } as any).id);
+    ids.push(manager.appendContextEdit(ids[0]!, null));
     ids.push(manager.appendLabelChange(ids[0]!, "root"));
     ids.push(manager.branchWithSummary(ids[0]!, "branch summary"));
     const actualHeader = structuredClone(manager.getHeader());
@@ -118,6 +124,27 @@ describe("bounded durable native prefixes", () => {
     expect(JSON.stringify(actualMessage)).toContain(secret);
     (snapshot.entries[1] as any).id = "mutated-view";
     expect(readNativeSessionPrefix(path).entries[1]!.id).toBe("msg-actual");
+  });
+
+  it("strips reasoning and secrets from context_edit replacement content", () => {
+    const path = join(tempRoot("native-context-edit"), "prefix.jsonl");
+    const secret = "context-edit-secret-value";
+    const capture = createNativeSessionCapture({ path, guardedSecrets: [{ label: "TOKEN", value: secret }] });
+    capture.record(header());
+    capture.record({ type: "message", id: "msg-1", parentId: null, timestamp: "2025-01-01T00:00:01.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "original" }] } });
+    capture.record({ type: "context_edit", id: "edit-1", parentId: "msg-1", timestamp: "2025-01-01T00:00:02.000Z",
+      targetId: "msg-1", replacement: { content: [
+        { type: "thinking", thinking: "edited private chain", thinkingSignature: "edit-signature" },
+        { type: "text", text: secret },
+      ] } });
+    const snapshot = capture.finish(true, null);
+
+    expect(snapshot.entries.map((entry) => entry.type)).toEqual(["session", "message", "context_edit"]);
+    const serialized = JSON.stringify(snapshot.entries);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("edited private chain");
+    expect(serialized).not.toContain("edit-signature");
   });
 
   it("preserves reasoning and signatures when captureReasoning is enabled", () => {
@@ -343,7 +370,8 @@ describe("bounded durable native prefixes", () => {
       expect(serialized).toContain("crash_write_1");
       expect(serialized).toContain("toolResult");
       expect(serialized).not.toContain("native-prefix-crash-canary");
-      expect(snapshot.entries.filter((entry) => entry.type === "message")).toHaveLength(3);
+      // system (Pi 1.x leading system prompt), user, assistant tool call, tool result
+      expect(snapshot.entries.filter((entry) => entry.type === "message")).toHaveLength(4);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }

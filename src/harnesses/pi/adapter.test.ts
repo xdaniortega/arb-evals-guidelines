@@ -148,7 +148,9 @@ describe("Pi SDK harness adapter", () => {
     expect(result.runtime.harnessId).toBe("pi");
     expect(result.runtime.testDouble).toBe(true);
     expect(result.messages.length).toBeGreaterThanOrEqual(2);
-    expect(result.messages[0]?.role).toBe("user");
+    // Pi 1.x records the system prompt as the leading native message.
+    expect(result.messages[0]?.role).toBe("system");
+    expect(result.messages[1]?.role).toBe("user");
     const assistantMsg = result.messages.find((m) => m.role === "assistant" && m.text.includes("Task completed"));
     expect(assistantMsg).toBeDefined();
     expect(result.toolSteps.length).toBe(1);

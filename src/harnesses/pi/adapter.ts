@@ -45,7 +45,7 @@ import {
 import { MCP_CLIENT_POLICY, MCP_CLIENT_TOOL_NAME } from "./mcp-tools.ts";
 
 export const PI_HARNESS_ID = "pi";
-export const PI_PINNED_VERSION = "0.85.0";
+export const PI_PINNED_VERSION = "1.5.0";
 
 const MAX_MESSAGE_CHARS = 16_000;
 const MAX_REMOTE_FRAME_BYTES = 1024 * 1024;

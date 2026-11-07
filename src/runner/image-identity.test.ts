@@ -38,7 +38,7 @@ describe("Image Identity and Pinning", () => {
     const containerfilePath = join(process.cwd(), "container", "Containerfile");
     const containerfile = await readFile(containerfilePath, "utf8");
 
-    expect(containerfile).toContain("@earendil-works/pi-coding-agent@0.85.0");
+    expect(containerfile).toContain("@earendil-works/pi-coding-agent@1.5.0");
     expect(containerfile).toContain("--save-exact");
   });
 });

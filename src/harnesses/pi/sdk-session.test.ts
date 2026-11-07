@@ -127,6 +127,8 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
       expect(attestation.loadedSkills.length).toBe(0);
       expect(attestation.retryEnabled).toBe(false);
       expect(attestation.compactionEnabled).toBe(false);
+      // Cache warming would issue provider requests outside the agent loop and budget.
+      expect(sessionInstance.settingsManager.getCacheWarmingMode()).toBe("off");
 
       // Execute prompt on THAT SAME session
       await sessionInstance.runPrompt("Read greeting.txt, write new-greeting.txt, and edit it.");
@@ -138,7 +140,9 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
 
       // Verify native session conversation entries
       const session = sessionInstance.session;
-      const messages = session.messages;
+      // Pi 1.x keeps the system prompt as a leading system message in the native conversation.
+      expect(session.messages[0]!.role).toBe("system");
+      const messages = session.messages.slice(1);
       expect(messages.length).toBe(8); // user, asst(read), tool(read), asst(write), tool(write), asst(edit), tool(edit), asst(text)
 
       expect(messages[0]!.role).toBe("user");
@@ -381,7 +385,7 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
         expect(attestation.thinkingLevel).toBe(target.thinking);
 
         await instance.runPrompt("Status check");
-        expect(instance.session.messages.length).toBe(2);
+        expect(instance.session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
         instance.dispose();
       });
     }
@@ -493,7 +497,8 @@ describe("Pi SDK Guest Wrapper and Native Session Integration (L1)", () => {
 
       await instance.runPrompt("Read nonexistent-file.txt");
 
-      const messages = instance.session.messages;
+      expect(instance.session.messages[0]!.role).toBe("system");
+      const messages = instance.session.messages.slice(1);
       expect(messages.length).toBe(4);
       expect(messages[1]!.role).toBe("assistant");
       expect(messages[2]!.role).toBe("toolResult");

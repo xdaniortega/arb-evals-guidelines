@@ -11,7 +11,7 @@
 FROM docker.io/library/node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
 
 # iptables/ip6tables and ip(8) are absent from the base image and are required by the
-# egress lock. fd-find provides the native find executable (fdfind) for Pi 0.85.0.
+# egress lock. fd-find provides the native find executable (fdfind) for Pi 1.5.0.
 # They are installed once at build time so the guest never needs network
 # tooling at runtime and never installs anything while a task is running.
 RUN apt-get update \
@@ -19,15 +19,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN fdfind --version
 
-# The Pi agent runtime at pinned version 0.85.0. Installed globally at build time so
+# The Pi agent runtime at pinned version 1.5.0. Installed globally at build time so
 # the guest never fetches dependencies at runtime. ESM does not honor NODE_PATH, so
 # expose the three directly imported scoped packages at the image-resident agent's
 # normal node_modules lookup location, resolving them from npm's actual global root.
-RUN npm install -g --save-exact @earendil-works/pi-coding-agent@0.85.0 \
+RUN npm install -g --save-exact @earendil-works/pi-coding-agent@1.5.0 \
  && pi_root="$(npm root -g)/@earendil-works/pi-coding-agent" \
  && npm install --prefix "$pi_root" --omit=dev --save-exact \
-      @earendil-works/pi-agent-core@0.85.0 @earendil-works/pi-ai@0.85.0 \
-      @earendil-works/pi-server@0.85.0 \
+      @earendil-works/pi-agent-core@1.5.0 @earendil-works/pi-ai@1.5.0 \
  && mkdir -p /opt/eval/node_modules/@earendil-works \
  && ln -s "$pi_root" /opt/eval/node_modules/@earendil-works/pi-coding-agent \
  && for package in pi-agent-core pi-ai; do \
@@ -35,7 +34,7 @@ RUN npm install -g --save-exact @earendil-works/pi-coding-agent@0.85.0 \
       test -d "$dependency"; \
       ln -s "$dependency" "/opt/eval/node_modules/@earendil-works/$package"; \
     done \
- && node -e 'const fs=require("fs"); for(const name of ["pi-coding-agent","pi-agent-core","pi-ai"]) { const p=JSON.parse(fs.readFileSync("/opt/eval/node_modules/@earendil-works/"+name+"/package.json")); if(p.version!=="0.85.0") throw new Error("Pi dependency pin mismatch: "+name); } const peer=JSON.parse(fs.readFileSync("/opt/eval/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-server/package.json")); if(peer.version!=="0.85.0") throw new Error("Pi SDK peer pin mismatch");'
+ && node -e 'const fs=require("fs"); for(const name of ["pi-coding-agent","pi-agent-core","pi-ai"]) { const p=JSON.parse(fs.readFileSync("/opt/eval/node_modules/@earendil-works/"+name+"/package.json")); if(p.version!=="1.5.0") throw new Error("Pi dependency pin mismatch: "+name); }'
 
 # The fixed non-root identity every guest process runs as. It is a constant, not a
 # parameter: attestation asserts this exact uid/gid, so a drift in the image is caught by
