@@ -1,0 +1,122 @@
+{
+  "expected": {
+    "production": {
+      "chain": {
+        "name": "Arbitrum One",
+        "chainId": 42161,
+        "rpcUrl": "https://arb1.arbitrum.io/rpc",
+        "explorerUrl": "https://arbiscan.io",
+        "deprecatedGoerliFallbackUrl": null
+      },
+      "rpcPolicy": {
+        "readRpcUrl": "https://arb1.arbitrum.io/rpc",
+        "writeRpcUrl": "https://arb1.arbitrum.io/rpc",
+        "sequencerSubmissionUrl": "https://arb1-sequencer.arbitrum.io/rpc",
+        "sequencerSubmissionOnly": true,
+        "sequencerAcceptedMethods": [
+          "eth_sendRawTransaction",
+          "eth_sendRawTransactionConditional"
+        ],
+        "retryableSubmissionErrors": [
+          "context deadline exceeded"
+        ],
+        "terminalSubmissionErrors": [
+          "execution reverted",
+          "nonce too low"
+        ]
+      },
+      "tokens": {
+        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"
+      },
+      "assetOnboarding": {
+        "enabled": true,
+        "preferredRoute": "canonicalBridge",
+        "canonicalBridge": {
+          "enabled": true,
+          "contracts": {
+            "l1GatewayRouter": "0x72Ce9c846789fdB6fC1f34aC4AD25Dd9ef7031ef",
+            "l2GatewayRouter": "0x5288c571Fd7aD117beA99bF60FE0846C4E84F933",
+            "l1Erc20Gateway": "0xa3A7B6F88361F48403514059F1F16C8E78d60EeC",
+            "l1Outbox": "0x0B9857ae2D4A3DBe74ffE1d7DF045bb7F96E4840"
+          }
+        }
+      },
+      "finalityPolicy": {
+        "withdrawalsToEthereumAreInstant": false,
+        "challengeWindowBlocks": 45818,
+        "forceIncludePeriodBlocks": 5760
+      }
+    },
+    "staging": {
+      "chain": {
+        "name": "Arbitrum Sepolia",
+        "chainId": 421614,
+        "rpcUrl": "https://sepolia-rollup.arbitrum.io/rpc",
+        "explorerUrl": "https://sepolia.arbiscan.io",
+        "deprecatedGoerliFallbackUrl": null
+      },
+      "rpcPolicy": {
+        "readRpcUrl": "https://sepolia-rollup.arbitrum.io/rpc",
+        "writeRpcUrl": "https://sepolia-rollup.arbitrum.io/rpc",
+        "sequencerSubmissionUrl": "https://sepolia-rollup-sequencer.arbitrum.io/rpc",
+        "sequencerSubmissionOnly": true,
+        "sequencerAcceptedMethods": [
+          "eth_sendRawTransaction",
+          "eth_sendRawTransactionConditional"
+        ],
+        "retryableSubmissionErrors": [
+          "context deadline exceeded"
+        ],
+        "terminalSubmissionErrors": [
+          "execution reverted",
+          "nonce too low"
+        ]
+      },
+      "tokens": {
+        "WETH": "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73",
+        "USDC": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+        "USDC.e": null
+      },
+      "assetOnboarding": {
+        "enabled": true,
+        "preferredRoute": "canonicalBridge",
+        "canonicalBridge": {
+          "enabled": true,
+          "contracts": {
+            "l1GatewayRouter": "0xcE18836b233C83325Cc8848CA4487e94C6288264",
+            "l2GatewayRouter": "0x9fDD1C4E4AA24EEc1d913FABea925594a20d43C7",
+            "l1Erc20Gateway": "0x902b3E5f8F19571859F4AB1003B960a5dF693aFF",
+            "l1Outbox": "0x65f07C7D521164a4d5DaC6eB8Fac8DA067A3B78F"
+          }
+        }
+      },
+      "finalityPolicy": {
+        "withdrawalsToEthereumAreInstant": false,
+        "challengeWindowBlocks": 20,
+        "forceIncludePeriodBlocks": 5760
+      }
+    }
+  },
+  "sources": [
+    {
+      "fields": ["chainIdentity", "rpcPolicy", "legacyNetworkFallback", "sequencerPolicy", "finalityPolicy", "wrappedNativeTokens", "bridgeOnboarding"],
+      "url": "https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info",
+      "locator": "Arbitrum One and Arbitrum Sepolia chain, RPC, sequencer behavior, finality parameters, WETH, and bridge configuration",
+      "verifiedAt": "2026-08-31"
+    },
+    {
+      "fields": ["nativeUsdcTokens"],
+      "url": "https://developers.circle.com/stablecoins/usdc-contract-addresses",
+      "locator": "USDC contract addresses for Arbitrum One and Arbitrum Sepolia",
+      "verifiedAt": "2026-08-04"
+    },
+    {
+      "fields": ["bridgedUsdcEToken"],
+      "url": "https://docs.arbitrum.io/arbitrum-bridge/usdc-arbitrum-one",
+      "locator": "USDC vs USDC.e table; bridged USDC token address on Arbitrum One",
+      "verifiedAt": "2026-08-04"
+    }
+  ]
+}

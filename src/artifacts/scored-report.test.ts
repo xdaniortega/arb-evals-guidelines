@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { scoreWithRubric } from "../runner/rubric.ts";
 import type { Rubric, RubricScore } from "../runner/rubric.ts";
 import {
   buildScoredReport,
@@ -8,15 +9,17 @@ import {
   formatSignedAccuracyDiff,
   formatTokenDiff,
   formatTokens,
-  generateBadge,
   renderScoredJson,
   renderScoredMarkdown,
+  formatSummaryScoreChange,
   renderScoredSummaryMarkdown,
   OUTCOME_CHECKS_HEADING,
   renderScoredTerminal,
   REPORT_JSON_SCHEMA_VERSION,
 } from "./scored-report.ts";
-import { formatRunReport } from "./queries.ts";
+import { attachConditionCheckResults, formatRunReport } from "./queries.ts";
+import { buildSummaryDocument, buildSummaryEntry, projectOutcomeChecks } from "./summary-entry.ts";
+import type { SummaryDocument } from "./scored-report.ts";
 import type { ConditionReport, PairReport, RunReport, VerifyRunReport } from "./queries.ts";
 
 const TOPICS = [
@@ -398,27 +401,13 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
 
     const display = { title: "network configuration migration", scenario: "Migrate production and staging network configuration to Arbitrum" };
     const md = renderScoredMarkdown(buildScoredReport(createRunReport(), { ...MOCK_RUBRIC, display }));
+    expect(md).not.toMatch(/AF-Evaluation|img\.shields/);
     expect(md).toContain("# EVALS.MD: network configuration migration");
     expect(md).toContain("## Scenario: Migrate production and staging network configuration to Arbitrum");
 
     const fallback = buildScoredReport(createRunReport({ caseSelector: "other-case-02", caseId: "other-case-02" }), MOCK_RUBRIC);
     expect(fallback.caseTitle).toBe("other-case-02");
     expect(fallback.caseScenario).toBe("other-case-02");
-  });
-
-  it("generates non-certifying badges describing the treatment status and accuracy", () => {
-    const completed = createConditionReport("treatment");
-    expect(generateBadge(completed, "completed", 85)).toEqual({
-      url: "https://img.shields.io/badge/AF--Evaluation-completed%20%C2%B7%2085%25-blue",
-      alt: "AF-Evaluation: completed · 85%",
-    });
-    expect(generateBadge(completed, "completed", null).url).toBe("https://img.shields.io/badge/AF--Evaluation-completed-blue");
-    expect(generateBadge(createConditionReport("treatment", { status: "task-limit" }), "", 40).url)
-      .toBe("https://img.shields.io/badge/AF--Evaluation-task%20limit%20%C2%B7%2040%25-yellow");
-    expect(generateBadge(createConditionReport("treatment", { status: "infrastructure-failure", stopCause: "infrastructure-error" }), "", null).url)
-      .toBe("https://img.shields.io/badge/AF--Evaluation-infrastructure%20failure-red");
-    expect(generateBadge(createConditionReport("treatment", { status: "infrastructure-failure", stopCause: "external-cancellation" }), "", null).url)
-      .toBe("https://img.shields.io/badge/AF--Evaluation-interrupted-orange");
   });
 
   describe("mean mode aggregates status and derived durations across pairs", () => {
@@ -428,15 +417,14 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
       repetition: n,
     });
 
-    it("keeps the single-arm wording and badge when every pair agrees", () => {
+    it("keeps the single-arm wording when every pair agrees", () => {
       const pairs = [1, 2, 3].map((n) => pairN(n, createConditionReport("baseline"), createConditionReport("treatment")));
       const model = buildScoredReport(createRunReport({ pairs }), MOCK_RUBRIC, { mode: "mean", pairs });
       expect(model.statusLine).toBe("Completed; graded");
-      expect(model.badgeUrl).toContain("-completed%20%C2%B7%20");
       expect(model.pillars.latency.treatment).not.toContain("session-derived");
     });
 
-    it("reports per-pair status counts and a mixed badge when pairs differ (B3)", () => {
+    it("reports per-pair status counts when pairs differ (B3)", () => {
       const pairs = [
         pairN(1, createConditionReport("baseline"), createConditionReport("treatment")),
         pairN(2, createConditionReport("baseline", { status: "task-limit", stopCause: "wall-clock" }), createConditionReport("treatment")),
@@ -446,7 +434,6 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
       expect(model.statusLine).toBe(
         "Completed in 2 of 3 pairs, task limit reached in 1; graded",
       );
-      expect(model.badgeUrl).toMatch(/AF--Evaluation-mixed%20%C2%B7%20\d+%25-yellow$/);
     });
 
     it("labels a mean mixing recorded and session-derived durations with the pair count (B4)", () => {
@@ -465,46 +452,367 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
 });
 
 describe("renderScoredSummaryMarkdown", () => {
-  const DETAILS_URL = "https://github.com/example/evals/tree/HEAD/eval-cases/network-config-01/runs/run-001";
+  const DETAILS_URL = "https://github.com/example/evals/blob/HEAD/eval-cases/network-config-01/runs/run-001/EVALS-FULL-REPORT.md";
   const RUN_HASH = "ab".repeat(32);
   const golden = (name: string, actual: string): void => {
     const path = new URL(`./__golden__/${name}`, import.meta.url);
     if (process.env.UPDATE_GOLDEN === "1") writeFileSync(path, actual);
     expect(actual).toBe(readFileSync(path, "utf8"));
   };
-  const pairN = (n: number): PairReport => ({
-    ...pairOf(createConditionReport("baseline"), createConditionReport("treatment")),
-    pairId: `run-001-r00${n}`,
-    repetition: n,
-  });
-  const summary = (model: ReturnType<typeof buildScoredReport>, testDouble: boolean): string =>
-    renderScoredSummaryMarkdown(model, { detailsUrl: DETAILS_URL, testDouble, runHash: RUN_HASH });
 
-  it("uses one shared heading constant, renamed to Accuracy Outcome Checks", () => {
-    expect(OUTCOME_CHECKS_HEADING).toBe("Accuracy Outcome Checks");
-    const md = renderScoredMarkdown(buildScoredReport(createRunReport(), MOCK_RUBRIC), { checks: true });
-    expect(md).toContain("### Accuracy Outcome Checks");
-    expect(md).not.toContain("### Outcome checks");
+  /** Builds a verified-shaped report whose arms are scored for real from per-pair passed-check sets. */
+  interface FixtureOptions {
+    readonly caseId: string;
+    readonly title?: string;
+    readonly skill?: string;
+    readonly rubric: Rubric;
+    readonly pairs: readonly { readonly baseline: readonly string[]; readonly treatment: readonly string[] }[];
+    readonly target?: { provider: string; model: string; thinking: string };
+    readonly selected?: string;
+    readonly testDouble?: boolean;
+    readonly runId?: string;
+    readonly treeHash?: string;
+    /** Overrides the treatment arm's usage/timing (e.g. missing tokens, session-derived latency). */
+    readonly treatment?: Partial<ConditionReport>;
+  }
+  function fixture(options: FixtureOptions): { report: RunReport; scored: ReturnType<typeof buildScoredReport> } {
+    const runId = options.runId ?? `run-${options.caseId}`;
+    const arm = (id: "baseline" | "treatment", passed: ReadonlySet<string>, tokens: number): ConditionReport => {
+      const results = options.rubric.checks.map((c) => ({ id: c.id, passed: passed.has(c.id) }));
+      const rubricScore = scoreWithRubric(options.rubric, results.map((r) => ({ ...r, message: "" })));
+      return attachConditionCheckResults(
+        createConditionReport(id, { rubricScore, score: rubricScore.score, consumedTokens: tokens, durationMs: tokens * 10, ...(id === "treatment" ? (options.treatment ?? {}) : {}) }),
+        results,
+      );
+    };
+    const pairs: PairReport[] = options.pairs.map((p, i) => ({
+      ...pairOf(arm("baseline", new Set(p.baseline), 1000), arm("treatment", new Set(p.treatment), 400)),
+      pairId: `${runId}-r${String(i + 1).padStart(3, "0")}`,
+      repetition: i + 1,
+    }));
+    const report = createRunReport({
+      runId,
+      caseId: options.caseId,
+      caseSelector: options.caseId,
+      pairs,
+      testDouble: options.testDouble ?? false,
+      target: (options.target ?? { provider: "google", model: "gemini-3.8-flash", thinking: "low" }) as RunReport["target"],
+      skillSourcePath: `skills/${options.skill ?? "ops-skill"}`,
+      runDir: `/tmp/${runId}`,
+      receiptManifest: { treeSha256: options.treeHash ?? "cd".repeat(32), fileSha256: "ef".repeat(32) },
+      caseTitle: options.title ?? `${options.caseId} title`,
+      caseScenario: `${options.caseId} scenario`,
+    });
+    const selection =
+      options.selected !== undefined
+        ? { mode: "single" as const, pair: pairs.find((p) => p.pairId.endsWith(options.selected!))! }
+        : pairs.length === 1
+          ? { mode: "single" as const, pair: pairs[0]! }
+          : { mode: "mean" as const, pairs };
+    return { report, scored: buildScoredReport(report, options.rubric, selection) };
+  }
+  const documentOf = (...inputs: ReturnType<typeof fixture>[]): SummaryDocument => ({
+    skillLabel: inputs[0]!.scored.skillLabel,
+    entries: inputs.map(({ report, scored }) =>
+      buildSummaryEntry({
+        report,
+        scored,
+        frozenPrompt: `Prompt of ${report.caseId}.`,
+        reportUrl: `https://github.com/example/evals/blob/HEAD/eval-cases/${report.caseId}/runs/${report.runId}/EVALS-FULL-REPORT.md`,
+      }),
+    ),
   });
 
-  it("matches the single-pair golden, has no Accuracy / Cost sections or markers, and ends with the link", () => {
-    const out = summary(buildScoredReport(createRunReport(), MOCK_RUBRIC), true);
+  // Rubric A: three topics with their own labels/weights plus two ungrouped constraints.
+  const RUBRIC_A: Rubric = {
+    rubricVersion: "v0.2",
+    checks: [
+      { id: "a1", group: "outcome", topic: "zones", points: 15 },
+      { id: "a2", group: "outcome", topic: "zones", points: 15 },
+      { id: "b1", group: "outcome", topic: "ttl", points: 20 },
+      { id: "c1", group: "outcome", topic: "failover", points: 30 },
+      { id: "k1", group: "constraints", points: 10 },
+      { id: "k2", group: "constraints", points: 10 },
+    ],
+    topics: [
+      { id: "zones", label: "Zone records", points: 30 },
+      { id: "ttl", label: "TTL policy", points: 20 },
+      { id: "failover", label: "Failover", points: 30 },
+    ],
+  };
+  /** The same weights without topics (a valid topic-less rubric: checks carry no topic). */
+  const FLAT_A: Rubric = { rubricVersion: "v0.2", checks: RUBRIC_A.checks.map(({ id, group, points }) => ({ id, group, points })) };
+  const ALL_A = ["a1", "a2", "b1", "c1", "k1", "k2"];
+
+  it("matches the single-pair golden: skill title, index, case section, results, outcome checks and full reports", () => {
+    const out = renderScoredSummaryMarkdown(documentOf(fixture({ caseId: "network-config-01", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, testDouble: true, runId: "run-001", pairs: [{ baseline: ["json-shape", "preservation"], treatment: MOCK_RUBRIC.checks.map((c) => c.id) }] })));
+    expect(out).not.toMatch(/Hash:|Run:|Agent:|Status:|AF-Evaluation|img\.shields|Mean Score|Execution|Run details/);
     expect(out).not.toContain("### Accuracy\n");
-    expect(out).not.toContain("### Cost and latency");
-    expect(out).not.toContain("AF-EVAL");
-    expect(out.trimEnd().split("\n").at(-1)).toBe(`For further details or to check run reproducibility see: ${DETAILS_URL}`);
-    expect(out).toContain(` · Hash: ${RUN_HASH}`);
-    expect(out).not.toContain("Status:");
+    expect(out.startsWith("> **Warning:** TEST-DOUBLE EVIDENCE")).toBe(true);
+    expect(out).toContain("# arbitrum-docs — Evaluation cases\n\n## Case index\n\nScore in this index is the Treatment score.\n");
     golden("evals-summary.single.md", out);
   });
 
-  it("matches the mean golden and omits the test-double banner and run hash when unavailable", () => {
-    const pairs = [1, 2, 3].map(pairN);
-    const model = buildScoredReport(createRunReport({ pairs, testDouble: false }), MOCK_RUBRIC, { mode: "mean", pairs });
-    const out = summary(model, false);
-    expect(out).toContain("Run: run-001 · Pairs r001, r002, r003");
+  it("matches the mean golden over three pairs and has no test-double warning for measured evidence", () => {
+    const pass = MOCK_RUBRIC.checks.map((c) => c.id);
+    const out = renderScoredSummaryMarkdown(
+      documentOf(fixture({ caseId: "network-config-01", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, runId: "run-001", pairs: [1, 2, 3].map(() => ({ baseline: ["json-shape", "preservation"], treatment: pass })) })),
+    );
     expect(out).not.toContain("Warning");
+    expect(out).toContain("Metrics are means across all three pairs.");
     golden("evals-summary.mean.md", out);
-    expect(renderScoredSummaryMarkdown(model, { detailsUrl: DETAILS_URL })).not.toContain("Hash:");
+  });
+
+  it("renders a score change as the signed arithmetic difference (20% to 69% is +49%), never relative growth", () => {
+    expect(formatSummaryScoreChange(49)).toBe("+49%");
+    expect(formatSummaryScoreChange(-12)).toBe("−12%");
+    expect(formatSummaryScoreChange(0)).toBe("0%");
+    expect(formatSummaryScoreChange(48.96)).toBe("+49%");
+    expect(formatSummaryScoreChange(12.34)).toBe("+12.3%");
+    expect(formatSummaryScoreChange(-0.04)).toBe("0%");
+    expect(formatSummaryScoreChange(null)).toBe("n/a");
+    // 20 -> 69: baseline passes k1+k2 (20), treatment passes 69 points' worth is not representable
+    // with 5-point granularity, so use 25 -> 70 and check the difference, not (70-25)/25.
+    const rubric: Rubric = { rubricVersion: "v0.2", checks: [
+      { id: "o1", group: "outcome", points: 40 }, { id: "o2", group: "outcome", points: 40 },
+      { id: "c1", group: "constraints", points: 20 } ] };
+    const { scored } = fixture({ caseId: "x", rubric, pairs: [{ baseline: ["c1"], treatment: ["o1", "o2", "c1"] }] });
+    expect(scored.pillars.accuracy.baseline).toBe("20%");
+    expect(scored.pillars.accuracy.treatment).toBe("100%");
+    const md = renderScoredSummaryMarkdown(documentOf(fixture({ caseId: "x", rubric, pairs: [{ baseline: ["c1"], treatment: ["o1", "c1"] }] })));
+    expect(md).toContain("| Score | Google Gemini 3.8 Flash | 20% | 60% | +40% |");
+  });
+
+  it("renders its own skill, case, task, model, rubric labels, weights and pair counts (1, 3 and 4 pairs)", () => {
+    for (const pairCount of [1, 3, 4]) {
+      const pair = { baseline: ["k1"], treatment: ALL_A };
+      const out = renderScoredSummaryMarkdown(
+        documentOf(fixture({
+          caseId: "dns-migration-02", title: "dns zone migration", skill: "ops-skill", rubric: RUBRIC_A,
+          target: { provider: "anthropic", model: "claude-sonnet-4-5", thinking: "off" },
+          pairs: Array.from({ length: pairCount }, () => pair),
+        })),
+      );
+      expect(out).toContain("# ops-skill — Evaluation cases");
+      expect(out).toContain("| [dns-migration-02](#dns-migration-02) | Anthropic Claude Sonnet 4.5 | Dns zone migration | 100% |");
+      expect(out).toContain("Prompt of dns-migration-02.");
+      expect(out).toContain("| `dns-migration-02` | Zone records | Anthropic Claude Sonnet 4.5 | 0/30 | 30/30 |");
+      expect(out).toContain("| `dns-migration-02` | TTL policy | Anthropic Claude Sonnet 4.5 | 0/20 | 20/20 |");
+      expect(out).toContain("| `dns-migration-02` | Failover | Anthropic Claude Sonnet 4.5 | 0/30 | 30/30 |");
+      expect(out).toContain("| `dns-migration-02` | **Outcome total** | Anthropic Claude Sonnet 4.5 | **0/80** | **80/80** |");
+      expect(out).toContain(pairCount === 1 ? "Metrics are from a single pair." : `Metrics are means across all ${["", "", "", "three", "four"][pairCount]} pairs.`);
+      expect(out).not.toMatch(/arbitrum|network-config|Gemini|ten pairs/i);
+      expect((out.match(/Zone records/g) ?? []).length).toBe(1);
+    }
+  });
+
+  it("uses mean points over rendered pairs, not pass counts", () => {
+    const out = renderScoredSummaryMarkdown(documentOf(fixture({
+      caseId: "dns-migration-02", rubric: RUBRIC_A,
+      pairs: [
+        { baseline: [], treatment: ["a1", "b1", "c1"] },
+        { baseline: [], treatment: ["a1", "a2", "b1", "c1"] },
+        { baseline: [], treatment: ["b1", "c1"] },
+      ],
+    })));
+    // zones: (15 + 30 + 0) / 3 = 15; ttl and failover pass in all pairs.
+    expect(out).toMatch(/\| Zone records \| [^|]+ \| 0\/30 \| 15\/30 \|/);
+    expect(out).toMatch(/\*\*0\/80\*\* \| \*\*65\/80\*\*/);
+  });
+
+  it("selects an explicit pair and says so", () => {
+    const out = renderScoredSummaryMarkdown(documentOf(fixture({
+      caseId: "dns-migration-02", rubric: RUBRIC_A, selected: "r002",
+      pairs: [{ baseline: [], treatment: ALL_A }, { baseline: [], treatment: ["b1"] }, { baseline: [], treatment: ALL_A }],
+    })));
+    expect(out).toContain("Metrics are from the explicitly selected pair r002 of 3.");
+    expect(out).toMatch(/\*\*0\/80\*\* \| \*\*20\/80\*\*/);
+    expect(out).not.toContain("means across");
+  });
+
+  it("projects only outcome checks: mixed topics by individual check, constraint-only topics excluded, Score keeps both groups", () => {
+    const rubric: Rubric = {
+      rubricVersion: "v0.2",
+      checks: [
+        { id: "x1", group: "outcome", topic: "mixed", points: 30 },
+        { id: "y1", group: "constraints", topic: "mixed", points: 10 },
+        { id: "z1", group: "outcome", topic: "pure", points: 50 },
+        { id: "p1", group: "constraints", topic: "keep", points: 10 },
+      ],
+      topics: [
+        { id: "mixed", label: "Mixed topic", points: 40 },
+        { id: "pure", label: "Outcome topic", points: 50 },
+        { id: "keep", label: "Preservation", points: 10 },
+      ],
+    };
+    const input = fixture({ caseId: "mixed-01", rubric, pairs: [
+      { baseline: ["y1", "p1"], treatment: ["x1", "y1", "z1"] },
+      { baseline: ["y1", "p1"], treatment: ["z1", "y1", "p1"] },
+    ] });
+    const out = renderScoredSummaryMarkdown(documentOf(input));
+    expect(out).toContain("| `mixed-01` | x1 | Google Gemini 3.8 Flash | 0/30 | 15/30 |");
+    expect(out).toContain("| `mixed-01` | Outcome topic | Google Gemini 3.8 Flash | 0/50 | 50/50 |");
+    expect(out).toContain("**0/80** | **65/80**");
+    expect(out).not.toMatch(/Mixed topic|Preservation|y1|p1/);
+    // Score is the full accuracy: baseline 20, treatment mean of 90 and 70 points.
+    expect(out).toContain("| Score | Google Gemini 3.8 Flash | 20% | 80% | +60% |");
+  });
+
+  it("projects ungrouped outcome checks and rubrics without topics, with declared IDs as labels", () => {
+    const rubric: Rubric = { rubricVersion: "v0.2", checks: [
+      { id: "has-file", group: "outcome", points: 50 }, { id: "right-keys", group: "outcome", points: 30 },
+      { id: "no-extra", group: "constraints", points: 20 } ] };
+    const { report } = fixture({ caseId: "plain-01", rubric, pairs: [{ baseline: [], treatment: ["has-file", "no-extra"] }] });
+    const rows = projectOutcomeChecks(rubric, report.pairs);
+    expect(rows.rows.map((r) => [r.label, r.baseline, r.treatment, r.max])).toEqual([["has-file", 0, 50, 50], ["right-keys", 0, 0, 30]]);
+    expect(rows.totals).toEqual({ baseline: 0, treatment: 50 });
+    expect(rows.max).toBe(80);
+  });
+
+  it("fails closed rather than redistributing points when checks disagree with the sealed group total", () => {
+    const flat = FLAT_A;
+    const { report } = fixture({ caseId: "dns-migration-02", rubric: flat, pairs: [{ baseline: [], treatment: ["a1", "b1"] }] });
+    const treatment = report.pairs[0]!.conditions.find((c) => c.conditionId === "treatment")!;
+    // Tamper in memory: the verified check results claim c1 passed, but the sealed score says it did not.
+    attachConditionCheckResults(treatment, flat.checks.map((c) => ({ id: c.id, passed: ["a1", "b1", "c1"].includes(c.id) })));
+    expect(() => projectOutcomeChecks(flat, report.pairs)).toThrow(/do not agree/);
+  });
+
+  it("keeps unavailable data factual: no check results show n/a, and a missing model/task stay explicit", () => {
+    const { report, scored } = fixture({ caseId: "dns-migration-02", rubric: FLAT_A, pairs: [{ baseline: [], treatment: ALL_A }] });
+    const entry = buildSummaryEntry({ report: { ...report, target: undefined, caseScenario: undefined }, scored, frozenPrompt: null, reportUrl: "https://github.com/example/evals/blob/HEAD/x" });
+    const out = renderScoredSummaryMarkdown({ skillLabel: "ops-skill", entries: [entry] });
+    expect(out).toContain("Task description unavailable");
+    expect(out).toContain("| Score | n/a |");
+    // Without recorded check results individual rows cannot be shown faithfully: n/a, not guessed.
+    const bare = createConditionReport("treatment", { rubricScore: scoreWithRubric(RUBRIC_A, RUBRIC_A.checks.map((c) => ({ id: c.id, passed: true, message: "" }))) });
+    expect(projectOutcomeChecks(FLAT_A, [pairOf(null, bare)]).rows[0]!.treatment).toBeNull();
+  });
+
+  it("renders several distinct entries in the given order with their own metrics, links and provenance, and no overall score", () => {
+    const one = fixture({ caseId: "dns-migration-02", skill: "ops-skill", rubric: RUBRIC_A, treeHash: "11".repeat(32), pairs: [{ baseline: [], treatment: ALL_A }] });
+    const two = fixture({
+      caseId: "alpha-case", skill: "ops-skill", rubric: RUBRIC_A, treeHash: "22".repeat(32),
+      target: { provider: "openai", model: "gpt-5", thinking: "off" },
+      pairs: [{ baseline: ["k1"], treatment: ["a1", "k1"] }, { baseline: ["k1"], treatment: ["a1", "k1"] }],
+    });
+    const out = renderScoredSummaryMarkdown(documentOf(one, two));
+    expect(out.indexOf("## dns-migration-02")).toBeLessThan(out.indexOf("## alpha-case"));
+    expect(out).toContain("| [dns-migration-02](#dns-migration-02) | Google Gemini 3.8 Flash | Dns-migration-02 title | 100% |");
+    expect(out).toContain("| [alpha-case](#alpha-case) | OpenAI GPT 5 | Alpha-case title | 25% |");
+    expect(out).toContain("Prompt of alpha-case.");
+    expect(out).toContain("Metrics are from a single pair.");
+    expect(out).toContain("Metrics are means across all two pairs.");
+    expect(out).toContain("| dns-migration-02 | [View full report](https://github.com/example/evals/blob/HEAD/eval-cases/dns-migration-02/runs/run-dns-migration-02/EVALS-FULL-REPORT.md) |");
+    expect(out).toContain("| alpha-case | [View full report](https://github.com/example/evals/blob/HEAD/eval-cases/alpha-case/runs/run-alpha-case/EVALS-FULL-REPORT.md) |");
+    expect(out).toMatch(new RegExp(`case=dns-migration-02 run=run-dns-migration-02 selection=single pairs=\\S+ treeSha256=${"11".repeat(32)} -->`));
+    expect(out).toMatch(new RegExp(`case=alpha-case run=run-alpha-case selection=mean pairs=run-alpha-case-r001,run-alpha-case-r002 treeSha256=${"22".repeat(32)} -->`));
+    expect(out).not.toContain("treeSha256=" + "cd".repeat(32));
+    expect(out).not.toMatch(/overall|average score|Mean Score/i);
+    // Full reports is the last visible section.
+    const visible = out.replace(/<!--[\s\S]*?-->/g, "");
+    expect(visible.lastIndexOf("## Full reports")).toBeGreaterThan(visible.lastIndexOf("### Outcome Checks"));
+  });
+
+  it("index links resolve to real section anchors, even for ids that collide with fixed headings", () => {
+    const ids = ["task", "results", "dns-migration-02", "case-index"];
+    const out = renderScoredSummaryMarkdown(documentOf(...ids.map((id) => fixture({ caseId: id, rubric: RUBRIC_A, pairs: [{ baseline: [], treatment: ALL_A }] }))));
+    // Reproduce GitHub's anchor assignment over the rendered headings.
+    const seen = new Map<string, number>();
+    const anchors: string[] = [];
+    for (const line of out.split("\n").filter((l) => /^#{1,3} /.test(l))) {
+      const base = line.replace(/^#+ /, "").toLowerCase().replace(/[^\p{L}\p{N} _-]/gu, "").replaceAll(" ", "-");
+      let slug = base;
+      let n = seen.get(base) ?? 0;
+      while (anchors.includes(slug)) slug = `${base}-${++n}`;
+      seen.set(base, n);
+      anchors.push(slug);
+    }
+    const linked = [...out.matchAll(/\| \[([^\]]+)\]\(#([^)]+)\) \|/g)].map((m) => [m[1]!, m[2]!]);
+    expect(linked.map(([id]) => id)).toEqual(ids);
+    const headingLines = out.split("\n").filter((l) => /^#{1,3} /.test(l));
+    for (const [id, anchor] of linked) {
+      const at = anchors.indexOf(anchor!);
+      expect(at, `anchor ${anchor} must exist`).toBeGreaterThanOrEqual(0);
+      expect(headingLines[at]).toBe(`## ${id}`);
+    }
+    expect(new Set(linked.map(([, a]) => a)).size).toBe(ids.length);
+  });
+
+  it("escapes pipes, line breaks and Markdown/HTML metacharacters in task text, labels and models", () => {
+    const rubric: Rubric = { rubricVersion: "v0.2", checks: [
+      { id: "o1", group: "outcome", topic: "t", points: 80 }, { id: "c1", group: "constraints", points: 20 } ],
+      topics: [{ id: "t", label: "Pipe | <b>bold</b> *star*\nline", points: 80 }] };
+    const input = fixture({ caseId: "esc-01", rubric, pairs: [{ baseline: [], treatment: ["o1", "c1"] }], target: { provider: "weird", model: "a|b<c>", thinking: "off" } });
+    const doc = documentOf(input);
+    const out = renderScoredSummaryMarkdown({ ...doc, skillLabel: "my_skill <x>", entries: [{ ...doc.entries[0]!, taskText: "Do `this` | <script>alert(1)</script>\nsecond line\n\n- not a list\n# not a heading", caseTitle: "t|<i>" }] });
+    expect(out).toContain("# my\\_skill \\<x\\> — Evaluation cases");
+    expect(out).toContain("Pipe \\| \\<b\\>bold\\</b\\> \\*star\\* line");
+    expect(out).toContain("Do \\`this\\` \\| \\<script\\>alert(1)\\</script\\>  \nsecond line");
+    expect(out).toContain("\\- not a list  \n\\# not a heading");
+    expect(out).not.toMatch(/<script>|<b>/);
+    expect(out).toContain("weird/a\\|b\\<c\\>");
+    for (const row of out.split("\n").filter((l) => l.startsWith("| `esc-01`"))) expect(row.replace(/\\\|/g, "").split("|").length).toBe(7);
+  });
+
+  it("binds the exact tree hash to its entry in a comment that cannot be broken out of", () => {
+    const input = fixture({ caseId: "weird--id>-->x", rubric: RUBRIC_A, runId: "run--1 -->", pairs: [{ baseline: [], treatment: ALL_A }] });
+    const out = renderScoredSummaryMarkdown(documentOf(input));
+    const comments = [...out.matchAll(/<!--(.*?)-->/g)];
+    expect(comments).toHaveLength(1);
+    const body = comments[0]![1]!;
+    expect(body).not.toContain("--");
+    expect(body).not.toContain(">");
+    expect(body).toContain(`treeSha256=${"cd".repeat(32)}`);
+    expect(decodeURIComponent(/case=(\S+)/.exec(body)![1]!)).toBe("weird--id>-->x");
+    expect(decodeURIComponent(/run=(\S+)/.exec(body)![1]!)).toBe("run--1 -->");
+    expect(out).not.toContain("AF-EVAL");
+    expect(out.endsWith(`-->\n`)).toBe(true);
+  });
+
+  it("does not throw on float drift when per-unit means are summed (12 pairs, x.25 / x.x5 means)", () => {
+    const rubric: Rubric = { rubricVersion: "v0.2", checks: [
+      { id: "a", group: "outcome", points: 1 }, { id: "b", group: "outcome", points: 1 },
+      { id: "c", group: "outcome", points: 1 }, { id: "d", group: "outcome", points: 77 },
+      { id: "k", group: "constraints", points: 20 } ] };
+    // a passes in 3 pairs, b in 4, c in 2: unit means sum to 0.7499999999999999 while the group mean is 0.75.
+    const pairs = Array.from({ length: 12 }, (_, i) => ({
+      baseline: [] as string[],
+      treatment: [...(i < 3 ? ["a"] : []), ...(i < 4 ? ["b"] : []), ...(i < 2 ? ["c"] : [])],
+    }));
+    const input = fixture({ caseId: "drift-01", rubric, pairs });
+    const out = renderScoredSummaryMarkdown(documentOf(input));
+    expect(out).toContain("**0/80** | **0.8/80**");
+    expect(out).toContain("| a | Google Gemini 3.8 Flash | 0/1 | 0.3/1 |");
+  });
+
+  it("fails closed in the verified adapter when the receipt carries no tree hash", () => {
+    const { report, scored } = fixture({ caseId: "dns-migration-02", rubric: RUBRIC_A, pairs: [{ baseline: [], treatment: ALL_A }] });
+    const { receiptManifest: _omit, ...without } = report;
+    expect(() => buildSummaryEntry({ report: without as RunReport, scored, frozenPrompt: "p", reportUrl: DETAILS_URL })).toThrow(/no manifest tree hash/);
+  });
+
+  it("keeps n/a tokens and session-derived / approximate annotations in the Results table", () => {
+    const out = renderScoredSummaryMarkdown(documentOf(fixture({
+      caseId: "dns-migration-02", rubric: RUBRIC_A,
+      pairs: [{ baseline: [], treatment: ALL_A }],
+      treatment: { consumedTokens: null, durationMs: null, sessionDurationMs: 7_000 },
+    })));
+    expect(out).toContain("| Cost: recorded tokens | Google Gemini 3.8 Flash | 1,000 | n/a | n/a |");
+    expect(out).toContain("| Latency | Google Gemini 3.8 Flash | 10,000 ms | 7,000 ms (session-derived) | −3,000 ms (−30.0%, approximate) |");
+  });
+
+  it("neutralizes setext underline lines in task text", () => {
+    const doc = documentOf(fixture({ caseId: "dns-migration-02", rubric: RUBRIC_A, pairs: [{ baseline: [], treatment: ALL_A }] }));
+    const out = renderScoredSummaryMarkdown({ ...doc, entries: [{ ...doc.entries[0]!, taskText: "Title\n---\nOther\n===\n-" }] });
+    expect(out).toContain("Title  \n\\---  \nOther  \n\\===  \n\\-");
+  });
+
+  it("buildSummaryDocument yields one entry labelled with the frozen skill", () => {
+    const { report, scored } = fixture({ caseId: "dns-migration-02", skill: "ops-skill", rubric: RUBRIC_A, pairs: [{ baseline: [], treatment: ALL_A }] });
+    const doc = buildSummaryDocument({ report, scored, frozenPrompt: "p", reportUrl: DETAILS_URL });
+    expect(doc.skillLabel).toBe("ops-skill");
+    expect(doc.entries).toHaveLength(1);
+    expect(doc.entries[0]!.treeSha256).toBe(RUN_HASH.replaceAll("ab", "cd"));
   });
 });

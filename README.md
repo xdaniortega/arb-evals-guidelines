@@ -75,7 +75,7 @@ pnpm eval -- --case network-config-01 \
   --limit wallClockMs=300000
 ```
 
-To reuse the skill of an existing run, point `SKILL_PATH` at its frozen copy, for example `eval-cases/network-config-01/runs/20260924T151721Z-bfb34c20/inputs/frozen/skill`.
+To reuse the skill of an existing run, point `SKILL_PATH` at its frozen copy, for example `eval-cases/network-config-01/runs/20261105T124949Z-cfc819ba/inputs/frozen/skill`.
 
 **b. Inspect the run** (reads saved evidence; sends no model requests). This prints the paths of the full agent transcript, a `.jsonl` file and an `.html` file you can open in a browser:
 

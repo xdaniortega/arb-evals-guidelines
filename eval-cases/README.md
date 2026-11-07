@@ -146,8 +146,8 @@ pnpm eval:report  -- --receipt "<receipt-path>" --checks                        
 
 Each run folder holds two generated files next to `receipt.json`:
 
-- **`EVALS.md`**: the summary (header with the run hash, badge, pillar table, scenario and **Accuracy Outcome Checks**). **The only file to share.**
-- **`EVALS-FULL-REPORT.md`**: the complete report (case description, all tables, per-pair results, verification, operational details, reproducibility). It stays in this repository; `EVALS.md` links to it.
+- **`EVALS.md`**: the summary (skill title, case index, and per case the task, results and **Outcome Checks**, then links to the full reports; the run hash is kept in a hidden comment). **The only file to share.**
+- **`EVALS-FULL-REPORT.md`**: the results-first report of one run (results, a Pair explorer with every recorded pair, task and rubric, execution environment, verification and export guidance; no per-execution operational record). It stays in this repository; `EVALS.md` links to it.
 
 ```bash
 pnpm eval:export -- --receipt <receipt>                                   # (re)generate both files in the run folder

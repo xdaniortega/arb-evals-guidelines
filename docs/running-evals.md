@@ -38,7 +38,7 @@ Evaluation pillars:
 
 - `--checks` (on `eval` or `eval:report`) adds the **Accuracy Outcome Checks** table: one row per display topic, with an **Outcome total**.
 - An arm without grading evidence shows `n/a` for accuracy. If its recorded duration is missing, latency comes from the native session, labelled `(session-derived)`, and changes using it are labelled `approximate`.
-- For a complete real report, see [this run's EVALS-FULL-REPORT.md](../eval-cases/network-config-01/runs/20260924T170734Z-b115674e/EVALS-FULL-REPORT.md).
+- For a complete real report, see [this run's EVALS-FULL-REPORT.md](../eval-cases/network-config-01/runs/20261105T124949Z-cfc819ba/EVALS-FULL-REPORT.md).
 
 ## Inspect a run
 
@@ -93,8 +93,8 @@ pnpm eval:report  -- --receipt "<receipt-path>" --checks                        
 
 Each run folder holds two generated files next to `receipt.json`:
 
-- **`EVALS.md`**: the summary (header with the run hash, badge, pillar table, scenario and **Accuracy Outcome Checks**). **The only file to share.**
-- **`EVALS-FULL-REPORT.md`**: the complete report (case description, all tables, per-pair results, verification, operational details, reproducibility). It stays in this repository; `EVALS.md` links to it.
+- **`EVALS.md`**: the summary, titled `# <skill name> — Evaluation cases`: a **Case index**, then for each evaluated case its task, a **Results** table (Score, recorded tokens, latency; Baseline, Treatment, Change) and its **Outcome Checks**, and a final **Full reports** table linking each case's full report. Score is the accuracy result, and its change is the arithmetic difference of the two scores (20% to 69% is `+49%`). There is no badge or run header. **The only file to share.**
+- **`EVALS-FULL-REPORT.md`**: the report of one case and run, results first. It opens with a run context table (case, run, skill, agent, LLM model and every recorded pair), then has six sections: **Results** (Score, recorded tokens and latency for Baseline and Treatment with the change, then Execution status, Score composition, Outcome Checks and Cost and latency detail), **Pair explorer** (an index of every recorded pair, each linking to a collapsible block with that pair's status, Score composition, Outcome Checks and cost and latency, also for a single pair), **Task and rubric** (the frozen prompt, case definition and frozen checks and weights), **Execution environment** (readable and registered model, source, build, image digests, skill hashes, limits and elapsed time), **Verify this report** (the manifest tree hash and the receipt manifest file hash, and the verification command) and **Export and comparable runs**. The change in Score is the arithmetic difference in percentage points. If grading is incomplete the report says so, shows `n/a` for the missing cells and does not compute a Score change. Legacy runs keep their original recorded scores and are not reweighted. It does not contain the per-execution operational record (requests, tool steps, stop causes, cleanup, redactions); `pnpm eval:report --details` and `eval:inspect` still show those. It stays in this repository; `EVALS.md` links to it.
 
 ```bash
 pnpm eval:export -- --receipt <receipt>                                   # (re)generate both files in the run folder
@@ -103,7 +103,7 @@ pnpm eval:export -- --check --all                                         # fail
 ```
 
 - Evidence is verified first; nothing is written if verification fails. Export runs no git commands.
-- Both files are outside the hash chain, regenerated from sealed evidence, and carry the run's `manifest.treeSha256`.
+- Both files are outside the hash chain, regenerated from sealed evidence, and carry the run's `manifest.treeSha256`. The full report shows it in its "Verify this report" section. `EVALS.md` keeps it out of sight in an `<!-- EVALS-ENTRY ... treeSha256=<hash> -->` HTML comment at the end of the summary (inside the generated block), bound to that entry's case, run and rendered pairs; view the raw file to read it.
 - Without `--pair`, a multi-pair run exports the mean over every pair. Export is refused if any rendered pair has an ungraded arm.
 - With `--to`, the summary goes between `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->`; authored text outside the markers is kept, and repeating the export changes no bytes. Symlinked destinations are refused.
 - The full-report link uses `--repo-url` or the `repository` field of `package.json`. It resolves once the run folder is merged, so merge this repository's PR before the skills repository's.

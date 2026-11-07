@@ -665,6 +665,29 @@ export interface ConditionReport {
   readonly sessionDurationMs?: number | null;
 }
 
+/** Individual validator check outcome kept beside (not inside) a condition report. */
+export interface ConditionCheckResult {
+  readonly id: string;
+  readonly passed: boolean;
+}
+
+/**
+ * Verified per-check pass/fail results of graded arms, keyed by the condition object. Kept
+ * out of `ConditionReport` so the serialized report JSON does not change; the summary
+ * export reads it to project individual outcome checks.
+ */
+const CONDITION_CHECK_RESULTS = new WeakMap<ConditionReport, readonly ConditionCheckResult[]>();
+
+export function attachConditionCheckResults(condition: ConditionReport, results: readonly ConditionCheckResult[]): ConditionReport {
+  CONDITION_CHECK_RESULTS.set(condition, results);
+  return condition;
+}
+
+/** Validator check results of a graded arm, or `null` when none were recorded. */
+export function conditionCheckResults(condition: ConditionReport): readonly ConditionCheckResult[] | null {
+  return CONDITION_CHECK_RESULTS.get(condition) ?? null;
+}
+
 export interface PairReport {
   readonly pairId: string;
   readonly repetition: number;
@@ -1055,7 +1078,7 @@ export async function buildRunReport(
         }
       }
 
-      conditionReports.push({
+      conditionReports.push(attachConditionCheckResults({
         conditionId: condition.conditionId,
         status: condition.status,
         gradeable: condition.gradeable,
@@ -1088,7 +1111,7 @@ export async function buildRunReport(
           ? (condition.stopCause as StopCause)
           : "unknown",
         providerStopReason: typeof condition.providerStopReason === "string" ? condition.providerStopReason : null,
-      });
+      }, validation !== null && validation.status === "graded" ? validation.checks.map((c) => ({ id: c.id, passed: c.passed })) : []));
       grades.push({
         conditionId: condition.conditionId,
         gradeable: condition.gradeable,
@@ -1551,7 +1574,8 @@ export function formatRunReport(
 
   const exportCommand = `pnpm eval:export --receipt ${report.receiptPath}`;
 
-  // Rubric-scored Markdown output (same layout as the published EVALS.md) for single-pair runs.
+  // Rubric-scored Markdown output for single-pair runs: the `eval:report` layout from
+  // `renderScoredMarkdown`, not the skill-centred EVALS.md summary (`renderScoredSummaryMarkdown`).
   // Operational data stays in a footer, below the scored sections.
   if (markdown && report.scored && !report.isLegacy && !multiplePairs) {
     const footerLines = [
@@ -1573,8 +1597,9 @@ export function formatRunReport(
     });
   }
 
-  // Rubric-scored terminal output for single-pair runs: the same sections, labels and
-  // values as EVALS.md, followed by an operational footer.
+  // Rubric-scored terminal output for single-pair runs: the same scored sections, labels and
+  // values as the `eval:report` Markdown, followed by an operational footer. (EVALS.md is a
+  // separate, skill-centred document.)
   if (!markdown && report.scored && !report.isLegacy && !multiplePairs) {
     // A numbered heading separates reports only when several receipts are rendered together.
     const lines: string[] = options.runNumber === undefined ? [] : [`(${options.runNumber}) ${report.runId}`, ""];

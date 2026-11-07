@@ -1,0 +1,1 @@
+{"schemaVersion":1,"servers":[{"description":"Official Arbitrum documentation search and question answering","name":"arbitrumDocs","transport":"streamable_http","url":"https://mcp.inkeep.com/offchainlabs/mcp"}],"source":"agents/openai.yaml","sourceSha256":"1eb2afddc3d3942b520b1f0d774d2e017c826e90424c6e1e112d3adeee283182"}

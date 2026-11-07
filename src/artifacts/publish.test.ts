@@ -361,7 +361,7 @@ Coverage note survives verbatim.
     expect(contentAfterFirst).toContain("## Authored coverage notes\nCoverage note survives verbatim.");
     expect(contentAfterFirst).toContain(EVAL_BEGIN_MARKER);
     expect(contentAfterFirst).toContain(EVAL_END_MARKER);
-    expect(contentAfterFirst).toContain("# EVALS.MD:");
+    expect(contentAfterFirst).toContain("— Evaluation cases\n\n## Case index");
     expect(contentAfterFirst).not.toContain("Status:");
     expect(contentAfterFirst).not.toContain("Placeholder");
 
@@ -471,7 +471,7 @@ Some historical notes.
     ).rejects.toThrow(/Export refused/);
   });
 
-  it("publishes verified task-limit run with actual status and n/a measurements (no mock scores)", async () => {
+  it("publishes a verified task-limit run as a summary with its graded scores and no execution status or badge", async () => {
     // Run where treatment stops on task-limit
     const runResult = await sealRun(() => ({
       outcome: "task-limit",
@@ -489,11 +489,11 @@ Some historical notes.
     const evalsPath = join(tempSkillDir, "EVALS.md");
     const content = await readFile(evalsPath, "utf8");
 
-    // Must show task-limit status
+    // No execution status or badge in the summary; the scores are the real graded ones.
     expect(content).not.toContain("Status:");
-    // Badge must reflect task-limit status
-    expect(content).toMatch(/AF--Evaluation-task%20limit%20%C2%B7%20\d+%25-yellow/);
-    // Badge must NOT claim certification
+    expect(content).not.toMatch(/AF-Evaluation|img\.shields/);
+    expect(content).toContain("| Score | Google Fake Model 0 |");
+    // Must NOT claim certification
     expect(content).not.toContain("certified");
     expect(content).not.toContain("guaranteed");
     expect(content).not.toContain("approved");
@@ -502,7 +502,7 @@ Some historical notes.
     expect(content).not.toContain(runResult.receiptPath);
   });
 
-  it("renders both-arm status in EVALS.md for mixed case baseline task-limit and treatment completed", async () => {
+  it("keeps execution status out of EVALS.md for a baseline task-limit and treatment completed run, and still publishes its scores", async () => {
     const runResult = await sealRun((request) => ({
       outcome: request.conditionId === "baseline" ? "task-limit" : "completed",
       assistantText: request.conditionId === "baseline" ? "baseline task limit" : "treatment completed",
@@ -519,7 +519,9 @@ Some historical notes.
     const evalsPath = join(tempSkillDir, "EVALS.md");
     const content = await readFile(evalsPath, "utf8");
 
-    expect(content).not.toContain("Status:");
+    expect(content).not.toMatch(/Status:|task limit|Task limit|completed/);
+    expect(content).toContain("| Score | Google Fake Model 0 |");
+    expect(content).toContain("### Outcome Checks");
   });
 
   it("refuses to publish a run with an ungraded arm instead of publishing n/a", async () => {
@@ -549,14 +551,14 @@ Some historical notes.
     expect(result.pairIds).toEqual(report.pairs.map((pair) => pair.pairId));
 
     const content = await readFile(join(tempSkillDir, "EVALS.md"), "utf8");
-    // Header names every pair; nothing else about the table shape changes.
-    expect(content).toContain(`Run: ${report.runId} · Pairs ${labels.join(", ")}`);
-    expect(content).not.toContain("Pair r001  \n");
-    expect(content).not.toContain("repetitions)");
-    // Same table headers as a single-pair export: no extra columns or notes.
-    expect(content).toContain("| Pillar | Without this skill | With this skill | Change |");
-    expect(content).toContain("| Check | Without this skill | With this skill |");
-    expect(content).not.toContain("| Metric |");
+    // The note counts every pair; the hidden provenance names them all.
+    expect(content).toContain("Metrics are means across all three pairs.");
+    expect(content).toContain(`selection=mean pairs=${report.pairs.map((pair) => pair.pairId).join(",")}`);
+    expect(labels).toHaveLength(3);
+    // Same table headers as a single-pair export.
+    expect(content).toContain("| Metric | LLM model | Baseline | Treatment | Change |");
+    expect(content).toContain("| Eval case | Check | LLM model | Baseline | Treatment |");
+    expect(content).not.toContain("| Pillar |");
   });
 
   it("--pair on a multi-pair run publishes only that pair, unaffected by an ungraded pair elsewhere", async () => {
@@ -582,7 +584,9 @@ Some historical notes.
     expect(result.pairIds).toEqual([pair1Id]);
 
     const content = await readFile(join(tempSkillDir, "EVALS.md"), "utf8");
-    expect(content).toContain(`Run: ${report.runId} · Pair r001`);
+    expect(content).toContain("Metrics are from the explicitly selected pair r001 of 3.");
+    expect(content).toContain(`selection=single pairs=${pair1Id} `);
+    expect(content).not.toContain("means across");
   });
 
   it("refuses to publish the mean when any pair is ungraded, and names that pair", async () => {
@@ -604,7 +608,7 @@ Some historical notes.
     await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
   });
 
-  it("badge reflects status without claiming certification", async () => {
+  it("has no badge or operational header and does not claim certification", async () => {
     const runResult = await sealRun();
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
@@ -614,16 +618,9 @@ Some historical notes.
       to: tempSkillDir, repoUrl: REPO_URL,
     });
 
-    const evalsPath = join(tempSkillDir, "EVALS.md");
-    const content = await readFile(evalsPath, "utf8");
-
-    // Check badge URL presence
-    expect(content).toMatch(/!\[AF-Evaluation: completed · \d+%\]\(https:\/\/img\.shields\.io\/badge\/AF--Evaluation-/);
-
-    // Non-certifying checks: badge should not claim certification or guaranteed improvement
-    expect(content).not.toMatch(/badge\/AF--Evaluation.*certif/i);
-    expect(content).not.toMatch(/badge\/AF--Evaluation.*guarantee/i);
-    expect(content).not.toMatch(/badge\/AF--Evaluation.*approved/i);
+    const content = await readFile(join(tempSkillDir, "EVALS.md"), "utf8");
+    expect(content).not.toMatch(/AF-Evaluation|img\.shields|certif|guarantee|approved/i);
+    expect(content).not.toMatch(/^(Agent|Skill|Run|Status):/m);
   });
 
   it("ordinary eval:report does not write or modify EVALS.md", async () => {
@@ -793,11 +790,10 @@ Some historical notes.
       expect(content).toContain(EVAL_BEGIN_MARKER);
       expect(content).toContain(EVAL_END_MARKER);
       expect(content).toContain("Authored text");
-      expect(content).toContain("### Accuracy Outcome Checks");
-      expect(content).not.toContain("### Outcome checks");
+      expect(content).toContain("### Outcome Checks");
       expect(content).toContain("Correct network identities");
       expect(content).toContain(
-        `For further details or to check run reproducibility see: ${REPO_URL}/blob/HEAD/eval-cases/${(await buildRunReport(runResult.receiptPath)).caseId}/runs/${runResult.runId}/EVALS-FULL-REPORT.md`,
+        `[View full report](${REPO_URL}/blob/HEAD/eval-cases/${(await buildRunReport(runResult.receiptPath)).caseId}/runs/${runResult.runId}/EVALS-FULL-REPORT.md)`,
       );
     });
 
@@ -850,17 +846,23 @@ Some historical notes.
     await exportRun({ receiptPath: runResult.receiptPath, to: dir, repoUrl: REPO_URL });
     const created = await readFile(join(dir, "EVALS.md"), "utf8");
     expect(created.startsWith(`${EVAL_BEGIN_MARKER}\n> **Warning:** TEST-DOUBLE EVIDENCE`)).toBe(true);
-    expect(created).toContain("# EVALS.MD:");
+    expect(created).toContain("— Evaluation cases\n\n## Case index");
     expect(created.endsWith(`${EVAL_END_MARKER}\n`)).toBe(true);
     expect(created).not.toContain("### Accuracy\n");
     expect(created).not.toContain("### Cost and latency");
-    expect(created).toMatch(/^Run: .* · Hash: [0-9a-f]{64}  $/m);
+    // The exact verified tree hash survives in the hidden, entry-bound comment inside the block.
+    const receipt = JSON.parse(await readFile(runResult.receiptPath, "utf8")) as { manifest: { treeSha256: string } };
+    expect(created).toContain(
+      `<!-- EVALS-ENTRY case=${report.caseId} run=${report.runId} selection=single pairs=${report.pairs[0]!.pairId} treeSha256=${receipt.manifest.treeSha256} -->\n${EVAL_END_MARKER}`,
+    );
+    expect(created.indexOf("EVALS-ENTRY")).toBeGreaterThan(created.indexOf(EVAL_BEGIN_MARKER));
     const url = buildRunReportUrl({
       repoUrl: REPO_URL,
       runRelativeDir: `eval-cases/${report.caseId}/runs/${report.runId}`,
       target: "full-report",
     });
-    expect(created).toContain(`For further details or to check run reproducibility see: ${url}\n${EVAL_END_MARKER}`);
+    expect(created).toContain(`| ${report.caseId} | [View full report](${url}) |\n`);
+    expect(created.replace(/<!--[\s\S]*?-->/g, "").trimEnd().endsWith(`[View full report](${url}) |`)).toBe(true);
 
     const named = join(dir, "OUT.md");
     await exportRun({ receiptPath: runResult.receiptPath, to: named, repoUrl: REPO_URL });

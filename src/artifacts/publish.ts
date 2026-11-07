@@ -12,13 +12,14 @@
  * - Results section is bounded between HTML comments and replaced idempotently.
  * - Exact marker validation fails closed on mismatched, reversed, nested, duplicate, or malformed markers.
  * - Authored coverage notes outside the markers are preserved verbatim byte-for-byte.
- * - Real status and available measurements are published; never substitutes mock scores.
+ * - Real scores and available measurements are published (no status badge is rendered); never substitutes mock scores.
  * - Both arms must be graded for every rendered pair: an ungraded arm is refused rather than
  *   published as `n/a`, or silently dropped out of a mean.
  * - A multi-pair run with no `--pair` publishes the mean over every pair; `--pair` publishes
  *   one named pair. Verification (`verifyRun`) always covers the whole run either way; pair
  *   selection only narrows what gets rendered, never what gets verified.
- * - Badges describe execution/grading status and do not claim certification.
+ * - The summary carries no run details; each entry's exact manifest tree hash sits in a
+ *   non-visible `EVALS-ENTRY` comment inside the generated block.
  * - Receipt paths and operational footers remain outside EVALS.md.
  */
 
@@ -27,9 +28,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { EvalError } from "../core/types.ts";
 import { buildRunReport, peekRunPairs, resolvePairSelection } from "./queries.ts";
 import type { PairReport } from "./queries.ts";
-import { buildRunReportUrl } from "../core/report-links.ts";
-import { FULL_REPORT_FILE, SUMMARY_FILE, checkRunExports, runRepoRelativeDir } from "./run-exports.ts";
-import { renderScoredSummaryMarkdown } from "./scored-report.ts";
+import { FULL_REPORT_FILE, SUMMARY_FILE, checkRunExports, renderSummaryForReport } from "./run-exports.ts";
 
 export const EVAL_BEGIN_MARKER = "<!-- AF-EVAL:BEGIN generated -->";
 export const EVAL_END_MARKER = "<!-- AF-EVAL:END generated -->";
@@ -334,16 +333,7 @@ export async function exportRun(options: ExportOptions): Promise<ExportResult> {
   }
 
   // 3. Render the summary (no operational footer, no receipt path, no host paths)
-  const detailsUrl = buildRunReportUrl({
-    repoUrl: options.repoUrl,
-    runRelativeDir: runRepoRelativeDir(report),
-    target: "full-report",
-  });
-  const renderedMarkdown = renderScoredSummaryMarkdown(report.scored, {
-    detailsUrl,
-    testDouble: report.testDouble,
-    runHash: report.receiptManifest?.treeSha256 ?? report.verification.receiptManifestSha256,
-  });
+  const renderedMarkdown = await renderSummaryForReport(receiptPath, report, { repoUrl: options.repoUrl });
 
   // 4. Fail-closed destination validation
   const { targetPath, relativeTargetPath } = await resolveExportDestination(options.to);

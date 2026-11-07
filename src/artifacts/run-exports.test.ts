@@ -17,7 +17,7 @@ import { createFakeSandbox } from "../sandboxes/fake.ts";
 import { createInProcessValidatorRunner } from "../runner/validation.ts";
 import { disposeRunWorkDir, runPairedEvaluation } from "../runner/run.ts";
 import type { RunResult } from "../runner/run.ts";
-import { verifyRun } from "./queries.ts";
+import { buildRunReport, verifyRun } from "./queries.ts";
 import { checkRunExports, renderRunExports, runRepoRelativeDir, writeRunExports } from "./run-exports.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -69,9 +69,7 @@ const golden = (name: string, actual: string): void => {
 function normalize(text: string): string {
   return text
     .replace(/\b[0-9a-f]{64}\b/g, "<sha256>")
-    .replace(/ · Hash: [0-9a-f]{64}/g, " · Hash: <hash>")
-    .replace(/durationMs=(\d+|null)/g, "durationMs=<ms>")
-    .replace(/^- Elapsed: .*$/gm, "- Elapsed: <elapsed>");
+    .replace(/^\| Elapsed \| .* \|$/gm, "| Elapsed | <elapsed> |");
 }
 
 const mixedScript = (): FakeHarnessScript => {
@@ -120,15 +118,100 @@ describe("run-folder exports", () => {
     const result = await sealRun();
     const receipt = JSON.parse(await readFile(result.receiptPath, "utf8")) as { manifest: { treeSha256: string; fileSha256: string } };
     const { full, summary } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
-    expect(full).toContain(`Run hash (manifest tree sha256): ${receipt.manifest.treeSha256}`);
-    expect(full).toContain(`Receipt manifest file sha256: ${receipt.manifest.fileSha256}`);
+    expect(full).toContain(`| Run hash (manifest tree sha256) | \`${receipt.manifest.treeSha256}\` |`);
+    expect(full).toContain(`| Receipt manifest file sha256 | \`${receipt.manifest.fileSha256}\` |`);
     expect(full).toContain("## Verify this report");
     expect(full).toContain(`pnpm eval:report -- --receipt eval-cases/network-config-01/runs/${result.runId}/receipt.json --checks`);
     expect(full).toContain("**`EVALS.md` is the file to export or copy into the skills repository.**");
-    expect(summary).toContain(` · Hash: ${receipt.manifest.treeSha256}  \n`);
+    // The summary keeps the exact tree hash only in a non-visible, entry-bound comment.
+    expect(summary).toContain(
+      `<!-- EVALS-ENTRY case=network-config-01 run=${result.runId} selection=single pairs=${result.runId}-r001 treeSha256=${receipt.manifest.treeSha256} -->`,
+    );
+    expect(summary!.replace(/<!--[\s\S]*?-->/g, "")).not.toContain(receipt.manifest.treeSha256);
     expect(summary).not.toContain("Status:");
+    expect(summary).not.toMatch(/Hash:|Run:|Agent:|AF-Evaluation|img\.shields/);
     expect(full).not.toContain("## Per-pair results");
+    expect(full).toContain("## Pair explorer");
     expect(full).not.toMatch(/determinis|--from|guarantee/i);
+  });
+
+  it("lists every recorded pair once, for one, three and more than ten pairs, with no operational dump", async () => {
+    for (const repetitions of [1, 3, 11]) {
+      const result = await sealRun(undefined, repetitions);
+      const report = await buildRunReport(result.receiptPath);
+      const { full } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
+      const labels = report.pairs.map((pair) => pair.pairId.slice(pair.pairId.lastIndexOf("-") + 1));
+      expect(labels).toHaveLength(repetitions);
+      const headings = full.split("\n").filter((line) => /^#{1,3} /.test(line));
+      expect(headings).toEqual([
+        "# Network configuration migration — Full evaluation report",
+        "## Results",
+        "### Execution status",
+        "### Score composition",
+        "### Outcome Checks",
+        "### Cost and latency detail",
+        "## Pair explorer",
+        ...labels.map((label) => `### ${label}`),
+        "## Task and rubric",
+        "### Scoring rules and interpretation",
+        "### Frozen checks and weights",
+        "## Execution environment",
+        "## Verify this report",
+        "## Export and comparable runs",
+        "### Export",
+        "### Reproducibility",
+      ]);
+      expect([...full.matchAll(/^\| \[(r\d+)\]\(#(r\d+)\) \|/gm)].map((m) => [m[1], m[2]])).toEqual(labels.map((l) => [l, l]));
+      for (const pair of report.pairs) expect(full.match(new RegExp(`Pair ID: \`${pair.pairId}\``, "g"))).toHaveLength(1);
+      expect(full.match(/<details>/g)).toHaveLength(repetitions);
+      expect(full.match(/<\/details>/g)).toHaveLength(repetitions);
+      expect(full.match(/\*\*Score composition\*\*/g)).toHaveLength(repetitions);
+      expect(full.match(/\*\*Outcome Checks\*\*/g)).toHaveLength(repetitions);
+      expect(full.match(/\*\*Cost and latency\*\*/g)).toHaveLength(repetitions);
+      expect(full).toContain(`| Pairs | ${labels.join(", ")} |`);
+      expect(full).toContain(`--pair ${labels[0]}\n`);
+      expect(full).toContain(`| Repetitions | ${repetitions} |`);
+      // The runtime dump and its anchors are not part of this document.
+      expect(full).not.toMatch(/Operational|Runtime r\d|#runtime|toolSteps|providerRequests|redactions=|cleanup=|stopCause/i);
+      expect(full).not.toContain("AF-EVAL:");
+    }
+  });
+
+  it("keeps every pair visible and withholds the aggregate Score change when grading is partial", async () => {
+    const result = await sealRun(mixedScript(), 3);
+    const { full, summary } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
+    expect(summary).toBeNull();
+    expect(full).toContain("> EVALS.md was not generated: pair r002 has ungraded arm(s): baseline");
+    expect(full).toContain("Grading is incomplete: Baseline is graded in 1 of 3 pairs and Treatment in 1.");
+    expect(full).not.toMatch(/All pairs are graded|Means across all/);
+    expect(full).toMatch(/\| Score \| [^|]+ \| [^|]+ \| n\/a \|/);
+    expect(full).not.toContain("percentage points");
+    expect(full).toContain("| Baseline | Completed in 1 of 3 pairs; infrastructure failure in 1; not started in 1 | Graded in 1 of 3 pairs |");
+    expect(full).toContain("| Treatment | Not started in 2 of 3 pairs; completed in 1 | Graded in 1 of 3 pairs |");
+    expect(full).toContain("1 of 3 pairs have both arms graded");
+    expect(full).toContain("| [r002](#r002) | n/a | n/a | Infrastructure failure (not graded) | Not started (not graded) |");
+    expect(full).toContain("| [r003](#r003) | n/a | n/a | Not started (not graded) | Not started (not graded) |");
+    // Every recorded pair keeps its own block, and an ungraded pair shows unavailable cells, never zero.
+    for (const label of ["r001", "r002", "r003"]) expect(full).toContain(`### ${label}\n`);
+    const r002 = full.slice(full.indexOf("### r002\n"), full.indexOf("### r003\n"));
+    expect(r002).toContain("Not a valid comparison:");
+    expect(r002).toContain("Status: Baseline: infrastructure failure, grading unavailable · Treatment: not started, grading unavailable");
+    expect(r002).toContain("| **Score total** | **n/a** | **n/a** |");
+    expect(r002).toContain("| **Outcome total** | **n/a** | **n/a** |");
+  });
+
+  it("explains the Score change in percentage points for a single pair", async () => {
+    const result = await sealRun((request) => ({
+      outcome: request.conditionId === "baseline" ? "task-limit" : "completed",
+      assistantText: request.conditionId === "baseline" ? "limit" : "done",
+    }));
+    const { full } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
+    expect(full).toContain("Results of the single pair r001.");
+    expect(full).toContain("| Baseline | Task limit reached | Graded |");
+    expect(full).toContain("| Treatment | Completed | Graded |");
+    expect(full).toContain("Status: Baseline: task limit reached, graded · Treatment: completed, graded");
+    expect(full).not.toMatch(/AF-Evaluation|AF--Evaluation|img\.shields/);
+    expect(full).toMatch(/The Score change is \*\*0%\*\*, meaning \*\*0 percentage points\*\* \(\d+% − \d+%\)/);
   });
 
   it("detects a stale, missing, or non-regular export", async () => {
@@ -137,7 +220,7 @@ describe("run-folder exports", () => {
     const summaryPath = join(result.runDir, "EVALS.md");
     const original = await readFile(summaryPath, "utf8");
 
-    await writeFile(summaryPath, original.replace("Accuracy", "Accuracv"));
+    await writeFile(summaryPath, original.replace("Outcome total", "Outcome totaI"));
     expect(await checkRunExports(result.receiptPath, { repoUrl: REPO_URL })).toMatchObject({ ok: false, stale: ["EVALS.md"] });
 
     await rm(summaryPath);
@@ -170,18 +253,28 @@ describe("run-folder exports", () => {
     expect(await readFile(elsewhere, "utf8")).toBe("x");
   });
 
-  it("every non-heading, non-link line of EVALS.md appears in order in the full report", async () => {
+  it("summary and full report agree on the metrics, outcome points, model and source hash", async () => {
     for (const repetitions of [1, 3]) {
       const result = await sealRun(undefined, repetitions);
       const { summary, full } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
-      let cursor = 0;
-      const fullLines = full.split("\n");
-      for (const line of summary!.split("\n")) {
-        if (line.trim() === "" || line.startsWith("#") || line.includes("http")) continue;
-        const at = fullLines.indexOf(line, cursor);
-        expect(at, `missing in full report: ${line}`).toBeGreaterThanOrEqual(0);
-        cursor = at + 1;
+      const report = await buildRunReport(result.receiptPath);
+      const { pillars, treatmentAccuracy, baselineAccuracy } = report.scored!;
+      // Metrics: the same cells as the full report's pillar table.
+      expect(summary).toContain(`| ${pillars.cost.baseline} | ${pillars.cost.treatment} | ${pillars.cost.change} |`);
+      expect(summary).toContain(`| ${pillars.latency.baseline} | ${pillars.latency.treatment} | ${pillars.latency.change} |`);
+      expect(full).toContain(`| ${pillars.cost.label} | ${pillars.cost.baseline} | ${pillars.cost.treatment} | ${pillars.cost.change} |`);
+      expect(summary).toContain(`| ${pillars.accuracy.baseline} | ${pillars.accuracy.treatment} |`);
+      // Outcome points: every row of the full report's check table appears with the same points.
+      const outcomeMax = treatmentAccuracy!.outcome.max;
+      expect(summary).toContain(`**${baselineAccuracy!.outcome.got}/${outcomeMax}** | **${treatmentAccuracy!.outcome.got}/${outcomeMax}**`);
+      for (const row of report.scored!.checksTable!.rows) {
+        expect(summary).toContain(`| ${row.label} | Google Fake Model 0 | ${row.baseline} | ${row.treatment} |`);
+        expect(full).toContain(`| ${row.label} | ${row.baseline} | ${row.treatment} |`);
       }
+      expect(summary).toContain("Google Fake Model 0");
+      expect(summary).toContain(`treeSha256=${report.receiptManifest!.treeSha256}`);
+      expect(full).toContain(report.receiptManifest!.treeSha256);
+      expect(summary!.trimEnd().split("\n").filter((l) => l !== "" && !l.startsWith("<!--")).at(-1)).toMatch(/^\| network-config-01 \| \[View full report\]\(/);
     }
   });
 
@@ -198,8 +291,8 @@ describe("run-folder exports", () => {
     expect(exports.summary).toBeNull();
     expect(exports.summaryRefusal).toMatch(/pair r002 has ungraded arm\(s\): baseline/);
     expect(exports.full).toContain("EVALS.md was not generated: pair r002 has ungraded arm(s): baseline");
-    expect(exports.full).toContain("## Per-pair results");
-    expect(exports.full).toContain("Not gradeable:");
+    expect(exports.full).toContain("## Pair explorer");
+    expect(exports.full).toContain("Not a valid comparison:");
 
     await writeFile(join(result.runDir, "EVALS.md"), "stale\n");
     expect(await checkRunExports(result.receiptPath, { repoUrl: REPO_URL })).toMatchObject({ ok: false, unexpected: ["EVALS.md"], missing: ["EVALS-FULL-REPORT.md"] });

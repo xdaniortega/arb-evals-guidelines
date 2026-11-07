@@ -3,8 +3,10 @@
  *
  * Host-side only: this module defines the unified scored-report representation
  * derived from sealed run evidence (inputs/rubric.json and validation.json), and
- * renders it consistently: the terminal summary shows the same sections, labels and
- * values as the published EVALS.md.
+ * renders it consistently for the terminal (`eval:report`), the `eval:report` Markdown
+ * and JSON. The skill summary (EVALS.md) is a separate document layout
+ * (`renderScoredSummaryMarkdown`) fed by `summary-entry.ts`; EVALS-FULL-REPORT.md is
+ * rendered by `full-report.ts`.
  *
  * Accuracy = Outcome correctness and completeness (80) + Constraints and preservation (20).
  * Cost = recorded tokens; Latency = duration. Every cell comes from sealed evidence or is `n/a`.
@@ -115,8 +117,6 @@ export interface ScoredReportModel {
   readonly skillLabel: string;
   readonly status: string;
   readonly statusLine: string;
-  readonly badgeUrl: string;
-  readonly badgeAlt: string;
   readonly rubricVersion?: string;
   readonly isLegacy: boolean;
   readonly legacyLabel?: string;
@@ -227,7 +227,7 @@ export function formatSignedAccuracyDiff(diff: number | null): string {
 }
 
 /** Readable execution status of one arm, e.g. `task limit reached` or `interrupted`. */
-function executionPhrase(condition: ConditionReport | undefined): string {
+export function executionPhrase(condition: ConditionReport | undefined): string {
   if (condition === undefined) return "missing";
   switch (condition.status) {
     case "completed":
@@ -241,40 +241,6 @@ function executionPhrase(condition: ConditionReport | undefined): string {
     default:
       return condition.status;
   }
-}
-
-function badgeStatus(condition: ConditionReport | undefined, fallback: string): { text: string; color: string } {
-  const phrase = condition === undefined ? fallback : (MEAN_ARM_STATUS.get(condition)?.badgePhrase ?? executionPhrase(condition));
-  switch (phrase) {
-    case MIXED_STATUS:
-      return { text: MIXED_STATUS, color: "yellow" };
-    case "completed":
-      return { text: "completed", color: "blue" };
-    case "task limit reached":
-      return { text: "task limit", color: "yellow" };
-    case "interrupted":
-      return { text: "interrupted", color: "orange" };
-    case "infrastructure failure":
-      return { text: "infrastructure failure", color: "red" };
-    default:
-      return { text: phrase, color: "lightgrey" };
-  }
-}
-
-const shieldsEscape = (text: string): string => encodeURIComponent(text.replaceAll("-", "--").replaceAll("_", "__"));
-
-/** Shields badge `AF-Evaluation | <status> · <treatment accuracy>%`. */
-export function generateBadge(
-  condition: ConditionReport | undefined,
-  fallbackStatus: string,
-  accuracy: number | null,
-): { readonly url: string; readonly alt: string } {
-  const { text, color } = badgeStatus(condition, fallbackStatus);
-  const message = accuracy === null ? text : `${text} · ${Math.round(accuracy)}%`;
-  return {
-    url: `https://img.shields.io/badge/AF--Evaluation-${shieldsEscape(message)}-${color}`,
-    alt: `AF-Evaluation: ${message}`,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -321,8 +287,6 @@ function meanOrNull(values: readonly (number | null | undefined)[]): number | nu
   return nums.length === 0 ? null : nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-const MIXED_STATUS = "mixed";
-
 /**
  * Per-arm aggregate facts for a synthesized mean condition, keyed by that condition
  * object. Kept out of `ConditionReport` so the evidence read model is not widened.
@@ -330,8 +294,6 @@ const MIXED_STATUS = "mixed";
 interface MeanArmStatus {
   /** Status phrase for the header, e.g. `completed` or `completed in 2 of 3 pairs, task limit reached in 1`. */
   readonly executionPhrase: string;
-  /** Badge phrase: the shared phrase when every pair agrees, otherwise `mixed`. */
-  readonly badgePhrase: string;
   readonly gradedPairs: number;
   readonly derivedPairs: number;
   readonly totalPairs: number;
@@ -400,10 +362,8 @@ function meanCondition(pairs: readonly PairReport[], conditionId: ConditionId): 
     sessionDurationMs: derived ? roundedMeanMs : null,
   };
   const phrases = conditions.map((c) => executionPhrase(c));
-  const uniform = new Set(phrases).size <= 1;
   MEAN_ARM_STATUS.set(mean, {
     executionPhrase: aggregatePhrase(phrases),
-    badgePhrase: uniform ? (phrases[0] ?? "missing") : MIXED_STATUS,
     gradedPairs: conditions.filter((c) => c.gradeable && (c.rubricScore ?? null) !== null).length,
     derivedPairs: durations.filter((d) => d.derived).length,
     totalPairs: conditions.length,
@@ -582,13 +542,10 @@ export function buildScoredReport(
       c !== undefined && c.gradeable && c.score !== null ? Math.round(c.score * 100) : null;
     const baselineAcc = legacyAccuracy(baselineCond);
     const treatmentAcc = legacyAccuracy(treatmentCond);
-    const badge = generateBadge(treatmentCond, report.status, treatmentAcc);
     const total = (acc: number | null): string => bold(acc !== null ? `${acc}/100 — ${acc}%` : NA);
     return {
       ...common,
       statusLine: buildStatusLine(baselineCond, treatmentCond, (c) => legacyAccuracy(c) !== null),
-      badgeUrl: badge.url,
-      badgeAlt: badge.alt,
       isLegacy: true,
       legacyLabel: LEGACY_RESULT_LABEL,
       pillars: buildPillars(baselineCond, treatmentCond, baselineAcc, treatmentAcc),
@@ -609,7 +566,6 @@ export function buildScoredReport(
   const treatmentAccuracy = isMean
     ? meanArmAccuracy(rubric, selection.pairs, "treatment")
     : buildArmAccuracy(rubric, armScore(treatmentCond));
-  const badge = generateBadge(treatmentCond, report.status, treatmentAccuracy.total.got);
 
   const accuracyTable: ScoredAccuracyTable = {
     rows: RUBRIC_GROUPS.map((id) => ({
@@ -647,8 +603,6 @@ export function buildScoredReport(
   return {
     ...common,
     statusLine: buildStatusLine(baselineCond, treatmentCond, (c) => armScore(c) !== null),
-    badgeUrl: badge.url,
-    badgeAlt: badge.alt,
     rubricVersion: rubric.rubricVersion,
     isLegacy: false,
     rubric,
@@ -694,10 +648,6 @@ export function renderScoredMarkdown(
     readonly checks?: boolean;
     readonly details?: boolean;
     readonly footer?: string;
-    /** First-line heading text; defaults to `EVALS.MD: <case title>`. */
-    readonly heading?: string;
-    /** Sealed manifest tree sha256, appended to the `Run:` line. */
-    readonly runHash?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];
@@ -707,8 +657,8 @@ export function renderScoredMarkdown(
     lines.push(`> **Warning:** ${model.legacyLabel ?? LEGACY_RESULT_LABEL}\n`);
   }
 
-  lines.push(`# ${options.heading ?? `EVALS.MD: ${model.caseTitle}`}\n`);
-  pushHeaderBlock(lines, model, table, { runHash: options.runHash ?? null });
+  lines.push(`# EVALS.MD: ${model.caseTitle}\n`);
+  pushHeaderBlock(lines, model, table);
 
   lines.push("### Accuracy\n");
   table(["Check", ...ARM_HEADERS], [...model.accuracyTable.rows, model.accuracyTable.totalRow].map(armRow));
@@ -728,28 +678,270 @@ export function renderScoredMarkdown(
   return lines.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Skill summary document (EVALS.md): one index plus one section per case entry
+// ---------------------------------------------------------------------------
+
+/** One mean (or single-pair) Outcome Checks row; points are means over the rendered pairs. */
+export interface SummaryOutcomeRow {
+  readonly label: string;
+  readonly max: number;
+  readonly baseline: number | null;
+  readonly treatment: number | null;
+}
+
+export interface SummaryMetric {
+  readonly baseline: string;
+  readonly treatment: string;
+  readonly change: string;
+}
+
+/** Verified data of one evaluated case; the renderer only formats it. */
+export interface SummaryEntry {
+  readonly caseId: string;
+  readonly caseTitle: string;
+  /** Readable model label for every row of this entry. */
+  readonly modelLabel: string;
+  /** Frozen task description; `null` renders an explicit unavailable note. */
+  readonly taskText: string | null;
+  readonly selectionMode: "single" | "mean";
+  readonly pairLabels: readonly string[];
+  readonly pairIds: readonly string[];
+  /** Runs' total repetitions (not only the rendered ones). */
+  readonly repetitionCount: number;
+  readonly score: SummaryMetric;
+  readonly cost: SummaryMetric;
+  readonly latency: SummaryMetric;
+  readonly outcomeRows: readonly SummaryOutcomeRow[];
+  readonly outcomeTotal: { readonly max: number; readonly baseline: number | null; readonly treatment: number | null };
+  readonly reportUrl: string;
+  readonly runId: string;
+  /** Exact verified `manifest.treeSha256`. `null` is renderer-only input: the adapter refuses to build an entry without it. */
+  readonly treeSha256: string | null;
+  readonly testDouble: boolean;
+}
+
+export interface SummaryDocument {
+  readonly skillLabel: string;
+  /** Rendered in the given order; never sorted, merged or deduplicated. */
+  readonly entries: readonly SummaryEntry[];
+}
+
+const SUMMARY_ENTRY_COMMENT = "EVALS-ENTRY";
+
+/** Backslash-escapes Markdown/HTML metacharacters and flattens line breaks to spaces. */
+export function escapeMarkdownText(text: string): string {
+  return text.replace(/\r?\n|\r/g, " ").replace(/[\\`*_[\]<>|#&~]/g, (ch) => `\\${ch}`);
+}
+
+/** Multi-line prose: paragraphs are kept, single line breaks become hard breaks, line-start list syntax is escaped. */
+function escapeMarkdownParagraphs(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .trim()
+    .split(/\n{2,}/)
+    .map((paragraph) =>
+      paragraph
+        .split("\n")
+        .map((line) => escapeMarkdownText(line.trim()).replace(/^([-+]|\d+[.)])(?=\s|$)|^(?=[-=]+$)/, "\\$1"))
+        .join("  \n"),
+    )
+    .join("\n\n");
+}
+
+function codeSpan(text: string): string {
+  return /[`\r\n]/.test(text) ? escapeMarkdownText(text) : `\`${text.replaceAll("|", "\\|")}\``;
+}
+
+/** GitHub-style heading slug of the visible text. */
+function slugify(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\p{M} _-]/gu, "")
+    .replaceAll(" ", "-");
+}
+
+/** Assigns GitHub's unique anchors (`x`, `x-1`, `x-2`) in document order. */
+export function uniqueSlugs(headings: readonly string[]): string[] {
+  const used = new Set<string>();
+  const counts = new Map<string, number>();
+  return headings.map((heading) => {
+    const base = slugify(heading);
+    let slug = base;
+    let n = counts.get(base) ?? 0;
+    while (used.has(slug)) {
+      n += 1;
+      slug = `${base}-${n}`;
+    }
+    counts.set(base, n);
+    used.add(slug);
+    return slug;
+  });
+}
+
+const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+export const countWord = (n: number): string => NUMBER_WORDS[n] ?? String(n);
+
+/** Score change as the signed arithmetic difference of two 0–100 scores: `20%` → `69%` is `+49%`. */
+export function formatSummaryScoreChange(diff: number | null): string {
+  if (diff === null || !Number.isFinite(diff)) return NA;
+  const rounded = Math.round(diff * 10) / 10;
+  const display = Number.isInteger(rounded) ? String(Math.abs(rounded)) : Math.abs(rounded).toFixed(1);
+  if (rounded > 0) return `+${display}%`;
+  if (rounded < 0) return `${MINUS}${display}%`;
+  return "0%";
+}
+
+export function formatPoints(points: number | null, max: number): string {
+  if (points === null || !Number.isFinite(points)) return NA;
+  const rounded = Math.round(points * 10) / 10;
+  return `${rounded}/${max}`;
+}
+
+function metricsNote(entry: SummaryEntry): string {
+  const scope =
+    entry.selectionMode === "mean"
+      ? `Metrics are means across all ${countWord(entry.pairLabels.length)} pairs.`
+      : entry.repetitionCount > 1
+        ? `Metrics are from the explicitly selected pair ${entry.pairLabels[0] ?? NA} of ${entry.repetitionCount}.`
+        : "Metrics are from a single pair.";
+  return `${scope} Recorded tokens include cached input; latency measures time to completion or termination.`;
+}
+
+/** Percent-encodes everything outside `[A-Za-z0-9._,]` and breaks `--` runs so the value is comment-safe. */
+function commentValue(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/[!'()*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`)
+    .replace(/-(?=-)/g, "%2D");
+}
+
+/** Non-visible provenance of one entry: its case, run, rendered-pair selection and verified tree hash. */
+function entryComment(entry: SummaryEntry): string {
+  const fields = [
+    `case=${commentValue(entry.caseId)}`,
+    `run=${commentValue(entry.runId)}`,
+    `selection=${entry.selectionMode}`,
+    `pairs=${entry.pairIds.map(commentValue).join(",")}`,
+    `treeSha256=${entry.treeSha256 === null ? "unavailable" : commentValue(entry.treeSha256)}`,
+  ];
+  return `<!-- ${SUMMARY_ENTRY_COMMENT} ${fields.join(" ")} -->`;
+}
+
+function summaryTable(
+  headers: readonly string[],
+  aligns: readonly ("left" | "right")[],
+  rows: readonly (readonly string[])[],
+  spaced: boolean,
+): string[] {
+  const sep = aligns.map((a) => (a === "right" ? "---:" : "---"));
+  return [
+    `| ${headers.join(" | ")} |`,
+    spaced ? `| ${sep.join(" | ")} |` : `|${sep.join("|")}|`,
+    ...rows.map((row) => `| ${row.join(" | ")} |`),
+  ];
+}
+
 /**
- * The compact EVALS.md summary: header, badge, pillars, scenario and the
- * Accuracy Outcome Checks table, then a details link (the run hash sits on the `Run:` line; no Status line).
- * No Accuracy or Cost and latency sections and no markers.
+ * Renders the skill summary (`EVALS.md`): `# <skill> — Evaluation cases`, a case index, one
+ * section per entry (task, results, outcome checks) and a final table of full-report links.
+ * Pure: formatting only, no file or network access. Provenance (the exact manifest tree hash
+ * of each entry) is kept in non-visible `EVALS-ENTRY` comments after the last table.
  */
-export function renderScoredSummaryMarkdown(
-  model: ScoredReportModel,
-  options: {
-    readonly detailsUrl: string;
-    readonly testDouble?: boolean;
-    /** Sealed manifest tree sha256 from the receipt; the line is omitted when unavailable. */
-    readonly runHash?: string | null;
-  },
-): string {
+export function renderScoredSummaryMarkdown(document: SummaryDocument): string {
   const lines: string[] = [];
-  const table = markdownTable(lines);
-  if (options.testDouble) lines.push(`> **Warning:** ${TEST_DOUBLE_WARNING}\n`);
-  if (model.isLegacy) lines.push(`> **Warning:** ${model.legacyLabel ?? LEGACY_RESULT_LABEL}\n`);
-  lines.push(`# EVALS.MD: ${model.caseTitle}\n`);
-  pushHeaderBlock(lines, model, table, { omitStatus: true, runHash: options.runHash ?? null });
-  if (model.checksTable) pushChecksSection(lines, model.checksTable, table);
-  lines.push(`For further details or to check run reproducibility see: ${options.detailsUrl}`);
+  if (document.entries.some((entry) => entry.testDouble)) lines.push(`> **Warning:** ${TEST_DOUBLE_WARNING}`, "");
+
+  const headings: string[] = ["Case index"];
+  for (const entry of document.entries) headings.push(entry.caseId, "Task", "Results", "Outcome Checks");
+  headings.push("Full reports");
+  const slugs = uniqueSlugs(headings);
+  const caseSlug = (index: number): string => slugs[1 + index * 4]!;
+
+  lines.push(`# ${escapeMarkdownText(document.skillLabel)} — Evaluation cases`, "", "## Case index", "");
+  lines.push("Score in this index is the Treatment score.", "");
+  lines.push(
+    ...summaryTable(
+      ["Eval case", "LLM model", "Task", "Score"],
+      ["left", "left", "left", "right"],
+      document.entries.map((entry, index) => [
+        `[${escapeMarkdownText(entry.caseId)}](#${caseSlug(index)})`,
+        escapeMarkdownText(entry.modelLabel),
+        escapeMarkdownText(`${entry.caseTitle.charAt(0).toUpperCase()}${entry.caseTitle.slice(1)}`),
+        escapeMarkdownText(entry.score.treatment),
+      ]),
+      false,
+    ),
+    "",
+  );
+
+  for (const entry of document.entries) {
+    const model = escapeMarkdownText(entry.modelLabel);
+    lines.push(`## ${escapeMarkdownText(entry.caseId)}`, "", "### Task", "");
+    lines.push(
+      entry.taskText !== null && entry.taskText.trim() !== ""
+        ? escapeMarkdownParagraphs(entry.taskText)
+        : "Task description unavailable: the frozen inputs do not record it.",
+      "",
+    );
+    lines.push("### Results", "", metricsNote(entry), "");
+    const metricRow = (label: string, m: SummaryMetric): string[] => [
+      label,
+      model,
+      escapeMarkdownText(m.baseline),
+      escapeMarkdownText(m.treatment),
+      escapeMarkdownText(m.change),
+    ];
+    lines.push(
+      ...summaryTable(
+        ["Metric", "LLM model", "Baseline", "Treatment", "Change"],
+        ["left", "left", "right", "right", "right"],
+        [metricRow("Score", entry.score), metricRow("Cost: recorded tokens", entry.cost), metricRow("Latency", entry.latency)],
+        true,
+      ),
+      "",
+    );
+    const caseCell = codeSpan(entry.caseId);
+    lines.push("### Outcome Checks", "");
+    lines.push(
+      ...summaryTable(
+        ["Eval case", "Check", "LLM model", "Baseline", "Treatment"],
+        ["left", "left", "left", "right", "right"],
+        [
+          ...entry.outcomeRows.map((row) => [
+            caseCell,
+            escapeMarkdownText(row.label),
+            model,
+            formatPoints(row.baseline, row.max),
+            formatPoints(row.treatment, row.max),
+          ]),
+          [
+            caseCell,
+            bold("Outcome total"),
+            model,
+            bold(formatPoints(entry.outcomeTotal.baseline, entry.outcomeTotal.max)),
+            bold(formatPoints(entry.outcomeTotal.treatment, entry.outcomeTotal.max)),
+          ],
+        ],
+        true,
+      ),
+      "",
+    );
+  }
+
+  lines.push("## Full reports", "");
+  lines.push(
+    ...summaryTable(
+      ["Eval case", "Report"],
+      ["left", "left"],
+      document.entries.map((entry) => [
+        escapeMarkdownText(entry.caseId),
+        `[View full report](${entry.reportUrl.replace(/[\s()<>]/g, (ch) => encodeURIComponent(ch).replace("(", "%28").replace(")", "%29"))})`,
+      ]),
+      false,
+    ),
+  );
+  if (document.entries.length > 0) lines.push("", ...document.entries.map(entryComment));
   return `${lines.join("\n")}\n`;
 }
 
@@ -776,21 +968,14 @@ function pushHeaderBlock(
   lines: string[],
   model: ScoredReportModel,
   table: (headers: readonly string[], rows: readonly (readonly string[])[]) => void,
-  options: { readonly omitStatus?: boolean; readonly runHash?: string | null } = {},
 ): void {
-  const fields = headerFields(model)
-    .filter(([label]) => !(options.omitStatus && label === "Status"))
-    .map(([label, value]): readonly [string, string] =>
-      label === "Run" && options.runHash ? [label, `${value} · Hash: ${options.runHash}`] : [label, value],
-    );
+  const fields = headerFields(model);
   fields.forEach(([label, value], index) => {
-    // Keep the Markdown line break on every line but the last of the full header, so the summary
-    // and the full report render identical header lines.
-    const keepBreak = options.omitStatus || index < fields.length - 1;
+    // Keep the Markdown line break on every line but the last header line.
+    const keepBreak = index < fields.length - 1;
     lines.push(`${label}: ${value}${keepBreak ? "  " : ""}`);
   });
   lines.push("");
-  lines.push(`![${model.badgeAlt}](${model.badgeUrl})\n`);
 
   table(["Pillar", ...ARM_HEADERS, "Change"], pillarRows(model));
 
