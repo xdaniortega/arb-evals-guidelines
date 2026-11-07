@@ -4,18 +4,19 @@ const GLOBAL_CHECK_IDS = ["json-shape", "preservation"] as const;
 const ENVIRONMENT_CHECK_NAMES = [
   "chain-identity",
   "legacy-fallback",
-  "rpc-endpoints",
   "sequencer-policy",
   "token-identity",
   "bridge-addresses",
   "bridge-onboarding",
   "finality-policy",
 ] as const;
+const CROSS_ENVIRONMENT_CHECK_IDS = ["rpc-routing", "write-rpc-provider"] as const;
 const CHECK_IDS = [
   ...GLOBAL_CHECK_IDS,
   ...ENVIRONMENTS.flatMap((environment) =>
     ENVIRONMENT_CHECK_NAMES.map((check) => `${environment}-${check}` as const)
   ),
+  ...CROSS_ENVIRONMENT_CHECK_IDS,
 ] as const;
 const CHAIN_KEYS = ["name", "chainId", "rpcUrl", "explorerUrl", "deprecatedGoerliFallbackUrl"] as const;
 const RPC_ENDPOINT_KEYS = ["readRpcUrl", "writeRpcUrl", "sequencerSubmissionUrl"] as const;
@@ -214,7 +215,6 @@ function gradeParsed(output: unknown, fixture: unknown, oracle: Oracle): Validat
     checks.push(
       environmentCheck(environment, "chain-identity", chainMatches(actual, expected)),
       environmentCheck(environment, "legacy-fallback", legacyFallbackMatches(actual, expected)),
-      environmentCheck(environment, "rpc-endpoints", rpcEndpointsMatch(actual, expected)),
       environmentCheck(environment, "sequencer-policy", sequencerPolicyMatches(actual, expected)),
       environmentCheck(environment, "token-identity", tokensMatch(actual, expected)),
       environmentCheck(environment, "bridge-addresses", bridgeAddressesMatch(actual, expected)),
@@ -222,6 +222,8 @@ function gradeParsed(output: unknown, fixture: unknown, oracle: Oracle): Validat
       environmentCheck(environment, "finality-policy", finalityPolicyMatches(actual, expected)),
     );
   }
+
+  checks.push(...rpcChecks(output, oracle));
 
   const score = checks.filter((check) => check.passed).length / checks.length;
   return { status: "graded", score, fullPass: score === 1, checks };
@@ -254,11 +256,6 @@ function checkMessages(name: EnvironmentCheckName, environment: EnvironmentName)
       return {
         pass: `${label} clears or removes the deprecated Goerli fallback.`,
         fail: `${label} retains, relocates, or replaces the deprecated Goerli fallback.`,
-      };
-    case "rpc-endpoints":
-      return {
-        pass: `${label} read/write RPCs and sequencer routing endpoint are correct.`,
-        fail: `${label} read/write RPC or sequencer routing endpoint is incorrect.`,
       };
     case "sequencer-policy":
       return {
@@ -297,12 +294,40 @@ function chainMatches(actualEnvironment: Record<string, unknown> | null, expecte
     sameUrl(actual.explorerUrl, expected.explorerUrl);
 }
 
-function rpcEndpointsMatch(actualEnvironment: Record<string, unknown> | null, expectedEnvironment: TargetEnvironment): boolean {
-  const actual = childRecord(actualEnvironment, "rpcPolicy");
-  const expected = expectedEnvironment.rpcPolicy;
-  return sameUrl(actual?.readRpcUrl, expected.readRpcUrl) &&
-    sameUrl(actual?.writeRpcUrl, expected.writeRpcUrl) &&
-    sameUrl(actual?.sequencerSubmissionUrl, expected.sequencerSubmissionUrl);
+/**
+ * Cross-environment RPC checks. `rpc-routing` accepts either the general public RPC or the
+ * environment's own sequencer as `writeRpcUrl`; `write-rpc-provider` requires the general
+ * public RPC. The two are independent: neither reads the other's result.
+ */
+function rpcChecks(output: unknown, oracle: Oracle): ValidationCheck[] {
+  const routingFailures: string[] = [];
+  const providerFailures: string[] = [];
+  for (const environment of ENVIRONMENTS) {
+    const actual = childRecord(getEnvironment(output, environment), "rpcPolicy");
+    const expected = oracle.expected[environment].rpcPolicy;
+    const writeIsPublicRpc = sameUrl(actual?.writeRpcUrl, expected.writeRpcUrl);
+    const writeIsOwnSequencer = sameUrl(actual?.writeRpcUrl, expected.sequencerSubmissionUrl);
+    if (!(sameUrl(actual?.readRpcUrl, expected.readRpcUrl) &&
+      sameUrl(actual?.sequencerSubmissionUrl, expected.sequencerSubmissionUrl) &&
+      (writeIsPublicRpc || writeIsOwnSequencer))) {
+      routingFailures.push(environment);
+    }
+    if (!writeIsPublicRpc) providerFailures.push(environment);
+  }
+  return [
+    buildCheck(
+      "rpc-routing",
+      routingFailures.length === 0,
+      "Production and staging read RPCs and sequencer submission endpoints are correct, and each write RPC is the general public RPC or that network's own sequencer.",
+      `The read RPC, sequencer submission endpoint, or write RPC is incorrect in: ${routingFailures.join(", ")}. A write RPC must be the general public RPC or that network's own sequencer.`,
+    ),
+    buildCheck(
+      "write-rpc-provider",
+      providerFailures.length === 0,
+      "Production and staging write RPCs use each network's general public RPC.",
+      `The write RPC is not the network's general public RPC (for example the sequencer is used) in: ${providerFailures.join(", ")}.`,
+    ),
+  ];
 }
 
 /**

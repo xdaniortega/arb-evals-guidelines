@@ -16,7 +16,6 @@ const EXPECTED_CHECK_IDS = [
   "preservation",
   "production-chain-identity",
   "production-legacy-fallback",
-  "production-rpc-endpoints",
   "production-sequencer-policy",
   "production-token-identity",
   "production-bridge-addresses",
@@ -24,16 +23,17 @@ const EXPECTED_CHECK_IDS = [
   "production-finality-policy",
   "staging-chain-identity",
   "staging-legacy-fallback",
-  "staging-rpc-endpoints",
   "staging-sequencer-policy",
   "staging-token-identity",
   "staging-bridge-addresses",
   "staging-bridge-onboarding",
   "staging-finality-policy",
+  "rpc-routing",
+  "write-rpc-provider",
 ] as const;
 const MUTATION_CASES = [
   ["chain", "chainId", "chain-identity"],
-  ["rpcPolicy", "sequencerSubmissionUrl", "rpc-endpoints"],
+  ["rpcPolicy", "sequencerSubmissionUrl", "rpc-routing"],
   ["tokens", "USDC.e", "token-identity"],
   ["assetOnboarding", "preferredRoute", "bridge-onboarding"],
 ] as const;
@@ -123,7 +123,7 @@ for (const environment of ENVIRONMENTS) {
       assert.equal(result.status, "graded");
       assert.equal(result.score, (CHECK_COUNT - 1) / CHECK_COUNT);
       assert.equal(result.fullPass, false);
-      assertCheck(result, `${environment}-${checkName}`, false);
+      assertCheck(result, checkName === "rpc-routing" ? checkName : `${environment}-${checkName}`, false);
       assertCheck(result, "json-shape", true);
       assertCheck(result, "preservation", true);
     });
@@ -697,3 +697,134 @@ function assertInfrastructureError(result: ValidationOutcome): void {
   assert.equal(result.fullPass, null);
   assert.equal(result.checks[0]?.id, "validator-infrastructure");
 }
+
+const OTHER_ENVIRONMENT = { production: "staging", staging: "production" } as const;
+
+async function rpcArtifact(
+  mutate: (rpcPolicy: Record<(typeof ENVIRONMENTS)[number], JsonObject>, expected: Record<(typeof ENVIRONMENTS)[number], JsonObject>) => void,
+): Promise<JsonObject> {
+  const artifact = await knownGoodArtifact();
+  const expected = record((await readJson(ORACLE_PATH)).expected);
+  mutate(
+    {
+      production: record(environmentConfig(artifact, "production").rpcPolicy),
+      staging: record(environmentConfig(artifact, "staging").rpcPolicy),
+    },
+    { production: record(record(expected.production).rpcPolicy), staging: record(record(expected.staging).rpcPolicy) },
+  );
+  return artifact;
+}
+
+async function rpcTopicPoints(result: ValidationOutcome): Promise<number> {
+  const rubric = JSON.parse(await readFile(RUBRIC_PATH, "utf8")) as {
+    checks: Array<{ id: string; topic?: string; points: number }>;
+  };
+  return rubric.checks
+    .filter((check) => check.topic === "rpc-endpoints")
+    .filter((check) => result.checks.find((c) => c.id === check.id)?.passed === true)
+    .reduce((sum, check) => sum + check.points, 0);
+}
+
+test("rubric RPC topic holds exactly rpc-routing and write-rpc-provider at 5 points each", async () => {
+  const rubric = JSON.parse(await readFile(RUBRIC_PATH, "utf8")) as {
+    checks: Array<{ id: string; group: string; topic?: string; points: number }>;
+  };
+  assert.deepEqual(
+    rubric.checks.filter((check) => check.topic === "rpc-endpoints").map((check) => [check.id, check.group, check.points]),
+    [["rpc-routing", "outcome", 5], ["write-rpc-provider", "outcome", 5]],
+  );
+});
+
+test("general public RPC writes with correct routing earn the full RPC topic", async (context) => {
+  const result = await validate(await createWorkspace(context, await knownGoodArtifact()));
+  assertCheck(result, "rpc-routing", true);
+  assertCheck(result, "write-rpc-provider", true);
+  assert.equal(await rpcTopicPoints(result), 10);
+});
+
+test("each network's own sequencer as writeRpcUrl in both environments passes routing only", async (context) => {
+  const artifact = await rpcArtifact((policy, expected) => {
+    for (const environment of ENVIRONMENTS) policy[environment].writeRpcUrl = expected[environment].sequencerSubmissionUrl;
+  });
+  const result = await validate(await createWorkspace(context, artifact));
+  assertCheck(result, "rpc-routing", true);
+  assertCheck(result, "write-rpc-provider", false);
+  assert.equal(await rpcTopicPoints(result), 5);
+  assert.equal(result.score, (CHECK_COUNT - 1) / CHECK_COUNT);
+  assert.match(result.checks.find((check) => check.id === "write-rpc-provider")?.message ?? "", /production, staging/);
+});
+
+for (const environment of ENVIRONMENTS) {
+  test(`own sequencer as ${environment} writeRpcUrl only passes routing and fails the provider check`, async (context) => {
+    const artifact = await rpcArtifact((policy, expected) => {
+      policy[environment].writeRpcUrl = expected[environment].sequencerSubmissionUrl;
+    });
+    const result = await validate(await createWorkspace(context, artifact));
+    assertCheck(result, "rpc-routing", true);
+    assertCheck(result, "write-rpc-provider", false);
+    assert.equal(await rpcTopicPoints(result), 5);
+    assert.match(result.checks.find((check) => check.id === "write-rpc-provider")?.message ?? "", new RegExp(`: ${environment}\\.$`));
+  });
+
+  test(`wrong ${environment} sequencerSubmissionUrl fails routing while public RPC writes pass the provider check`, async (context) => {
+    const artifact = await rpcArtifact((policy) => {
+      policy[environment].sequencerSubmissionUrl = "https://example.invalid/sequencer";
+    });
+    const result = await validate(await createWorkspace(context, artifact));
+    assertCheck(result, "rpc-routing", false);
+    assertCheck(result, "write-rpc-provider", true);
+    assert.equal(await rpcTopicPoints(result), 5);
+    assert.match(result.checks.find((check) => check.id === "rpc-routing")?.message ?? "", new RegExp(`: ${environment}\\.`));
+  });
+
+  test(`the other network's sequencer as ${environment} writeRpcUrl fails routing`, async (context) => {
+    const artifact = await rpcArtifact((policy, expected) => {
+      policy[environment].writeRpcUrl = expected[OTHER_ENVIRONMENT[environment]].sequencerSubmissionUrl;
+    });
+    const result = await validate(await createWorkspace(context, artifact));
+    assertCheck(result, "rpc-routing", false);
+    assertCheck(result, "write-rpc-provider", false);
+    assert.equal(await rpcTopicPoints(result), 0);
+  });
+
+  test(`an unrelated ${environment} writeRpcUrl fails routing`, async (context) => {
+    const artifact = await rpcArtifact((policy) => {
+      policy[environment].writeRpcUrl = "https://example.invalid/rpc";
+    });
+    const result = await validate(await createWorkspace(context, artifact));
+    assertCheck(result, "rpc-routing", false);
+    assertCheck(result, "write-rpc-provider", false);
+  });
+
+  test(`wrong ${environment} readRpcUrl fails routing and leaves the provider check unaffected`, async (context) => {
+    const artifact = await rpcArtifact((policy) => {
+      policy[environment].readRpcUrl = "https://example.invalid/rpc";
+    });
+    const result = await validate(await createWorkspace(context, artifact));
+    assertCheck(result, "rpc-routing", false);
+    assertCheck(result, "write-rpc-provider", true);
+    assert.equal(await rpcTopicPoints(result), 5);
+  });
+}
+
+test("RPC changes never affect the other topics, including both bridge checks per environment", async (context) => {
+  const artifact = await rpcArtifact((policy, expected) => {
+    for (const environment of ENVIRONMENTS) policy[environment].writeRpcUrl = expected[environment].sequencerSubmissionUrl;
+  });
+  const result = await validate(await createWorkspace(context, artifact));
+  const rubric = JSON.parse(await readFile(RUBRIC_PATH, "utf8")) as {
+    checks: Array<{ id: string; topic?: string; points: number }>;
+  };
+  for (const topic of ["bridge-addresses", "bridge-onboarding"]) {
+    const bridge = rubric.checks.filter((check) => check.topic === topic);
+    assert.deepEqual(bridge.map((check) => check.id), [`production-${topic}`, `staging-${topic}`]);
+    assert.equal(bridge.reduce((sum, check) => sum + check.points, 0), 10);
+  }
+  assert.equal(
+    rubric.checks.filter((check) => check.topic?.startsWith("bridge-")).reduce((sum, check) => sum + check.points, 0),
+    20,
+  );
+  for (const check of result.checks) {
+    if (check.id !== "write-rpc-provider") assert.equal(check.passed, true, check.id);
+  }
+});

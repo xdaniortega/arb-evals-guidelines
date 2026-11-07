@@ -314,7 +314,7 @@ describe("parity", () => {
     }
     // Case identity and policy, skill snapshot, and tool bundle hashes must be populated.
     expect(left.caseId).toBe("network-config-01");
-    expect(left.caseVersion).toBe(10);
+    expect(left.caseVersion).toBe(11);
     expect(String(left.executionPolicySha256)).toMatch(/^[0-9a-f]{64}$/);
     expect(String(left.skillSnapshotTreeSha256)).toMatch(/^[0-9a-f]{64}$/);
     expect(String(left.skillToolBundleSha256)).toMatch(/^[0-9a-f]{64}$/);
@@ -464,7 +464,7 @@ describe("delta validity", () => {
     const passingChecks = [
       "production-chain-identity", "staging-chain-identity",
       "production-legacy-fallback", "staging-legacy-fallback",
-      "production-rpc-endpoints", "staging-rpc-endpoints",
+      "rpc-routing", "write-rpc-provider",
       "production-sequencer-policy", "staging-sequencer-policy",
       "production-token-identity", "staging-token-identity",
       "production-bridge-addresses", "staging-bridge-addresses",
@@ -546,7 +546,7 @@ describe("delta validity", () => {
     const ids = [
       "production-chain-identity", "staging-chain-identity",
       "production-legacy-fallback", "staging-legacy-fallback",
-      "production-rpc-endpoints", "staging-rpc-endpoints",
+      "rpc-routing", "write-rpc-provider",
       "production-sequencer-policy", "staging-sequencer-policy",
       "production-token-identity", "staging-token-identity",
       "production-bridge-addresses", "staging-bridge-addresses",
@@ -1532,7 +1532,7 @@ describe("validator infrastructure normalization", () => {
         const passingChecks = [
           "production-chain-identity", "staging-chain-identity",
           "production-legacy-fallback", "staging-legacy-fallback",
-          "production-rpc-endpoints", "staging-rpc-endpoints",
+          "rpc-routing", "write-rpc-provider",
           "production-sequencer-policy", "staging-sequencer-policy",
           "production-token-identity", "staging-token-identity",
           "production-bridge-addresses", "staging-bridge-addresses",

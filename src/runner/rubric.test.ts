@@ -193,6 +193,11 @@ describe("rubric v0.2 scoring and validation", () => {
       expect(correct.accuracyTotal).toBe(100);
       expect(correct.fullPass).toBe(true);
 
+      const sequencerWrites = scoreWithRubric(rubric, ids.map((id) => ({ id, passed: id !== "write-rpc-provider", message: "" })));
+      expect(sequencerWrites.accuracyTotal).toBe(95);
+      expect(sequencerWrites.groups.outcome).toEqual({ got: 75, max: 80 });
+      expect(sequencerWrites.fullPass).toBe(false);
+
       const unchanged = scoreWithRubric(rubric, ids.map((id) => ({ id, passed: id === "json-shape" || id === "preservation", message: "" })));
       expect(unchanged.groups).toEqual({ outcome: { got: 0, max: 80 }, constraints: { got: 20, max: 20 } });
       expect(unchanged.accuracyTotal).toBe(20);
