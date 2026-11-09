@@ -55,7 +55,7 @@ const MAX_REMOTE_OUTPUT_BYTES = 16 * 1024 * 1024;
 export const REMOTE_PRE_PROMPT_TIMEOUT_MS = CONDITION_OPERATION_ALLOWANCE_MS;
 export const REMOTE_PROCESS_LIFETIME_MS = 180_000;
 export const REMOTE_CLEANUP_MARGIN_MS = 30_000;
-const REMOTE_CLOSE_TIMEOUT_MS = 2_000;
+const REMOTE_CLOSE_TIMEOUT_MS = 10_000;
 
 type RemoteFrame = Record<string, any>;
 type RemoteRedactions = { count: number; entries: import("../../core/secret-scan.ts").SecretRedaction[] };

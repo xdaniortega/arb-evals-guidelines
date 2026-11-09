@@ -172,6 +172,38 @@ describe("Pi SDK harness adapter", () => {
     await expect(harness.run(guest, request)).rejects.toMatchObject({ code: "cleanup-failed" });
   });
 
+  describe("remote close timeout after result", () => {
+    it("tolerates a guest that closes ~3 s after the result frame", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const guest = remoteGuestForFrames((_type, frame) => frame, 0, ({ close }) => { setTimeout(() => close(0), 3_000); });
+        const request = createMockRequest();
+        const harness = createPiHarness({ scriptedSteps: [{ type: "text", text: "remote" }] });
+        await harness.attest(guest, request);
+        const run = harness.run(guest, request);
+        const settled = run.then(() => "ok" as const, (error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(3_000);
+        await expect(settled).resolves.toBe("ok");
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("fails with protocol-drift only after 10 s when the guest never closes", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const guest = remoteGuestForFrames((_type, frame) => frame, 0, () => undefined);
+        const request = createMockRequest();
+        const harness = createPiHarness({ scriptedSteps: [{ type: "text", text: "remote" }] });
+        await harness.attest(guest, request);
+        let outcome: unknown = "pending";
+        harness.run(guest, request).then(() => { outcome = "ok"; }, (error: unknown) => { outcome = error; });
+        await vi.advanceTimersByTimeAsync(9_900);
+        expect(outcome).toBe("pending");
+        await vi.advanceTimersByTimeAsync(200);
+        expect(outcome).toMatchObject({ code: "protocol-drift", message: expect.stringContaining("guest SDK did not close after result") });
+      } finally { vi.useRealTimers(); }
+    });
+  });
+
   it("drives the image-resident framed session for a remote guest without host fallback", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
