@@ -17,6 +17,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAllowlistedEnv } from "../test-guards.ts";
 import { resolveTargetConfiguration } from "./models.ts";
 import { parseArgs } from "../../scripts/run.ts";
+import { checkCombinedExports } from "../artifacts/combined-exports.ts";
+import { resolveRepositoryUrl } from "../core/report-links.ts";
 
 const RUN_SCRIPT = resolve(process.cwd(), "scripts/run.ts");
 
@@ -29,6 +31,10 @@ beforeAll(() => {
 });
 afterAll(() => {
   if (!existsSync(RUNS_DIR)) return;
+  // Combined EVALS-<a>+<b>.md files written by this file's multi-model commands are test debris too.
+  for (const name of readdirSync(RUNS_DIR)) {
+    if (!runsBefore.has(name) && /^EVALS-.*\.md$/.test(name)) rmSync(resolve(RUNS_DIR, name), { force: true });
+  }
   for (const name of readdirSync(RUNS_DIR)) {
     if (runsBefore.has(name)) continue;
     const dir = resolve(RUNS_DIR, name);
@@ -55,7 +61,7 @@ function runCli(
         cwd: process.cwd(),
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
-        timeout: 15000,
+        timeout: 60000,
         killSignal: "SIGKILL",
         env: buildAllowlistedEnv(tmpdir(), extraEnv),
       },
@@ -328,6 +334,11 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(parsed.target.model).toBe("fake-model-0");
     expect(parsed.target.thinking).toBe("off");
     expect(parsed.testDouble).toBe(true);
+    // A single-model command writes no combined file and no sealed grouping.
+    expect(existsSync(resolve(dirname(parsed.receipt), "inputs/batch.json"))).toBe(false);
+    const singleRunId = dirname(parsed.receipt).split("/").pop() as string;
+    expect(readdirSync(RUNS_DIR).filter((name) => name.startsWith("EVALS-") && name.includes(singleRunId))).toEqual([]);
+    expect(stdout).not.toContain("combined");
     // A verified run also gets both generated exports next to its receipt (outside the hash chain).
     expect(existsSync(resolve(dirname(parsed.receipt), "EVALS.md"))).toBe(true);
     expect(existsSync(resolve(dirname(parsed.receipt), "EVALS-FULL-REPORT.md"))).toBe(true);
@@ -403,5 +414,82 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(parsed.target.provider).toBe("google");
     expect(parsed.target.model).toBe("fake-model-0");
     expect(parsed.target.thinking).toBe("high");
+  });
+
+  it("accepts repeated --model, in argument order, and refuses a duplicate model", () => {
+    const command = ["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill"];
+    const parsed = parseArgs([...command, "--model", "gemini-3.8-flash", "--model", "gemini-4-argon"]);
+    expect(parsed.models).toEqual(["gemini-3.8-flash", "gemini-4-argon"]);
+    expect(parseArgs([...command, "--model", "gemini-3.8-flash"]).models).toEqual(["gemini-3.8-flash"]);
+    expect(() => parseArgs([...command, "--model", "gemini-3.8-flash", "--model", "gemini-3.8-flash"])).toThrow(/more than once/);
+
+    // Refused by the real process before any probe, credential or run.
+    const nodeBinDir = dirname(process.execPath);
+    const result = runCli(
+      [...command, "--model", "gemini-3.8-flash", "--model", "gemini-3.8-flash"],
+      { PATH: `${nodeBinDir}:/usr/bin:/bin` },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("FAIL [input-invalid] at --model:");
+    expect(result.stderr).not.toContain("credential");
+  });
+
+  it("refuses --format json with more than one --model", () => {
+    const args = ["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", "--mode", "fake", "--model", "gemini-3.8-flash", "--model", "gemini-4-argon"];
+    expect(() => parseArgs([...args, "--format", "json"])).toThrow(/--format json supports exactly one --model/);
+    const result = runCli([...args, "--format", "json"]);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('"success": false');
+    expect(result.stdout).not.toContain("receipt.json");
+  });
+
+  it("runs two models as independent sealed runs and writes one combined EVALS.md in runs/ (fake mode)", async () => {
+    const { status, stdout, stderr } = runCli([
+      "--skill", "src/test-fixtures/skills/mcp-skill",
+      "--case", "network-config-01",
+      "--mode", "fake",
+      "--model", "gemini-3.8-flash",
+      "--model", "gemini-4-argon",
+      "--limit", "wallClockMs=300000",
+      "--quiet",
+    ]);
+    expect(status, `${stdout}\n${stderr}`).toBe(0);
+
+    // The two runs are the ones printed in the per-model summary lines (other tests may add runs concurrently).
+    const fresh = [...stdout.matchAll(/^ {2}\d\. .* {2}run (\S+) {2}receipt /gm)].map((m) => m[1]!);
+    expect(fresh).toHaveLength(2);
+    for (const name of fresh) expect(runsBefore.has(name)).toBe(false);
+    const members = fresh.map((name) => {
+      const dir = resolve(RUNS_DIR, name);
+      const target = JSON.parse(readFileSync(resolve(dir, "inputs/target.json"), "utf8")) as { model: string };
+      const policy = JSON.parse(readFileSync(resolve(dir, "inputs/policy.json"), "utf8")) as { limits: { wallClockMs: number } };
+      // No sealed grouping: each run is fully independent and keeps its own exports.
+      expect(existsSync(resolve(dir, "inputs/batch.json"))).toBe(false);
+      expect(existsSync(resolve(dir, "EVALS.md"))).toBe(true);
+      expect(existsSync(resolve(dir, "EVALS-FULL-REPORT.md"))).toBe(true);
+      // Per-run limits and clock: the second run is not cut short by the first run's elapsed time.
+      expect(policy.limits.wallClockMs).toBe(300000);
+      return { name, target };
+    });
+    expect(members.map((m) => m.target.model)).toEqual(["gemini-3.8-flash", "gemini-4-argon"]);
+
+    // No batch folder and no batch output.
+    expect(existsSync(resolve(process.cwd(), "eval-cases/network-config-01/batches"))).toBe(false);
+    expect(stdout).not.toMatch(/^batch /m);
+
+    const combinedName = `EVALS-${members[0]!.name}+${members[1]!.name}.md`;
+    const combinedRel = `eval-cases/network-config-01/runs/${combinedName}`;
+    expect(stdout).toContain(`combined  ${combinedRel}`);
+    const text = readFileSync(resolve(process.cwd(), combinedRel), "utf8");
+    expect(text).toContain("Google Gemini 3.8 Flash");
+    expect(text).toContain("Google Gemini 4 Argon");
+    for (const member of members) expect(text).toContain(`runs/${member.name}/EVALS-FULL-REPORT.md`);
+    // It is fresh by the same semantics as `eval:export --check` (same repository URL as the CLI).
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as { repository?: string | { url?: string } };
+    const repoUrl = resolveRepositoryUrl(undefined, typeof pkg.repository === "string" ? pkg.repository : pkg.repository?.url);
+    const check = await checkCombinedExports({ receiptPaths: members.map((m) => resolve(RUNS_DIR, m.name, "receipt.json")), repoUrl });
+    expect(check, JSON.stringify(check)).toMatchObject({ ok: true, problem: null });
+    // The combined file is not a run: history ignores it, and it is the only new non-run entry.
+    expect(readdirSync(RUNS_DIR)).toContain(combinedName);
   });
 });

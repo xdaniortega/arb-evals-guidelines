@@ -11,8 +11,8 @@
 
 import { TEST_DOUBLE_WARNING, countWord, escapeMarkdownText, uniqueSlugs } from "./scored-report.ts";
 
-const NA = "n/a";
-const NA_RECORDED = "n/a (not recorded)";
+export const NA = "n/a";
+export const NA_RECORDED = "n/a (not recorded)";
 
 /** One display row of a two-arm table; values are final display cells, not yet escaped. */
 export interface FullReportRow {
@@ -123,21 +123,21 @@ export interface FullReportInput {
 // Markdown helpers
 // ---------------------------------------------------------------------------
 
-const text = (value: string): string => escapeMarkdownText(value);
+export const text = (value: string): string => escapeMarkdownText(value);
 
-function codeSpan(value: string): string {
+export function codeSpan(value: string): string {
   if (/[`\r\n]/.test(value)) return escapeMarkdownText(value);
   return `\`${value.replaceAll("|", "\\|")}\``;
 }
 
 /** Fence longer than any backtick run in the text, preserving its literal bytes. */
-function fence(body: string): string[] {
+export function fence(body: string): string[] {
   const longest = Math.max(2, ...[...body.matchAll(/`+/g)].map((m) => m[0].length));
   const marker = "`".repeat(longest + 1);
   return [`${marker}text`, body, marker];
 }
 
-function table(headers: readonly string[], aligns: readonly ("left" | "right")[], rows: readonly (readonly string[])[]): string[] {
+export function table(headers: readonly string[], aligns: readonly ("left" | "right")[], rows: readonly (readonly string[])[]): string[] {
   return [
     `| ${headers.join(" | ")} |`,
     `|${aligns.map((a) => (a === "right" ? "---:" : "---")).join("|")}|`,
@@ -145,9 +145,9 @@ function table(headers: readonly string[], aligns: readonly ("left" | "right")[]
   ];
 }
 
-const boldCell = (value: string, bold: boolean | undefined): string => (bold === true ? `**${value}**` : value);
+export const boldCell = (value: string, bold: boolean | undefined): string => (bold === true ? `**${value}**` : value);
 
-function rowsTable(first: string, rows: readonly FullReportRow[]): string[] {
+export function rowsTable(first: string, rows: readonly FullReportRow[]): string[] {
   return table(
     [first, "Baseline", "Treatment"],
     ["left", "right", "right"],
@@ -159,9 +159,9 @@ function rowsTable(first: string, rows: readonly FullReportRow[]): string[] {
   );
 }
 
-const capitalize = (value: string): string => `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+export const capitalize = (value: string): string => `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 
-function plural(n: number, singular: string, pluralForm: string): string {
+export function plural(n: number, singular: string, pluralForm: string): string {
   return n === 1 ? singular : pluralForm;
 }
 
@@ -171,7 +171,7 @@ function plural(n: number, singular: string, pluralForm: string): string {
 
 type ArmKey = "baseline" | "treatment";
 
-function executionSummary(pairs: readonly FullReportPair[], arm: ArmKey): string {
+export function executionSummary(pairs: readonly FullReportPair[], arm: ArmKey): string {
   if (pairs.length === 0) return NA;
   const counts = new Map<string, number>();
   for (const pair of pairs) counts.set(pair[arm].phrase, (counts.get(pair[arm].phrase) ?? 0) + 1);
@@ -183,7 +183,7 @@ function executionSummary(pairs: readonly FullReportPair[], arm: ArmKey): string
     .join("; ");
 }
 
-function gradingSummary(pairs: readonly FullReportPair[], arm: ArmKey): string {
+export function gradingSummary(pairs: readonly FullReportPair[], arm: ArmKey): string {
   if (pairs.length === 0) return NA;
   const graded = pairs.filter((pair) => pair[arm].graded).length;
   if (pairs.length === 1) return graded === 1 ? "Graded" : "Grading unavailable";
@@ -192,17 +192,17 @@ function gradingSummary(pairs: readonly FullReportPair[], arm: ArmKey): string {
   return `Graded in ${graded} of ${pairs.length} pairs`;
 }
 
-const pairFullyGraded = (pair: FullReportPair): boolean => pair.baseline.graded && pair.treatment.graded;
+export const pairFullyGraded = (pair: FullReportPair): boolean => pair.baseline.graded && pair.treatment.graded;
 
 function armStatusLine(arm: FullReportArm): string {
   return `${arm.phrase}, ${arm.graded ? "graded" : "grading unavailable"}`;
 }
 
-function armIndexStatus(arm: FullReportArm): string {
+export function armIndexStatus(arm: FullReportArm): string {
   return arm.graded ? capitalize(arm.phrase) : `${capitalize(arm.phrase)} (not graded)`;
 }
 
-function resultsNote(input: FullReportInput): string {
+export function resultsNote(input: FullReportInput): string {
   const { pairs, aggregate } = input;
   const unit = "Recorded token totals include cached input. Latency is the time to completion or termination; a shorter duration does not by itself mean a higher Score.";
   if (pairs.length === 0) return "No pairs were recorded for this run, so there are no results to aggregate.";
@@ -239,7 +239,7 @@ function resultsNote(input: FullReportInput): string {
 // Renderer
 // ---------------------------------------------------------------------------
 
-const SECTION_HEADINGS = {
+export const SECTION_HEADINGS = {
   results: "Results",
   status: "Execution status",
   composition: "Score composition",
@@ -256,20 +256,20 @@ const SECTION_HEADINGS = {
   repro: "Reproducibility",
 } as const;
 
-function outcomeLines(outcome: FullReportOutcome | null, unavailableFallback: string): string[] {
+export function outcomeLines(outcome: FullReportOutcome | null, unavailableFallback: string): string[] {
   if (outcome === null) return [unavailableFallback, ""];
   if (outcome.unavailable !== null) return [`Outcome Checks are unavailable: ${text(outcome.unavailable)}.`, ""];
   return [...rowsTable("Check", outcome.rows), ""];
 }
 
-function compositionLines(rows: readonly FullReportRow[] | null): string[] {
+export function compositionLines(rows: readonly FullReportRow[] | null): string[] {
   if (rows === null) return ["Score composition is not available for this run: it was not scored under the current rubric.", ""];
   return [...rowsTable("Check", rows), ""];
 }
 
-function pairDetail(pair: FullReportPair, legacy: boolean): string[] {
+export function pairDetail(pair: FullReportPair, legacy: boolean, heading: { readonly marks: string; readonly title: string } = { marks: "###", title: pair.label }): string[] {
   const lines = [
-    `### ${text(pair.label)}`,
+    `${heading.marks} ${text(heading.title)}`,
     "",
     "<details>",
     "<summary>Score, Outcome Checks, cost and latency</summary>",
@@ -293,6 +293,96 @@ function pairDetail(pair: FullReportPair, legacy: boolean): string[] {
   lines.push("**Outcome Checks**", "");
   lines.push(...outcomeLines(pair.outcome, "Not available for this pair."));
   lines.push("**Cost and latency**", "", ...rowsTable("Metric", pair.costLatency), "", "</details>", "");
+  return lines;
+}
+
+/** `## Task and rubric` with its scoring rules and frozen checks; shared with other report renderers. */
+export function taskSectionLines(input: Pick<FullReportInput, "caseId" | "caseTitle" | "pairs" | "task">): string[] {
+  const { pairs, task } = input;
+  const lines: string[] = [];
+  lines.push(`## ${SECTION_HEADINGS.task}`, "");
+  if (task.scenario !== null) lines.push(`**Scenario:** ${text(task.scenario)}`, "");
+  if (task.frozenUnavailableReason !== null) {
+    lines.push(`Frozen inputs unavailable: ${text(task.frozenUnavailableReason)}.`, "");
+  }
+  lines.push(
+    ...table(
+      ["Case definition", "Recorded value"],
+      ["left", "left"],
+      [
+        ["Case", `${text(input.caseId)}, version ${text(task.caseVersion ?? NA_RECORDED)}`],
+        ["Rubric version", text(task.rubricVersion ?? NA_RECORDED)],
+        ["Allowed tools", text(task.allowedTools ?? NA_RECORDED)],
+        ["Output path", text(task.outputPath ?? NA_RECORDED)],
+      ],
+    ),
+    "",
+  );
+  if (task.prompt !== null) lines.push("**Prompt (verbatim)**", "", ...fence(task.prompt), "");
+  lines.push(
+    task.docUrl === null
+      ? "The frozen inputs above are authoritative. This section is explanatory only and is not evidence."
+      : `[Current case documentation](${task.docUrl.replace(/[\s()<>]/g, (ch) => encodeURIComponent(ch).replace("(", "%28").replace(")", "%29"))}); the frozen inputs above are authoritative. This section is explanatory only and is not evidence.`,
+    "",
+  );
+
+  lines.push(`### ${SECTION_HEADINGS.rules}`, "");
+  if (task.outcomeMax === null || task.constraintsMax === null) {
+    lines.push(
+      "Score is the presentation name for the original Accuracy metric. This run has no scored view of a frozen rubric v0.2, so no point decomposition is available.",
+      "",
+    );
+  } else {
+    const aggregateScope =
+      pairs.length > 1
+        ? "Aggregate results are means over the recorded pairs; individual-pair tables report that pair only. "
+        : "";
+    lines.push(
+      `Score is the presentation name for the original Accuracy metric: outcome points (up to ${task.outcomeMax}) plus constraints and preservation points (up to ${task.constraintsMax}). ` +
+        aggregateScope +
+        "Outcome Check fractions are points earned, not counts of successful runs.",
+      "",
+    );
+  }
+
+  lines.push(`### ${SECTION_HEADINGS.checks}`, "");
+  if (task.checks === null) lines.push("Not available: this run has no scored view of a frozen rubric v0.2.", "");
+  else {
+    lines.push(
+      ...table(
+        ["Check", "Group", "Topic", "Points"],
+        ["left", "left", "left", "left"],
+        task.checks.map((check) => [text(check.id), text(check.group), text(check.topic), String(check.points)]),
+      ),
+      "",
+    );
+  }
+  return lines;
+}
+
+/** The model and execution/provenance tables of one run (no heading). */
+export function environmentTableLines(input: Pick<FullReportInput, "modelLabel" | "environment">): string[] {
+  const { environment } = input;
+  const lines: string[] = [];
+  lines.push(
+    ...table(
+      ["Model field", "Recorded value"],
+      ["left", "left"],
+      [
+        ["LLM model", text(input.modelLabel)],
+        ["Registered model ID", environment.registeredModelId === null ? NA_RECORDED : codeSpan(environment.registeredModelId)],
+      ],
+    ),
+    "",
+  );
+  lines.push(
+    ...table(
+      ["Execution / provenance field", "Recorded value"],
+      ["left", "left"],
+      environment.provenance.map(([field, value]) => [text(field), text(value)]),
+    ),
+    "",
+  );
   return lines;
 }
 
@@ -452,86 +542,11 @@ export function renderFullReport(input: FullReportInput): string {
     for (const pair of pairs) lines.push(...pairDetail(pair, legacy));
   }
 
-  // Task and rubric ---------------------------------------------------------
-  lines.push(`## ${SECTION_HEADINGS.task}`, "");
-  if (task.scenario !== null) lines.push(`**Scenario:** ${text(task.scenario)}`, "");
-  if (task.frozenUnavailableReason !== null) {
-    lines.push(`Frozen inputs unavailable: ${text(task.frozenUnavailableReason)}.`, "");
-  }
-  lines.push(
-    ...table(
-      ["Case definition", "Recorded value"],
-      ["left", "left"],
-      [
-        ["Case", `${text(input.caseId)}, version ${text(task.caseVersion ?? NA_RECORDED)}`],
-        ["Rubric version", text(task.rubricVersion ?? NA_RECORDED)],
-        ["Allowed tools", text(task.allowedTools ?? NA_RECORDED)],
-        ["Output path", text(task.outputPath ?? NA_RECORDED)],
-      ],
-    ),
-    "",
-  );
-  if (task.prompt !== null) lines.push("**Prompt (verbatim)**", "", ...fence(task.prompt), "");
-  lines.push(
-    task.docUrl === null
-      ? "The frozen inputs above are authoritative. This section is explanatory only and is not evidence."
-      : `[Current case documentation](${task.docUrl.replace(/[\s()<>]/g, (ch) => encodeURIComponent(ch).replace("(", "%28").replace(")", "%29"))}); the frozen inputs above are authoritative. This section is explanatory only and is not evidence.`,
-    "",
-  );
-
-  lines.push(`### ${SECTION_HEADINGS.rules}`, "");
-  if (task.outcomeMax === null || task.constraintsMax === null) {
-    lines.push(
-      "Score is the presentation name for the original Accuracy metric. This run has no scored view of a frozen rubric v0.2, so no point decomposition is available.",
-      "",
-    );
-  } else {
-    const aggregateScope =
-      pairs.length > 1
-        ? "Aggregate results are means over the recorded pairs; individual-pair tables report that pair only. "
-        : "";
-    lines.push(
-      `Score is the presentation name for the original Accuracy metric: outcome points (up to ${task.outcomeMax}) plus constraints and preservation points (up to ${task.constraintsMax}). ` +
-        aggregateScope +
-        "Outcome Check fractions are points earned, not counts of successful runs.",
-      "",
-    );
-  }
-
-  lines.push(`### ${SECTION_HEADINGS.checks}`, "");
-  if (task.checks === null) lines.push("Not available: this run has no scored view of a frozen rubric v0.2.", "");
-  else {
-    lines.push(
-      ...table(
-        ["Check", "Group", "Topic", "Points"],
-        ["left", "left", "left", "left"],
-        task.checks.map((check) => [text(check.id), text(check.group), text(check.topic), String(check.points)]),
-      ),
-      "",
-    );
-  }
+  lines.push(...taskSectionLines(input));
 
   // Execution environment -----------------------------------------------------
   lines.push(`## ${SECTION_HEADINGS.environment}`, "");
-  lines.push(
-    ...table(
-      ["Model field", "Recorded value"],
-      ["left", "left"],
-      [
-        ["LLM model", text(input.modelLabel)],
-        ["Registered model ID", environment.registeredModelId === null ? NA_RECORDED : codeSpan(environment.registeredModelId)],
-      ],
-    ),
-    "",
-  );
-  lines.push(
-    ...table(
-      ["Execution / provenance field", "Recorded value"],
-      ["left", "left"],
-      environment.provenance.map(([field, value]) => [text(field), text(value)]),
-    ),
-    "",
-  );
+  lines.push(...environmentTableLines(input));
 
   // Verify --------------------------------------------------------------------
   const receipt = `${input.runDir}/receipt.json`;

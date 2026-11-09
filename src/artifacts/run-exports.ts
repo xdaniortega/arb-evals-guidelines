@@ -48,7 +48,7 @@ function pairLabel(pairId: string): string {
 const SUMMARY_NOT_GENERATED = "EVALS.md is not generated";
 
 /** Bare reason the summary cannot be exported, or `null` when every rendered pair is graded in both arms. */
-function summaryRefusalReason(report: RunReport): string | null {
+export function summaryRefusalReason(report: RunReport): string | null {
   if (report.isLegacy) {
     return `run ${report.runId} was scored under an earlier rubric (legacy)`;
   }

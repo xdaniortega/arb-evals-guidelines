@@ -3,7 +3,9 @@
  *
  * Thin composition entrypoint only: it parses argv at the process boundary, constructs
  * the resolved values the runner needs, and prints the result. Every policy, algorithm,
- * ordering rule, and failure classification lives in src/runner/run.ts.
+ * ordering rule, and failure classification lives in src/runner/run.ts; multi-model
+ * policy (sequencing, stop rules, signals, exit code) lives in src/runner/batch.ts and the
+ * combined EVALS.md in src/artifacts/combined-exports.ts. This file only wires them.
  *
  * Credential loading happens strictly at this process boundary only when `--harness pi`
  * is selected, via the gated loader that enforces Git-ignore and never mutates
@@ -18,6 +20,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runIdFor } from "../src/core/experiment.ts";
+import { createBatchSignals, deriveBatchRunFacts, runBatchSequence } from "../src/runner/batch.ts";
+import type { BatchRunFacts } from "../src/runner/batch.ts";
 import type { Target } from "../src/core/experiment.ts";
 import {
   EvalError,
@@ -49,9 +53,13 @@ import {
   runPairedEvaluation,
   STARTUP_ALLOWANCE_MS,
   type RunProgressEvent,
+  type RunResult,
 } from "../src/runner/run.ts";
 import { buildRunReport, formatRunReport, REPORT_JSON_SCHEMA_VERSION } from "../src/artifacts/queries.ts";
+import type { RunReport } from "../src/artifacts/queries.ts";
 import { renderRunExports, writeRunExports } from "../src/artifacts/run-exports.ts";
+import { exportCombinedForRuns } from "../src/artifacts/combined-exports.ts";
+import { formatModelLabel } from "../src/artifacts/model-label.ts";
 import { resolveRepositoryUrl } from "../src/core/report-links.ts";
 
 /** Invocation clock begins at CLI module entry, before credentials, probes and source hashing. */
@@ -76,13 +84,17 @@ const SCHEDULING_IDS = ["serial", "overlap"] as const;
 type SchedulingId = (typeof SCHEDULING_IDS)[number];
 
 const USAGE =
-  `usage: eval --case <id> --skill <path> --model <id> [--mode ${RUN_MODES.join("|")}] [--repetitions <n>] ` +
+  `usage: eval --case <id> --skill <path> --model <id> [--model <id> ...] [--mode ${RUN_MODES.join("|")}] [--repetitions <n>] ` +
   `[--harness ${HARNESS_IDS.join("|")}] [--sandbox ${SANDBOX_IDS.join("|")}] [--validator-runner ${VALIDATOR_RUNNER_IDS.join("|")}] ` +
   `[--provider <google|anthropic>] [--thinking <level>] [--serial] [--scheduling ${SCHEDULING_IDS.join("|")}] ` +
   `[--format ${FORMAT_IDS.join("|")}] [--details] [--checks] [--quiet] [--capture-reasoning] ` +
   `[--limit <key>=<value> ...] (limit keys: ${LIMIT_KEYS.join(", ")})\n` +
   `  Defaults: measured mode, Pi, Apple Container, isolated validator, and low thinking.\n` +
   `  Provider is inferred from the exact model; --provider asserts or disambiguates it.\n` +
+  `  --model may be repeated: each model runs as its own independent sealed run, one after another in\n` +
+  `  argument order, then one combined EVALS.md (eval-cases/<case>/runs/EVALS-<run-id>+<run-id>.md) covers them.\n` +
+  `  --provider, --thinking, --limit and --repetitions apply to every model;\n` +
+  `  duplicate models and --format json with several models are refused.\n` +
   `  --mode fake explicitly selects zero-paid-call test doubles and does not require a model.\n` +
   `  --details adds operational metadata to human table/Markdown output; JSON is unchanged.\n` +
   `  --capture-reasoning retains model reasoning when we specifically want to analyze the model's reasoning; off by default because reasoning substantially increases session artifact size.\n` +
@@ -135,7 +147,10 @@ interface Args {
   readonly sandboxId: SandboxId;
   readonly validatorRunnerId: ValidatorRunnerId;
   readonly provider: string | null;
+  /** First (or only) requested model; `null` when none was given. */
   readonly model: string | null;
+  /** Every requested model in argument order (no duplicates). */
+  readonly models: readonly string[];
   readonly thinking: string | null;
   readonly schedulingPolicy: "serial" | "overlap";
   readonly format: FormatId;
@@ -161,7 +176,7 @@ export function parseArgs(argv: readonly string[]): Args {
   let validatorRunnerId: ValidatorRunnerId | undefined;
   const cliLimits: { -readonly [K in LimitKey]?: K extends TaskLimitKey ? TaskLimit : number } = {};
   let provider: string | null = null;
-  let model: string | null = null;
+  const models: string[] = [];
   let thinking: string | null = null;
   let schedulingPolicy: "serial" | "overlap" = "overlap";
   let format: FormatId = "table";
@@ -237,7 +252,10 @@ export function parseArgs(argv: readonly string[]): Args {
     } else if (flag === "--provider") {
       provider = value;
     } else if (flag === "--model") {
-      model = value;
+      if (models.includes(value)) {
+        throw new EvalError("input-invalid", `--model ${value} is given more than once; each model may run only once per command`, { at: "--model" });
+      }
+      models.push(value);
     } else if (flag === "--thinking") {
       thinking = value;
     } else if (flag === "--scheduling") {
@@ -313,10 +331,15 @@ export function parseArgs(argv: readonly string[]): Args {
   }
 
   if (mode === "measured" || harnessId === "pi") {
-    if (model === null) {
+    if (models.length === 0) {
       throw new EvalError("input-invalid", "--model is required for measured or scripted Pi runs; provider is inferred from the exact model", { at: "--model" });
     }
   }
+
+  if (models.length > 1 && format === "json") {
+    throw new EvalError("input-invalid", "--format json supports exactly one --model; run each model separately or use table/markdown", { at: "--format" });
+  }
+  const model = models[0] ?? null;
 
   return {
     suiteId,
@@ -330,6 +353,7 @@ export function parseArgs(argv: readonly string[]): Args {
     validatorRunnerId,
     provider,
     model,
+    models,
     thinking,
     schedulingPolicy,
     format,
@@ -407,18 +431,62 @@ export async function runCli(
       throw new EvalError("parity-violation", "injected CLI composition is restricted to the zero-paid-call test boundary", { at: "testComposition" });
     }
   }
-  const boundaryController = new AbortController();
+  if (args.models.length > 1) return runMultiModel(args, testComposition);
+  const executed = await executeRun({
+    args,
+    testComposition,
+    startedAtMs: CLI_STARTED_AT_MS,
+    target: null,
+    boundaryController: new AbortController(),
+  });
+  return executed.outcome;
+}
+
+/** Everything one run needs beyond the parsed arguments. */
+interface RunContext {
+  readonly args: Args;
+  readonly testComposition: TestOnlyRunComposition | undefined;
+  /** This run's own clock origin: progress times, the startup backstop and the runner's startup deadline. */
+  readonly startedAtMs: number;
+  /** Pre-resolved target (multi-model command); `null` resolves it from the arguments as a single run always has. */
+  readonly target: Target | null;
+  /** Credentials resolved once for the whole multi-model command; a run receives only its own provider's entry. */
+  readonly preloaded?: {
+    readonly guardedSecrets: readonly GuardedSecret[];
+    readonly byProvider: ReadonlyMap<string, CredentialDeliveryRequest>;
+  };
+  readonly boundaryController: AbortController;
+  /** Called once startup is complete and the runner owns cancellation. */
+  readonly onRunning?: () => void;
+}
+
+interface ExecutedRun {
+  readonly outcome: RunCliOutcome;
+  readonly report: RunReport | null;
+  readonly result: RunResult | null;
+  readonly target: Target | null;
+  /** A pair's cleanup was not verified (progress event observed). */
+  readonly cleanupUnverified: boolean;
+}
+
+/**
+ * Executes one complete run: resolve, probe, run, print its report and write its own exports.
+ * The single-model command calls this once; a multi-model command calls it once per model.
+ */
+async function executeRun(ctx: RunContext): Promise<ExecutedRun> {
+  const { args, testComposition, boundaryController } = ctx;
   const evalsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const repoRoot = evalsRoot;
   const now = new Date();
   const runId = runIdFor(now, randomBytes(4).toString("hex"));
   let workDir = "";
+  let cleanupUnverified = false;
   // Startup-only hard backstop: bounds pre-dispatch liveness (preflight, credentials,
   // probes, image build). It is NOT a whole-run ceiling and is NOT a function of the
   // per-arm wall clock; it is cleared once the run is underway so an unlimited arm has no
   // finite total timer. A finite arm is bounded by its own wall clock + infra allowances;
   // setup, capture and cleanup retain their separate operation deadlines.
-  let startupBackstopTimer: ReturnType<typeof setTimeout> | undefined = installHardBackstop(STARTUP_ALLOWANCE_MS);
+  let startupBackstopTimer: ReturnType<typeof setTimeout> | undefined = installHardBackstop(STARTUP_ALLOWANCE_MS, ctx.startedAtMs);
   try {
     const mode = args.mode;
     const suiteId = args.suiteId;
@@ -433,17 +501,7 @@ export async function runCli(
       throw new EvalError("not-implemented", "--mode fake with --harness pi requires the guarded scripted test composition; public fake runs cannot call real providers", { at: "--harness" });
     }
 
-    let target: Target;
-    if (args.model !== null) {
-      target = resolveTargetConfiguration({ model: args.model, provider: args.provider, thinking: args.thinking });
-    } else {
-      // An omitted model is permitted only for the explicit deterministic fake harness.
-      if (args.provider !== null && args.provider !== "google" && args.provider !== "anthropic") {
-        throw new EvalError("input-invalid", `unsupported provider '${args.provider}'`, { at: "target.provider" });
-      }
-      target = { ...FAKE_TARGET, provider: args.provider ?? FAKE_TARGET.provider, thinking: (args.thinking ?? FAKE_TARGET.thinking) as Target["thinking"] };
-      validateTargetThinking(target.provider, target.model, target.thinking);
-    }
+    const target: Target = ctx.target ?? resolveSingleTarget(args);
 
     // Resolve case/profile/CLI limits before credentials and pass this exact selection
     // to the runner.
@@ -457,6 +515,13 @@ export async function runCli(
     if (testComposition !== undefined) {
       guardedSecrets = testComposition.guardedSecrets;
       credentials = testComposition.credentials;
+    } else if (harnessId === "pi" && ctx.preloaded !== undefined) {
+      const own = ctx.preloaded.byProvider.get(target.provider);
+      if (own === undefined) {
+        throw new EvalError("credential-missing", `no credential was resolved for provider '${target.provider}'`, { at: target.provider });
+      }
+      guardedSecrets = ctx.preloaded.guardedSecrets;
+      credentials = [own];
     } else if (harnessId === "pi") {
       const envPath = join(evalsRoot, ".env");
       const loaded = await loadGuardedCredentials(envPath, repoRoot);
@@ -497,7 +562,7 @@ export async function runCli(
           "",
         ].join("\n"),
       );
-      return { code: 1, receiptPath: null, runDir: null };
+      return { outcome: { code: 1, receiptPath: null, runDir: null }, report: null, result: null, target, cleanupUnverified };
     }
 
     const probe = await sandbox.probe(boundaryController.signal);
@@ -509,22 +574,25 @@ export async function runCli(
           "",
         ].join("\n"),
       );
-      return { code: 1, receiptPath: null, runDir: null };
+      return { outcome: { code: 1, receiptPath: null, runDir: null }, report: null, result: null, target, cleanupUnverified };
     }
 
-    const runStartedAt = CLI_STARTED_AT_MS;
-    const onProgress = args.quiet && testComposition?.onProgress === undefined
-      ? undefined
-      : (event: RunProgressEvent) => {
-          if (!args.quiet) process.stderr.write(`${formatProgressEvent(event, runStartedAt)}\n`);
-          testComposition?.onProgress?.(event);
-        };
+    const runStartedAt = ctx.startedAtMs;
+    const onProgress = (event: RunProgressEvent): void => {
+      if (event.type === "cleanup-verified" && !event.verified) cleanupUnverified = true;
+      if (!args.quiet) process.stderr.write(`${formatProgressEvent(event, runStartedAt)}\n`);
+      testComposition?.onProgress?.(event);
+    };
 
     // The run is underway: pre-dispatch liveness is complete. Clear the startup backstop
     // without arming any total-run timer. From here a finite arm is bounded by its own
     // wall clock and infra allowances; an unlimited arm has no finite total timer.
+    // Every awaited startup step finishes first, so a signal in that window still aborts.
+    const source = resolveSourceIdentity(repoRoot);
+    const evaluatorBuild = await resolveEvaluatorBuild(evalsRoot);
     clearTimeout(startupBackstopTimer);
     startupBackstopTimer = undefined;
+    ctx.onRunning?.();
 
     const result = await runPairedEvaluation({
       evalsRoot,
@@ -535,13 +603,13 @@ export async function runCli(
       mode,
       repetitions,
       cliLimits: args.cliLimits,
-      invocationStartedAtMs: CLI_STARTED_AT_MS,
+      invocationStartedAtMs: ctx.startedAtMs,
       target,
       runId,
       resourceNonce: randomBytes(4).toString("hex"),
       createdAt: now.toISOString(),
-      source: resolveSourceIdentity(repoRoot),
-      evaluatorBuild: await resolveEvaluatorBuild(evalsRoot),
+      source,
+      evaluatorBuild,
       harness,
       sandbox,
       validatorRunner,
@@ -568,9 +636,7 @@ export async function runCli(
     if (report.verification.ok) {
       const note = args.format === "json" ? process.stderr : process.stdout;
       try {
-        const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { repository?: string | { url?: string } };
-        const repoUrl = resolveRepositoryUrl(undefined, typeof pkg.repository === "string" ? pkg.repository : pkg.repository?.url);
-        const exports = await renderRunExports(result.receiptPath, { repoUrl });
+        const exports = await renderRunExports(result.receiptPath, { repoUrl: readRepositoryUrl(repoRoot) });
         await writeRunExports(result.runDir, exports);
         const rel = relative(repoRoot, result.runDir);
         const shown = rel.startsWith("..") ? result.runDir : rel;
@@ -584,14 +650,153 @@ export async function runCli(
     }
 
     return {
-      code: report.verification.ok && result.status === "complete" ? 0 : 1,
-      receiptPath: result.receiptPath,
-      runDir: result.runDir,
+      outcome: {
+        code: report.verification.ok && result.status === "complete" ? 0 : 1,
+        receiptPath: result.receiptPath,
+        runDir: result.runDir,
+      },
+      report,
+      result,
+      target,
+      cleanupUnverified,
     };
   } finally {
     clearTimeout(startupBackstopTimer);
     if (workDir !== "") await disposeRunWorkDir(workDir);
   }
+}
+
+function readRepositoryUrl(repoRoot: string): string {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { repository?: string | { url?: string } };
+  return resolveRepositoryUrl(undefined, typeof pkg.repository === "string" ? pkg.repository : pkg.repository?.url);
+}
+
+/** The target of a single-model command (or the deterministic fake default). */
+function resolveSingleTarget(args: Args): Target {
+  if (args.model !== null) {
+    return resolveTargetConfiguration({ model: args.model, provider: args.provider, thinking: args.thinking });
+  }
+  // An omitted model is permitted only for the explicit deterministic fake harness.
+  if (args.provider !== null && args.provider !== "google" && args.provider !== "anthropic") {
+    throw new EvalError("input-invalid", `unsupported provider '${args.provider}'`, { at: "target.provider" });
+  }
+  const target: Target = { ...FAKE_TARGET, provider: args.provider ?? FAKE_TARGET.provider, thinking: (args.thinking ?? FAKE_TARGET.thinking) as Target["thinking"] };
+  validateTargetThinking(target.provider, target.model, target.thinking);
+  return target;
+}
+
+const accuracyCell = (report: RunReport | null, arm: "baseline" | "treatment"): string =>
+  report?.scored?.pillars.accuracy[arm] ?? "n/a";
+
+type ExecutedBatchRun = ExecutedRun & BatchRunFacts;
+
+const withFacts = (run: ExecutedRun): ExecutedBatchRun => ({ ...run, ...deriveBatchRunFacts(run) });
+
+/**
+ * Multi-model command composition: validates, resolves credentials once, then hands the
+ * ordered runs to `runBatchSequence` (src/runner/batch.ts), which owns the policy.
+ */
+async function runMultiModel(args: Args, testComposition: TestOnlyRunComposition | undefined): Promise<RunCliOutcome> {
+  const evalsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = evalsRoot;
+  if (args.mode === "fake" && args.harnessId === "pi" && testComposition === undefined) {
+    throw new EvalError("not-implemented", "--mode fake with --harness pi requires the guarded scripted test composition; public fake runs cannot call real providers", { at: "--harness" });
+  }
+  // Validate every target before any run, probe or credential.
+  const targets: Target[] = args.models.map((model) =>
+    resolveTargetConfiguration({ model, provider: args.provider, thinking: args.thinking }));
+  // Resolve the case and skill before credentials; the suite folder also locates the runs folder.
+  const selection = await preflightForRun({
+    evalsRoot, repoRoot, suiteId: args.suiteId ?? undefined, caseSelector: args.caseSelector,
+    skillPath: args.skillPath, cliLimits: args.cliLimits,
+  });
+  const runsDir = join(selection.suite.dir, "runs");
+
+  let preloaded: RunContext["preloaded"];
+  if (testComposition === undefined && args.harnessId === "pi") {
+    const envPath = join(evalsRoot, ".env");
+    const loaded = await loadGuardedCredentials(envPath, repoRoot);
+    const byProvider = new Map<string, CredentialDeliveryRequest>();
+    for (const target of targets) {
+      if (byProvider.has(target.provider)) continue;
+      const variable = PROVIDER_CREDENTIAL_VARIABLES[target.provider];
+      const value = getProviderCredential(target.provider, loaded.credentials);
+      if (value === null) {
+        throw new EvalError(
+          "credential-missing",
+          `credential variable '${variable}' is missing or blank in ${envPath} for provider '${target.provider}'`,
+          { at: variable },
+        );
+      }
+      byProvider.set(target.provider, { variable, value });
+    }
+    preloaded = { guardedSecrets: loaded.guardedSecrets, byProvider };
+  }
+
+  const labels = targets.map((target) => formatModelLabel(target));
+  let combinedPath: string | null = null;
+
+  const outcome = await runBatchSequence<ExecutedBatchRun>({
+    labels,
+    signals: createBatchSignals(),
+    async runOne(index, { startedAtMs, controller, onRunning }) {
+      process.stdout.write(`\n=== Model ${index + 1} of ${targets.length}: ${labels[index]} ===\n`);
+      return withFacts(await executeRun({
+        args,
+        testComposition,
+        startedAtMs,
+        target: targets[index]!,
+        preloaded,
+        boundaryController: controller,
+        onRunning,
+      }));
+    },
+    onRunFailure(error) {
+      const failure = toStructuredFailure(error, "input-invalid");
+      process.stderr.write(`FAIL [${failure.code}] at ${failure.at ?? "(unknown)"}: ${failure.message}\n`);
+      return failure.code;
+    },
+    async exportCombined(executed, threw) {
+      // One combined EVALS.md from the runs this command produced, in model argument order.
+      const result = await exportCombinedForRuns({
+        runs: executed.map((run, index) => ({
+          label: labels[index]!,
+          receiptPath: run?.outcome.receiptPath ?? null,
+          notStarted: run === null && !threw.has(index),
+        })),
+        repoUrl: readRepositoryUrl(repoRoot),
+      });
+      if (!result.ok) {
+        process.stderr.write(`WARNING: combined EVALS.md not generated: ${result.reason}\n`);
+        return;
+      }
+      const rel = relative(repoRoot, result.path);
+      combinedPath = rel.startsWith("..") ? result.path : rel;
+    },
+  });
+
+  const out: string[] = ["", `models   ${outcome.startedCount} of ${targets.length} started`];
+  targets.forEach((_target, index) => {
+    const run = outcome.executed[index];
+    if (run === null || run === undefined || !run.started) {
+      const code = outcome.threw.get(index);
+      out.push(`  ${index + 1}. ${labels[index]}  ${code === undefined ? "not run" : `failed (${code || "error"})`}`);
+      return;
+    }
+    const receipt = run.outcome.receiptPath === null ? "none" : relative(repoRoot, run.outcome.receiptPath);
+    const status = !run.verified ? "unverified" : (run.result?.status ?? "unknown");
+    out.push(
+      `  ${index + 1}. ${labels[index]}  run ${run.result?.runId ?? "none"}  receipt ${receipt}  status ${status}  ` +
+        `baseline ${accuracyCell(run.report, "baseline")}  treatment ${accuracyCell(run.report, "treatment")}`,
+    );
+  });
+  if (outcome.stopReason !== null) out.push(`stopped  ${outcome.stopReason}`);
+  if (combinedPath !== null) out.push(`combined  ${combinedPath}`);
+  out.push("");
+  process.stdout.write(`${out.join("\n")}\n`);
+
+  const last = [...outcome.executed].reverse().find((run) => run?.outcome.receiptPath != null) ?? null;
+  return { code: outcome.code, receiptPath: last?.outcome.receiptPath ?? null, runDir: last?.outcome.runDir ?? null };
 }
 
 /**
@@ -608,8 +813,8 @@ export async function runCli(
  * run-time ceiling and an unlimited arm is never capped by a hidden finite total timer.
  * It is unref'd, so it never keeps an otherwise-finished process alive.
  */
-function installHardBackstop(resolvedBudgetMs: number): ReturnType<typeof setTimeout> {
-  const remainingMs = Math.max(0, CLI_STARTED_AT_MS + resolvedBudgetMs - Date.now());
+function installHardBackstop(resolvedBudgetMs: number, startedAtMs: number): ReturnType<typeof setTimeout> {
+  const remainingMs = Math.max(0, startedAtMs + resolvedBudgetMs - Date.now());
   const timer = setTimeout(() => {
     const seconds = (resolvedBudgetMs / 1000).toFixed(1);
     process.stderr.write(

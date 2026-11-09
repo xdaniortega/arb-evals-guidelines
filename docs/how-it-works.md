@@ -43,4 +43,6 @@ Declare the checks in `rubric.json` and implement them in `validator.ts`:
 
 Evidence is sealed in `eval-cases/<case-id>/runs/<run-id>/` and committed. A receipt and manifest hash the retained files; `eval:report` and `eval:inspect` verify that chain, so editing a sealed file breaks verification. `views/` (git-ignored) and the two generated reports are outside the chain.
 
+A command with several `--model` values runs each model as its own, fully independent sealed run; nothing in the evidence ties the runs together. The combined `EVALS.md` it prints (`eval-cases/<case-id>/runs/EVALS-<run-id>+<run-id>.md`, named after its runs) is generated from those verified runs, sits outside every chain and is checked and regenerated with `eval:export`.
+
 If an interrupted run leaves containers or networks behind: `pnpm eval:recover -- --run <run-id>`.

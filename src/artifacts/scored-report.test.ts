@@ -17,6 +17,7 @@ import {
   renderScoredTerminal,
   REPORT_JSON_SCHEMA_VERSION,
 } from "./scored-report.ts";
+import { renderCombinedSummary } from "./combined-exports.ts";
 import { attachConditionCheckResults, formatRunReport } from "./queries.ts";
 import { buildSummaryDocument, buildSummaryEntry, projectOutcomeChecks } from "./summary-entry.ts";
 import type { SummaryDocument } from "./scored-report.ts";
@@ -549,7 +550,7 @@ describe("renderScoredSummaryMarkdown", () => {
     expect(out).not.toMatch(/Hash:|Run:|Agent:|Status:|AF-Evaluation|img\.shields|Mean Score|Execution|Run details/);
     expect(out).not.toContain("### Accuracy\n");
     expect(out.startsWith("> **Warning:** TEST-DOUBLE EVIDENCE")).toBe(true);
-    expect(out).toContain("# arbitrum-docs — Evaluation cases\n\n## Case index\n\nScore in this index is the Treatment score.\n");
+    expect(out).toContain("# arbitrum-docs — Evaluation cases\n\n## Case index\n\nScore is the Treatment score; the change from Baseline is in parentheses.\n");
     golden("evals-summary.single.md", out);
   });
 
@@ -561,6 +562,118 @@ describe("renderScoredSummaryMarkdown", () => {
     expect(out).not.toContain("Warning");
     expect(out).toContain("Metrics are means across all three pairs.");
     golden("evals-summary.mean.md", out);
+  });
+
+  it("groups consecutive entries of one case under one section with a row per model, and matches the combined golden", () => {
+    const pass = MOCK_RUBRIC.checks.map((c) => c.id);
+    const flash = fixture({ caseId: "network-config-01", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, testDouble: true, runId: "run-001", pairs: [{ baseline: ["json-shape", "preservation"], treatment: pass }] });
+    const argon = fixture({ caseId: "network-config-01", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, testDouble: true, runId: "run-002", target: { provider: "google", model: "gemini-4-argon", thinking: "low" }, pairs: [{ baseline: ["json-shape", "preservation"], treatment: ["json-shape", "preservation"] }] });
+    // The combined export path: entries built per run in argument order, each linking its own full report.
+    const out = renderCombinedSummary(
+      [flash, argon].map(({ report, scored }) => ({
+        report,
+        scored,
+        frozenPrompt: `Prompt of ${report.caseId}.`,
+        reportUrl: DETAILS_URL.replace("run-001", report.runId),
+      })),
+    );
+    // One case section, one Task, one Results table, one Outcome Checks table.
+    expect(out.match(/^## network-config-01$/gm)).toHaveLength(1);
+    expect(out.match(/^### Task$/gm)).toHaveLength(1);
+    expect(out.match(/^### Results$/gm)).toHaveLength(1);
+    expect(out.match(/^### Outcome Checks · network-config-01$/gm)).toHaveLength(1);
+    // Both index rows link the same section; one Results row per model, one column per model, one total row.
+    expect(out.match(/\| \[network-config-01\]\(#network-config-01\) \|/g)).toHaveLength(2);
+    expect(out.match(/^\| `network-config-01` \| Google Gemini (3\.8 Flash|4 Argon) \|/gm)).toHaveLength(2);
+    expect(out).toContain("| Check | Google Gemini 3.8 Flash | Google Gemini 4 Argon |");
+    expect(out.match(/\*\*Outcome total\*\*/g)).toHaveLength(1);
+    // A tied check shows one value, a differing one Baseline -> Treatment.
+    expect(out).toMatch(/\| \S[^|]* \| \d+(\.\d)?\/\d+ → \d+(\.\d)?\/\d+ \| \d+(\.\d)?\/\d+ \|/);
+    // One report row per model, each pointing at that model's own run, and one entry comment per run.
+    expect(out.match(/\[View full report\]/g)).toHaveLength(2);
+    expect(out).toContain("runs/run-001/EVALS-FULL-REPORT.md");
+    expect(out).toContain("runs/run-002/EVALS-FULL-REPORT.md");
+    expect(out.match(/<!-- EVALS-ENTRY case=network-config-01 run=run-00[12] /g)).toHaveLength(2);
+    expect(out).not.toContain("batch=");
+    expect(out).not.toContain("AF-EVAL:");
+    golden("evals-summary.combined.md", out);
+  });
+
+  it("renders a group of one exactly as before and never groups different cases", () => {
+    const single = documentOf(fixture({ caseId: "network-config-01", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, runId: "run-001", pairs: [{ baseline: [], treatment: MOCK_RUBRIC.checks.map((c) => c.id) }] }));
+    const plain = renderScoredSummaryMarkdown(single);
+    const other = fixture({ caseId: "other-case", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, runId: "run-002", pairs: [{ baseline: [], treatment: [] }] });
+    const two = documentOf(fixture({ caseId: "network-config-01", skill: "arbitrum-docs", rubric: MOCK_RUBRIC, runId: "run-001", pairs: [{ baseline: [], treatment: MOCK_RUBRIC.checks.map((c) => c.id) }] }), other);
+    // Different cases are never grouped: two sections, two report rows.
+    const out = renderScoredSummaryMarkdown(two);
+    expect(out.match(/^## (network-config-01|other-case)$/gm)).toHaveLength(2);
+    expect(out.match(/\[View full report\]/g)).toHaveLength(2);
+    // Each case has its own Outcome Checks table named after its id.
+    expect(out).toContain("### Outcome Checks · network-config-01");
+    expect(out).toContain("### Outcome Checks · other-case");
+  });
+
+  it("renders one model, two models of a case and a tied versus differing check", () => {
+    const rubric: Rubric = { rubricVersion: "v0.2", checks: [
+      { id: "o1", group: "outcome", points: 40 }, { id: "o2", group: "outcome", points: 40 },
+      { id: "c1", group: "constraints", points: 20 } ] };
+    const a = fixture({ caseId: "x", rubric, runId: "run-a", pairs: [{ baseline: ["c1"], treatment: ["o1", "o2", "c1"] }] });
+    const b = fixture({ caseId: "x", rubric, runId: "run-b", target: { provider: "openai", model: "gpt-5", thinking: "off" }, pairs: [{ baseline: ["o2", "c1"], treatment: ["o2", "c1"] }] });
+    const one = renderScoredSummaryMarkdown(documentOf(a));
+    expect(one).toContain("| [x](#x) | Google Gemini 3.8 Flash | X title | 100% (+80%) |");
+    expect(one).toContain("| `x` | Google Gemini 3.8 Flash | 20% → 100%<br>+80% |");
+    expect(one).toContain("| Check | Google Gemini 3.8 Flash |\n");
+    expect(one).toContain("| o1 | 0/40 → 40/40 |");
+    expect(one).toContain("| **Outcome total** | **0/80 → 80/80** |");
+    const two = renderScoredSummaryMarkdown(documentOf(a, b));
+    expect(two).toContain("| [x](#x) | Google Gemini 3.8 Flash | X title | 100% (+80%) |");
+    expect(two).toContain("| [x](#x) | OpenAI GPT 5 | X title | 60% (0%) |");
+    expect(two).toContain("| Check | Google Gemini 3.8 Flash | OpenAI GPT 5 |");
+    expect(two).toContain("| o1 | 0/40 → 40/40 | 0/40 |");
+    expect(two).toContain("| o2 | 0/40 → 40/40 | 40/40 |");
+    expect(two).toContain("| **Outcome total** | **0/80 → 80/80** | **40/80** |");
+    expect(two).toContain("runs/run-a/EVALS-FULL-REPORT.md)");
+    expect(two).toContain("runs/run-b/EVALS-FULL-REPORT.md)");
+  });
+
+  it("prints a per-model metrics note when same-case entries differ in pair selection", () => {
+    const rubric: Rubric = { rubricVersion: "v0.2", checks: [{ id: "o1", group: "outcome", points: 80 }, { id: "c1", group: "constraints", points: 20 }] };
+    const pair = { baseline: [] as string[], treatment: ["o1", "c1"] };
+    const mean = fixture({ caseId: "x", rubric, runId: "run-a", pairs: [pair, pair, pair] });
+    const single = fixture({ caseId: "x", rubric, runId: "run-b", target: { provider: "openai", model: "gpt-5", thinking: "off" }, pairs: [pair] });
+    const out = renderScoredSummaryMarkdown(documentOf(mean, single));
+    expect(out).toContain("Google Gemini 3.8 Flash: Metrics are means across all three pairs.");
+    expect(out).toContain("OpenAI GPT 5: Metrics are from a single pair.");
+    expect(out).not.toMatch(/^Metrics are /m);
+  });
+
+  it("renders each case of a two-case document with its own rubric rows and total", () => {
+    const pass = MOCK_RUBRIC.checks.map((c) => c.id);
+    const a = fixture({ caseId: "case-a", rubric: RUBRIC_A, runId: "run-a", pairs: [{ baseline: ["k1"], treatment: ALL_A }] });
+    const b = fixture({ caseId: "case-b", rubric: MOCK_RUBRIC, runId: "run-b", pairs: [{ baseline: [], treatment: pass }] });
+    const out = renderScoredSummaryMarkdown(documentOf(a, b));
+    const section = (id: string): string => {
+      const start = out.indexOf(`### Outcome Checks · ${id}`);
+      const end = out.indexOf("\n## ", start);
+      return out.slice(start, end === -1 ? undefined : end);
+    };
+    const sa = section("case-a");
+    expect(sa).toContain("| Check | Google Gemini 3.8 Flash |");
+    expect(sa).toContain("| Zone records | 0/30 → 30/30 |");
+    expect(sa).toContain("| TTL policy | 0/20 → 20/20 |");
+    expect(sa).toContain("| Failover | 0/30 → 30/30 |");
+    expect(sa).toContain("| **Outcome total** | **0/80 → 80/80** |");
+    expect(sa).not.toContain("Correct network identities");
+    const sb = section("case-b");
+    expect(sb).toContain("| Correct network identities | 0/10 → 10/10 |");
+    expect(sb).toContain("| **Outcome total** | **0/80 → 80/80** |");
+    expect(sb).not.toContain("Zone records");
+  });
+
+  it("refuses to render entries of one case whose check lists differ", () => {
+    const a = fixture({ caseId: "x", rubric: RUBRIC_A, runId: "run-a", pairs: [{ baseline: [], treatment: ALL_A }] });
+    const b = fixture({ caseId: "x", rubric: { rubricVersion: "v0.2", checks: [{ id: "o1", group: "outcome", points: 80 }, { id: "c1", group: "constraints", points: 20 }] }, runId: "run-b", pairs: [{ baseline: [], treatment: ["o1", "c1"] }] });
+    expect(() => renderScoredSummaryMarkdown(documentOf(a, b))).toThrow(/Outcome checks of case x differ/);
   });
 
   it("renders a score change as the signed arithmetic difference (20% to 69% is +49%), never relative growth", () => {
@@ -580,7 +693,7 @@ describe("renderScoredSummaryMarkdown", () => {
     expect(scored.pillars.accuracy.baseline).toBe("20%");
     expect(scored.pillars.accuracy.treatment).toBe("100%");
     const md = renderScoredSummaryMarkdown(documentOf(fixture({ caseId: "x", rubric, pairs: [{ baseline: ["c1"], treatment: ["o1", "c1"] }] })));
-    expect(md).toContain("| Score | Google Gemini 3.8 Flash | 20% | 60% | +40% |");
+    expect(md).toContain("| `x` | Google Gemini 3.8 Flash | 20% → 60%<br>+40% |");
   });
 
   it("renders its own skill, case, task, model, rubric labels, weights and pair counts (1, 3 and 4 pairs)", () => {
@@ -594,12 +707,12 @@ describe("renderScoredSummaryMarkdown", () => {
         })),
       );
       expect(out).toContain("# ops-skill — Evaluation cases");
-      expect(out).toContain("| [dns-migration-02](#dns-migration-02) | Anthropic Claude Sonnet 4.5 | Dns zone migration | 100% |");
+      expect(out).toContain("| [dns-migration-02](#dns-migration-02) | Anthropic Claude Sonnet 4.5 | Dns zone migration | 100% (+90%) |");
       expect(out).toContain("Prompt of dns-migration-02.");
-      expect(out).toContain("| `dns-migration-02` | Zone records | Anthropic Claude Sonnet 4.5 | 0/30 | 30/30 |");
-      expect(out).toContain("| `dns-migration-02` | TTL policy | Anthropic Claude Sonnet 4.5 | 0/20 | 20/20 |");
-      expect(out).toContain("| `dns-migration-02` | Failover | Anthropic Claude Sonnet 4.5 | 0/30 | 30/30 |");
-      expect(out).toContain("| `dns-migration-02` | **Outcome total** | Anthropic Claude Sonnet 4.5 | **0/80** | **80/80** |");
+      expect(out).toContain("| Zone records | 0/30 → 30/30 |");
+      expect(out).toContain("| TTL policy | 0/20 → 20/20 |");
+      expect(out).toContain("| Failover | 0/30 → 30/30 |");
+      expect(out).toContain("| **Outcome total** | **0/80 → 80/80** |");
       expect(out).toContain(pairCount === 1 ? "Metrics are from a single pair." : `Metrics are means across all ${["", "", "", "three", "four"][pairCount]} pairs.`);
       expect(out).not.toMatch(/arbitrum|network-config|Gemini|ten pairs/i);
       expect((out.match(/Zone records/g) ?? []).length).toBe(1);
@@ -616,8 +729,8 @@ describe("renderScoredSummaryMarkdown", () => {
       ],
     })));
     // zones: (15 + 30 + 0) / 3 = 15; ttl and failover pass in all pairs.
-    expect(out).toMatch(/\| Zone records \| [^|]+ \| 0\/30 \| 15\/30 \|/);
-    expect(out).toMatch(/\*\*0\/80\*\* \| \*\*65\/80\*\*/);
+    expect(out).toMatch(/\| Zone records \| 0\/30 → 15\/30 \|/);
+    expect(out).toMatch(/\*\*0\/80 → 65\/80\*\*/);
   });
 
   it("selects an explicit pair and says so", () => {
@@ -626,7 +739,7 @@ describe("renderScoredSummaryMarkdown", () => {
       pairs: [{ baseline: [], treatment: ALL_A }, { baseline: [], treatment: ["b1"] }, { baseline: [], treatment: ALL_A }],
     })));
     expect(out).toContain("Metrics are from the explicitly selected pair r002 of 3.");
-    expect(out).toMatch(/\*\*0\/80\*\* \| \*\*20\/80\*\*/);
+    expect(out).toMatch(/\*\*0\/80 → 20\/80\*\*/);
     expect(out).not.toContain("means across");
   });
 
@@ -650,12 +763,12 @@ describe("renderScoredSummaryMarkdown", () => {
       { baseline: ["y1", "p1"], treatment: ["z1", "y1", "p1"] },
     ] });
     const out = renderScoredSummaryMarkdown(documentOf(input));
-    expect(out).toContain("| `mixed-01` | x1 | Google Gemini 3.8 Flash | 0/30 | 15/30 |");
-    expect(out).toContain("| `mixed-01` | Outcome topic | Google Gemini 3.8 Flash | 0/50 | 50/50 |");
-    expect(out).toContain("**0/80** | **65/80**");
+    expect(out).toContain("| x1 | 0/30 → 15/30 |");
+    expect(out).toContain("| Outcome topic | 0/50 → 50/50 |");
+    expect(out).toContain("**0/80 → 65/80**");
     expect(out).not.toMatch(/Mixed topic|Preservation|y1|p1/);
     // Score is the full accuracy: baseline 20, treatment mean of 90 and 70 points.
-    expect(out).toContain("| Score | Google Gemini 3.8 Flash | 20% | 80% | +60% |");
+    expect(out).toContain("| `mixed-01` | Google Gemini 3.8 Flash | 20% → 80%<br>+60% |");
   });
 
   it("projects ungrouped outcome checks and rubrics without topics, with declared IDs as labels", () => {
@@ -683,7 +796,7 @@ describe("renderScoredSummaryMarkdown", () => {
     const entry = buildSummaryEntry({ report: { ...report, target: undefined, caseScenario: undefined }, scored, frozenPrompt: null, reportUrl: "https://github.com/example/evals/blob/HEAD/x" });
     const out = renderScoredSummaryMarkdown({ skillLabel: "ops-skill", entries: [entry] });
     expect(out).toContain("Task description unavailable");
-    expect(out).toContain("| Score | n/a |");
+    expect(out).toContain("| `dns-migration-02` | n/a |");
     // Without recorded check results individual rows cannot be shown faithfully: n/a, not guessed.
     const bare = createConditionReport("treatment", { rubricScore: scoreWithRubric(RUBRIC_A, RUBRIC_A.checks.map((c) => ({ id: c.id, passed: true, message: "" }))) });
     expect(projectOutcomeChecks(FLAT_A, [pairOf(null, bare)]).rows[0]!.treatment).toBeNull();
@@ -698,20 +811,20 @@ describe("renderScoredSummaryMarkdown", () => {
     });
     const out = renderScoredSummaryMarkdown(documentOf(one, two));
     expect(out.indexOf("## dns-migration-02")).toBeLessThan(out.indexOf("## alpha-case"));
-    expect(out).toContain("| [dns-migration-02](#dns-migration-02) | Google Gemini 3.8 Flash | Dns-migration-02 title | 100% |");
-    expect(out).toContain("| [alpha-case](#alpha-case) | OpenAI GPT 5 | Alpha-case title | 25% |");
+    expect(out).toContain("| [dns-migration-02](#dns-migration-02) | Google Gemini 3.8 Flash | Dns-migration-02 title | 100% (+100%) |");
+    expect(out).toContain("| [alpha-case](#alpha-case) | OpenAI GPT 5 | Alpha-case title | 25% (+15%) |");
     expect(out).toContain("Prompt of alpha-case.");
     expect(out).toContain("Metrics are from a single pair.");
     expect(out).toContain("Metrics are means across all two pairs.");
-    expect(out).toContain("| dns-migration-02 | [View full report](https://github.com/example/evals/blob/HEAD/eval-cases/dns-migration-02/runs/run-dns-migration-02/EVALS-FULL-REPORT.md) |");
-    expect(out).toContain("| alpha-case | [View full report](https://github.com/example/evals/blob/HEAD/eval-cases/alpha-case/runs/run-alpha-case/EVALS-FULL-REPORT.md) |");
+    expect(out).toContain("| dns-migration-02 | Google Gemini 3.8 Flash | [View full report](https://github.com/example/evals/blob/HEAD/eval-cases/dns-migration-02/runs/run-dns-migration-02/EVALS-FULL-REPORT.md) |");
+    expect(out).toContain("| alpha-case | OpenAI GPT 5 | [View full report](https://github.com/example/evals/blob/HEAD/eval-cases/alpha-case/runs/run-alpha-case/EVALS-FULL-REPORT.md) |");
     expect(out).toMatch(new RegExp(`case=dns-migration-02 run=run-dns-migration-02 selection=single pairs=\\S+ treeSha256=${"11".repeat(32)} -->`));
     expect(out).toMatch(new RegExp(`case=alpha-case run=run-alpha-case selection=mean pairs=run-alpha-case-r001,run-alpha-case-r002 treeSha256=${"22".repeat(32)} -->`));
     expect(out).not.toContain("treeSha256=" + "cd".repeat(32));
     expect(out).not.toMatch(/overall|average score|Mean Score/i);
     // Full reports is the last visible section.
     const visible = out.replace(/<!--[\s\S]*?-->/g, "");
-    expect(visible.lastIndexOf("## Full reports")).toBeGreaterThan(visible.lastIndexOf("### Outcome Checks"));
+    expect(visible.lastIndexOf("## Full reports")).toBeGreaterThan(visible.lastIndexOf("### Outcome Checks ·"));
   });
 
   it("index links resolve to real section anchors, even for ids that collide with fixed headings", () => {
@@ -782,8 +895,8 @@ describe("renderScoredSummaryMarkdown", () => {
     }));
     const input = fixture({ caseId: "drift-01", rubric, pairs });
     const out = renderScoredSummaryMarkdown(documentOf(input));
-    expect(out).toContain("**0/80** | **0.8/80**");
-    expect(out).toContain("| a | Google Gemini 3.8 Flash | 0/1 | 0.3/1 |");
+    expect(out).toContain("**0/80 → 0.8/80**");
+    expect(out).toContain("| a | 0/1 → 0.3/1 |");
   });
 
   it("fails closed in the verified adapter when the receipt carries no tree hash", () => {
@@ -798,8 +911,8 @@ describe("renderScoredSummaryMarkdown", () => {
       pairs: [{ baseline: [], treatment: ALL_A }],
       treatment: { consumedTokens: null, durationMs: null, sessionDurationMs: 7_000 },
     })));
-    expect(out).toContain("| Cost: recorded tokens | Google Gemini 3.8 Flash | 1,000 | n/a | n/a |");
-    expect(out).toContain("| Latency | Google Gemini 3.8 Flash | 10,000 ms | 7,000 ms (session-derived) | −3,000 ms (−30.0%, approximate) |");
+    expect(out).toContain("| 1,000 → n/a<br>n/a |");
+    expect(out).toContain("| 10,000 ms → 7,000 ms (session-derived)<br>−3,000 ms (−30.0%, approximate) |");
   });
 
   it("neutralizes setext underline lines in task text", () => {

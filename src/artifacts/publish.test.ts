@@ -492,7 +492,7 @@ Some historical notes.
     // No execution status or badge in the summary; the scores are the real graded ones.
     expect(content).not.toContain("Status:");
     expect(content).not.toMatch(/AF-Evaluation|img\.shields/);
-    expect(content).toContain("| Score | Google Fake Model 0 |");
+    expect(content).toMatch(/\| `[^`]+` \| Google Fake Model 0 \| [^|]*→[^|]*<br>/);
     // Must NOT claim certification
     expect(content).not.toContain("certified");
     expect(content).not.toContain("guaranteed");
@@ -520,8 +520,8 @@ Some historical notes.
     const content = await readFile(evalsPath, "utf8");
 
     expect(content).not.toMatch(/Status:|task limit|Task limit|completed/);
-    expect(content).toContain("| Score | Google Fake Model 0 |");
-    expect(content).toContain("### Outcome Checks");
+    expect(content).toMatch(/\| `[^`]+` \| Google Fake Model 0 \| [^|]*→[^|]*<br>/);
+    expect(content).toContain("### Outcome Checks · ");
   });
 
   it("refuses to publish a run with an ungraded arm instead of publishing n/a", async () => {
@@ -556,8 +556,8 @@ Some historical notes.
     expect(content).toContain(`selection=mean pairs=${report.pairs.map((pair) => pair.pairId).join(",")}`);
     expect(labels).toHaveLength(3);
     // Same table headers as a single-pair export.
-    expect(content).toContain("| Metric | LLM model | Baseline | Treatment | Change |");
-    expect(content).toContain("| Eval case | Check | LLM model | Baseline | Treatment |");
+    expect(content).toContain("| Eval case | LLM model | Score<br>(baseline vs treatment) | Recorded tokens<br>(baseline vs treatment) | Latency<br>(baseline vs treatment) |");
+    expect(content).toContain("| Check | Google Fake Model 0 |");
     expect(content).not.toContain("| Pillar |");
   });
 
@@ -861,7 +861,7 @@ Some historical notes.
       runRelativeDir: `eval-cases/${report.caseId}/runs/${report.runId}`,
       target: "full-report",
     });
-    expect(created).toContain(`| ${report.caseId} | [View full report](${url}) |\n`);
+    expect(created).toContain(`| ${report.caseId} | Google Fake Model 0 | [View full report](${url}) |\n`);
     expect(created.replace(/<!--[\s\S]*?-->/g, "").trimEnd().endsWith(`[View full report](${url}) |`)).toBe(true);
 
     const named = join(dir, "OUT.md");

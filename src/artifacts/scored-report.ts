@@ -679,7 +679,7 @@ export function renderScoredMarkdown(
 }
 
 // ---------------------------------------------------------------------------
-// Skill summary document (EVALS.md): one index plus one section per case entry
+// Skill summary document (EVALS.md): one index plus one section per case
 // ---------------------------------------------------------------------------
 
 /** One mean (or single-pair) Outcome Checks row; points are means over the rendered pairs. */
@@ -723,7 +723,12 @@ export interface SummaryEntry {
 
 export interface SummaryDocument {
   readonly skillLabel: string;
-  /** Rendered in the given order; never sorted, merged or deduplicated. */
+  /**
+   * Rendered in the given order; never sorted or deduplicated, and no value is merged or
+   * recomputed. Consecutive entries of the same case are presented under one case section
+   * (one Task, one Results table with a row per model, one Outcome Checks table with a
+   * column per model); entries of a case must share the same frozen check list.
+   */
   readonly entries: readonly SummaryEntry[];
 }
 
@@ -832,19 +837,18 @@ function summaryTable(
   headers: readonly string[],
   aligns: readonly ("left" | "right")[],
   rows: readonly (readonly string[])[],
-  spaced: boolean,
 ): string[] {
   const sep = aligns.map((a) => (a === "right" ? "---:" : "---"));
   return [
     `| ${headers.join(" | ")} |`,
-    spaced ? `| ${sep.join(" | ")} |` : `|${sep.join("|")}|`,
+    `| ${sep.join(" | ")} |`,
     ...rows.map((row) => `| ${row.join(" | ")} |`),
   ];
 }
 
 /**
  * Renders the skill summary (`EVALS.md`): `# <skill> — Evaluation cases`, a case index, one
- * section per entry (task, results, outcome checks) and a final table of full-report links.
+ * section per case (task, a results row per model, an outcome checks column per model) and a final table of full-report links.
  * Pure: formatting only, no file or network access. Provenance (the exact manifest tree hash
  * of each entry) is kept in non-visible `EVALS-ENTRY` comments after the last table.
  */
@@ -852,78 +856,109 @@ export function renderScoredSummaryMarkdown(document: SummaryDocument): string {
   const lines: string[] = [];
   if (document.entries.some((entry) => entry.testDouble)) lines.push(`> **Warning:** ${TEST_DOUBLE_WARNING}`, "");
 
+  // Consecutive entries of one case share a section (one Task, one Results table, one
+  // Outcome Checks table); a group of one renders exactly as a single entry always has.
+  const groups: SummaryEntry[][] = [];
+  for (const entry of document.entries) {
+    const last = groups[groups.length - 1];
+    if (last !== undefined && last[0]!.caseId === entry.caseId) last.push(entry);
+    else groups.push([entry]);
+  }
+
   const headings: string[] = ["Case index"];
-  for (const entry of document.entries) headings.push(entry.caseId, "Task", "Results", "Outcome Checks");
+  for (const group of groups) headings.push(group[0]!.caseId, "Task", "Results", `Outcome Checks · ${group[0]!.caseId}`);
   headings.push("Full reports");
   const slugs = uniqueSlugs(headings);
-  const caseSlug = (index: number): string => slugs[1 + index * 4]!;
+  const groupSlug = (groupIndex: number): string => slugs[1 + groupIndex * 4]!;
+  const groupIndexOf = new Map<SummaryEntry, number>();
+  groups.forEach((group, index) => group.forEach((entry) => groupIndexOf.set(entry, index)));
 
   lines.push(`# ${escapeMarkdownText(document.skillLabel)} — Evaluation cases`, "", "## Case index", "");
-  lines.push("Score in this index is the Treatment score.", "");
+  lines.push("Score is the Treatment score; the change from Baseline is in parentheses.", "");
   lines.push(
     ...summaryTable(
       ["Eval case", "LLM model", "Task", "Score"],
       ["left", "left", "left", "right"],
-      document.entries.map((entry, index) => [
-        `[${escapeMarkdownText(entry.caseId)}](#${caseSlug(index)})`,
+      document.entries.map((entry) => [
+        `[${escapeMarkdownText(entry.caseId)}](#${groupSlug(groupIndexOf.get(entry)!)})`,
         escapeMarkdownText(entry.modelLabel),
         escapeMarkdownText(`${entry.caseTitle.charAt(0).toUpperCase()}${entry.caseTitle.slice(1)}`),
-        escapeMarkdownText(entry.score.treatment),
+        escapeMarkdownText(`${entry.score.treatment} (${entry.score.change})`),
       ]),
-      false,
     ),
     "",
   );
 
-  for (const entry of document.entries) {
-    const model = escapeMarkdownText(entry.modelLabel);
-    lines.push(`## ${escapeMarkdownText(entry.caseId)}`, "", "### Task", "");
+  const pair = (baseline: string, treatment: string, change: string): string =>
+    `${escapeMarkdownText(baseline)} → ${escapeMarkdownText(treatment)}<br>${escapeMarkdownText(change)}`;
+
+  for (const group of groups) {
+    const first = group[0]!;
+    const caseHeading = escapeMarkdownText(first.caseId);
+    lines.push(`## ${caseHeading}`, "", "### Task", "");
     lines.push(
-      entry.taskText !== null && entry.taskText.trim() !== ""
-        ? escapeMarkdownParagraphs(entry.taskText)
+      first.taskText !== null && first.taskText.trim() !== ""
+        ? escapeMarkdownParagraphs(first.taskText)
         : "Task description unavailable: the frozen inputs do not record it.",
       "",
     );
-    lines.push("### Results", "", metricsNote(entry), "");
-    const metricRow = (label: string, m: SummaryMetric): string[] => [
-      label,
-      model,
-      escapeMarkdownText(m.baseline),
-      escapeMarkdownText(m.treatment),
-      escapeMarkdownText(m.change),
-    ];
+    const notes = group.map(metricsNote);
+    lines.push("### Results", "");
+    lines.push("Each cell shows Baseline → Treatment and, below it, the change.", "");
+    if (notes.every((note) => note === notes[0])) lines.push(notes[0]!, "");
+    else group.forEach((entry, index) => lines.push(`${escapeMarkdownText(entry.modelLabel)}: ${notes[index]!}`, ""));
     lines.push(
       ...summaryTable(
-        ["Metric", "LLM model", "Baseline", "Treatment", "Change"],
+        [
+          "Eval case",
+          "LLM model",
+          "Score<br>(baseline vs treatment)",
+          "Recorded tokens<br>(baseline vs treatment)",
+          "Latency<br>(baseline vs treatment)",
+        ],
         ["left", "left", "right", "right", "right"],
-        [metricRow("Score", entry.score), metricRow("Cost: recorded tokens", entry.cost), metricRow("Latency", entry.latency)],
-        true,
+        group.map((entry) => [
+          codeSpan(entry.caseId),
+          escapeMarkdownText(entry.modelLabel),
+          pair(entry.score.baseline, entry.score.treatment, entry.score.change),
+          pair(entry.cost.baseline, entry.cost.treatment, entry.cost.change),
+          pair(entry.latency.baseline, entry.latency.treatment, entry.latency.change),
+        ]),
       ),
       "",
     );
-    const caseCell = codeSpan(entry.caseId);
-    lines.push("### Outcome Checks", "");
+
+    // Every entry of a case must carry the same frozen check list; anything else would mislead.
+    const signature = (entry: SummaryEntry): string => JSON.stringify(entry.outcomeRows.map((row) => [row.label, row.max]));
+    for (const entry of group) {
+      if (signature(entry) !== signature(first)) {
+        throw new Error(`Outcome checks of case ${first.caseId} differ between ${first.modelLabel} and ${entry.modelLabel}; refusing to render them in one table`);
+      }
+    }
+    const cell = (baseline: number | null, treatment: number | null, max: number): string => {
+      const b = formatPoints(baseline, max);
+      const t = formatPoints(treatment, max);
+      return b === t ? t : `${b} → ${t}`;
+    };
+    lines.push(`### Outcome Checks · ${caseHeading}`, "");
+    lines.push("Each cell shows Baseline → Treatment points; a single value means both arms scored the same.", "");
     lines.push(
       ...summaryTable(
-        ["Eval case", "Check", "LLM model", "Baseline", "Treatment"],
-        ["left", "left", "left", "right", "right"],
+        ["Check", ...group.map((entry) => escapeMarkdownText(entry.modelLabel))],
+        ["left", ...group.map(() => "right" as const)],
         [
-          ...entry.outcomeRows.map((row) => [
-            caseCell,
+          ...first.outcomeRows.map((row, index) => [
             escapeMarkdownText(row.label),
-            model,
-            formatPoints(row.baseline, row.max),
-            formatPoints(row.treatment, row.max),
+            ...group.map((entry) => {
+              const r = entry.outcomeRows[index]!;
+              return cell(r.baseline, r.treatment, r.max);
+            }),
           ]),
           [
-            caseCell,
             bold("Outcome total"),
-            model,
-            bold(formatPoints(entry.outcomeTotal.baseline, entry.outcomeTotal.max)),
-            bold(formatPoints(entry.outcomeTotal.treatment, entry.outcomeTotal.max)),
+            ...group.map((entry) => bold(cell(entry.outcomeTotal.baseline, entry.outcomeTotal.treatment, entry.outcomeTotal.max))),
           ],
         ],
-        true,
       ),
       "",
     );
@@ -932,13 +967,13 @@ export function renderScoredSummaryMarkdown(document: SummaryDocument): string {
   lines.push("## Full reports", "");
   lines.push(
     ...summaryTable(
-      ["Eval case", "Report"],
-      ["left", "left"],
+      ["Eval case", "LLM model", "Report"],
+      ["left", "left", "left"],
       document.entries.map((entry) => [
         escapeMarkdownText(entry.caseId),
+        escapeMarkdownText(entry.modelLabel),
         `[View full report](${entry.reportUrl.replace(/[\s()<>]/g, (ch) => encodeURIComponent(ch).replace("(", "%28").replace(")", "%29"))})`,
       ]),
-      false,
     ),
   );
   if (document.entries.length > 0) lines.push("", ...document.entries.map(entryComment));

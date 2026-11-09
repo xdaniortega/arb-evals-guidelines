@@ -260,21 +260,23 @@ describe("run-folder exports", () => {
       const report = await buildRunReport(result.receiptPath);
       const { pillars, treatmentAccuracy, baselineAccuracy } = report.scored!;
       // Metrics: the same cells as the full report's pillar table.
-      expect(summary).toContain(`| ${pillars.cost.baseline} | ${pillars.cost.treatment} | ${pillars.cost.change} |`);
-      expect(summary).toContain(`| ${pillars.latency.baseline} | ${pillars.latency.treatment} | ${pillars.latency.change} |`);
+      expect(summary).toContain(`| ${pillars.cost.baseline} → ${pillars.cost.treatment}<br>${pillars.cost.change} |`);
+      expect(summary).toContain(`| ${pillars.latency.baseline} → ${pillars.latency.treatment}<br>${pillars.latency.change} |`);
       expect(full).toContain(`| ${pillars.cost.label} | ${pillars.cost.baseline} | ${pillars.cost.treatment} | ${pillars.cost.change} |`);
-      expect(summary).toContain(`| ${pillars.accuracy.baseline} | ${pillars.accuracy.treatment} |`);
+      expect(summary).toContain(`| ${pillars.accuracy.baseline} → ${pillars.accuracy.treatment}<br>`);
       // Outcome points: every row of the full report's check table appears with the same points.
       const outcomeMax = treatmentAccuracy!.outcome.max;
-      expect(summary).toContain(`**${baselineAccuracy!.outcome.got}/${outcomeMax}** | **${treatmentAccuracy!.outcome.got}/${outcomeMax}**`);
+      const totalB = `${baselineAccuracy!.outcome.got}/${outcomeMax}`;
+      const totalT = `${treatmentAccuracy!.outcome.got}/${outcomeMax}`;
+      expect(summary).toContain(`**${totalB === totalT ? totalT : `${totalB} → ${totalT}`}**`);
       for (const row of report.scored!.checksTable!.rows) {
-        expect(summary).toContain(`| ${row.label} | Google Fake Model 0 | ${row.baseline} | ${row.treatment} |`);
+        expect(summary).toContain(`| ${row.label} | ${row.baseline === row.treatment ? row.baseline : `${row.baseline} → ${row.treatment}`} |`);
         expect(full).toContain(`| ${row.label} | ${row.baseline} | ${row.treatment} |`);
       }
       expect(summary).toContain("Google Fake Model 0");
       expect(summary).toContain(`treeSha256=${report.receiptManifest!.treeSha256}`);
       expect(full).toContain(report.receiptManifest!.treeSha256);
-      expect(summary!.trimEnd().split("\n").filter((l) => l !== "" && !l.startsWith("<!--")).at(-1)).toMatch(/^\| network-config-01 \| \[View full report\]\(/);
+      expect(summary!.trimEnd().split("\n").filter((l) => l !== "" && !l.startsWith("<!--")).at(-1)).toMatch(/^\| network-config-01 \| Google Fake Model 0 \| \[View full report\]\(/);
     }
   });
 
