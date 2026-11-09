@@ -1,38 +1,42 @@
 # Running evals
 
-How to run an eval, read its output, inspect a run and export its reports.
+How to run an eval, read the result, dig into a run and export its reports.
 
 ## Options for `pnpm eval`
 
 | Option | What it does |
 |---|---|
-| `--case <id>` | Case to run. Required. |
-| `--skill <path>` | Treatment skill: any directory containing `SKILL.md` (no symlinks, no URLs). Evidence records only the skill name, never the host path. The baseline gets none. Required. |
-| `--model <id>` | Model to call. Required. The provider is inferred from the id. Repeat it to evaluate several models in one command (see below). |
-| `--provider <google\|anthropic>` | Asserts the provider when the model id is ambiguous. |
-| `--thinking <level>` | Reasoning effort: `off`, `minimal`, `low` (default), `medium`, `high`, `xhigh`, `max`. |
+| `--case <id>` | The case to run. Required. |
+| `--skill <path>` | The treatment's skill: any directory with a `SKILL.md` (no symlinks or URLs). The evidence records the skill's name, never your local path. Required. |
+| `--model <id>` | The model to call; the provider is inferred from the id. Required. Repeat it to compare models (see below). |
+| `--provider <google\|anthropic>` | Sets the provider when the model id is ambiguous. |
+| `--thinking <level>` | Reasoning effort: `off`, `minimal`, `low` (default), `medium`, `high`, `xhigh` or `max`. |
 | `--repetitions <n>` | Number of pairs. Default `1`. |
-| `--capture-reasoning` | Keeps reasoning in the saved session. Off by default (much larger sessions). |
-| `--limit <key>=<value>` | Overrides one budget; repeatable. `wallClockMs`, `maxOutputTokens`, `maxToolSteps`, `maxProviderRequests` take a positive integer or `0`/`none` (unlimited, the default). Resource bounds (`cpus`, `memoryMiB`, `pids`, `diskMiB`, …) stay finite. |
+| `--limit <key>=<value>` | Caps one budget; repeatable. `wallClockMs`, `maxOutputTokens`, `maxToolSteps` and `maxProviderRequests` are unlimited by default (`0` or `none` keeps them unlimited). Resource limits such as `cpus` or `memoryMiB` can be changed but not removed. |
+| `--serial` | Runs the baseline first and the treatment only after it, so the arms never overlap. By default they run side by side. |
+| `--checks` | Adds the per-check table to the printed result. |
+| `--capture-reasoning` | Keeps the model's reasoning in the saved session. Off by default, because it makes sessions much larger. |
 
 ### Several models in one command
 
-`pnpm eval --case <id> --skill <path> --model gemini-3.8-flash --model gemini-4-argon --limit wallClockMs=300000` runs each model as its own independent, sealed run, one after another in argument order, each with its own `EVALS.md` and `EVALS-FULL-REPORT.md` exactly as for a single model. `--provider`, `--thinking`, `--limit` and `--repetitions` apply to every model. Duplicate models and `--format json` with more than one model are refused before anything runs.
-
-The runs are independent: nothing is sealed to tie them together. When the command ends, it prints `combined  eval-cases/<case>/runs/EVALS-<run-id-A>+<run-id-B>.md`, a combined `EVALS.md` built from those verified runs (run ids in argument order, joined by `+`; there is no combined full report). It has one row per model in the Case index, Results and Full reports tables, one column per model in Outcome Checks, and links each model's own run `EVALS-FULL-REPORT.md`. It is not generated (a warning says why) if a model did not run, a run's evidence does not verify, or a run has no pair graded in both arms (a run with some ungraded pairs is still combined, over its graded pairs); it is also refused if the runs differ in case version, rubric version, prompt or skill. A signal (a second signal during startup or between runs force-exits; during a run the runner's own handlers seal the run), a run that did not start or threw, a failed evidence verification, an unverified or failed cleanup, or a secret quarantine stops the command (models not started are listed); nothing is re-run. The command exits 0 only if every planned run completed and verified; it exits 1 if any run failed to complete or verify, any model did not run, or the command stopped. Models run sequentially, so time of day and provider load can drift between them.
-
-You can also combine any existing runs of one case yourself, in the order you give them:
+Repeat `--model` to evaluate the same skill with several models:
 
 ```bash
-pnpm eval:export -- --receipt <receipt-A> --receipt <receipt-B> [--receipt ...]           # write eval-cases/<case>/runs/EVALS-<A>+<B>.md
-pnpm eval:export -- --receipt <receipt-A> --receipt <receipt-B> --check                   # fail if it is missing, stale or refused (the only way to notice a deleted file)
+pnpm eval -- --case network-config-01 --skill <path> \
+  --model gemini-3.8-flash --model gemini-4-argon --limit wallClockMs=300000
 ```
 
-The runs must be distinct runs of the same case, with the same skill, case version, rubric version and prompt, and at least one pair graded in both arms in each run (pairs with an ungraded arm are left out of that run's metrics, as in a single-run `EVALS.md`); otherwise the command exits 1 and writes nothing. `--pair`, `--to` and `--all` cannot be combined with several `--receipt`. The combined file is a generated output, rebuilt from the sealed runs named in its file name, and is never part of a hash chain. `pnpm eval:export -- --check --all` checks every combined `eval-cases/*/runs/EVALS-*.md` that exists: it fails on a name that is not `EVALS-<run-id>+<run-id>[+...].md` with distinct run ids, a member run that is missing, a combination that is now refused, or a file that differs from a fresh render. `pnpm eval:export -- --regenerate --all` rewrites each existing combined file from its members and removes one whose combination is now refused (it says so); a file with a missing member or an unparseable name fails and is left alone. Nothing records which combinations should exist, so a combined file that was deleted is not noticed by `--all`: `pnpm eval:export -- --receipt <A> --receipt <B> --check` reports it as missing, and the same command without `--check` recreates it. The runs must also have different readable model labels, and the file name (run ids joined by `+`) must fit in a file name; otherwise the combination is refused.
+Each model gets its own independent sealed run, in the order you list them, with its own `EVALS.md` and `EVALS-FULL-REPORT.md`. The other options apply to every model. At the end, the command prints the path of one combined `EVALS.md` with a row per model, `eval-cases/<case>/runs/EVALS-<run-id-A>+<run-id-B>.md`. There's no combined full report: it links each run's own.
+
+- **Nothing is re-run.** If a run doesn't start, can't be verified, fails its cleanup or quarantines a secret, or you stop the command, the remaining models are skipped and listed. The command exits 0 only if every run completed and verified.
+- **The combined file needs comparable runs.** It's skipped, with a warning, if a model didn't run, a run doesn't verify or has no pair graded in both arms, or the runs differ in case version, rubric version, prompt or skill.
+- **Models run one after another**, so time of day and provider load can differ between them.
+
+To combine runs you already have, see [Combine existing runs](#combine-existing-runs).
 
 ## Read the output
 
-A single-pair run prints a header and the pillar table, then the Accuracy and Cost and latency tables and a footer with the receipt, inspect and export commands. Example (illustrative values):
+A run prints a header and the pillar table, then the Accuracy and Cost and latency tables, and ends with the commands to inspect and export it. For example (illustrative values):
 
 ```text
 network configuration migration
@@ -51,13 +55,19 @@ Evaluation pillars:
 └───────────────────────┴────────────────────┴─────────────────┴───────────────────────┘
 ```
 
-- `--checks` (on `eval` or `eval:report`) adds the **Accuracy Outcome Checks** table: one row per display topic, with an **Outcome total**.
-- An arm without grading evidence shows `n/a` for accuracy. If its recorded duration is missing, latency comes from the native session, labelled `(session-derived)`, and changes using it are labelled `approximate`.
+- `--checks` (on `eval` or `eval:report`) adds the **Accuracy Outcome Checks** table: one row per topic and an **Outcome total**.
+- `n/a` means the arm has no grading evidence. Latency marked `(session-derived)` was rebuilt from the agent's session because the recorded duration was missing, and changes based on it are marked `approximate`.
 - For a complete real report, see [this run's EVALS-FULL-REPORT.md](../eval-cases/network-config-01/runs/20261108T093450Z-392b231d/EVALS-FULL-REPORT.md).
 
 ## Inspect a run
 
-Inspection reads saved evidence and sends no model requests. Commands follow one shape: `pnpm eval:inspect -- --latest --case <case-id> --condition <baseline|treatment> --view <name>`. To pin a specific run, replace `--latest --case <case-id>` with `--receipt "<receipt-path>"`.
+Inspecting only reads the saved evidence; it never calls the model. Every command has the same shape:
+
+```bash
+pnpm eval:inspect -- --latest --case <case-id> --condition <baseline|treatment> --view <name>
+```
+
+To look at a specific run instead of the latest, replace `--latest --case <case-id>` with `--receipt "<receipt-path>"`.
 
 ### Step 1: find your run
 
@@ -65,7 +75,7 @@ Inspection reads saved evidence and sends no model requests. Commands follow one
 pnpm eval:history -- --latest --case network-config-01
 ```
 
-This prints the receipt path and pair ids of your latest run. With several repetitions, pass `--pair <pair-id>` to the commands below.
+This prints the receipt path and pair ids of your latest run. With several repetitions, add `--pair <pair-id>` to the commands below.
 
 ### Step 2: open the session
 
@@ -76,9 +86,9 @@ pnpm eval:inspect -- --latest --case network-config-01 \
   --condition treatment --view session --export both
 ```
 
-This prints a `.jsonl` path (Pi's native session) and an `.html` path. **Open the HTML in a browser.** Guarded secrets appear as `[REDACTED:<label>]`. Repeat with `--condition baseline` and compare.
+This prints the path of a `.jsonl` file (Pi's native session) and an `.html` file. **Open the HTML in a browser**, then repeat with `--condition baseline` to compare. Guarded secrets show up as `[REDACTED:<label>]`.
 
-> **Private evidence.** With `--capture-reasoning`, sessions keep the model's reasoning verbatim. They stay in the local run folder and are never uploaded by the runner; do not publish session exports.
+> **Private evidence.** With `--capture-reasoning`, sessions keep the model's reasoning word for word. They stay in the local run folder and the runner never uploads them; don't publish session exports.
 
 ### Step 3: check the result
 
@@ -106,20 +116,36 @@ pnpm eval:report  -- --receipt "<receipt-path>" --checks                        
 
 ## Export: `EVALS.md` and `EVALS-FULL-REPORT.md`
 
-Each run folder holds two generated files next to `receipt.json`:
+Every verified run writes two reports next to its `receipt.json`:
 
-- **`EVALS.md`**: the summary, titled `# <skill name> — Evaluation cases`: a **Case index** (one row per case and model; Score is the Treatment score with the change from Baseline in parentheses, for example `90% (+70%)`), then for each evaluated case its **Task** (shown once, even for several models), a **Results** table (one row per model; Score, recorded tokens and latency, each cell as `Baseline → Treatment` with the change below) and **Outcome Checks · `<case-id>`** (one row per check and a final total, one column per model; a cell shows `Baseline → Treatment` points, or a single value when both arms scored the same), and a final **Full reports** table with one link per case and model to that model's own run report. Score is the accuracy result, and its change is the arithmetic difference of the two scores (20% to 69% is `+49%`). There is no badge or run header. **The only file to share.**
-- **`EVALS-FULL-REPORT.md`**: the report of one case and run, results first. It opens with a run context table (case, run, skill, agent, LLM model and every recorded pair), then has six sections: **Results** (Score, recorded tokens and latency for Baseline and Treatment with the change, then Execution status, Score composition, Outcome Checks and Cost and latency detail), **Pair explorer** (an index of every recorded pair, each linking to a collapsible block with that pair's status, Score composition, Outcome Checks and cost and latency, also for a single pair), **Task and rubric** (the frozen prompt, case definition and frozen checks and weights), **Execution environment** (readable and registered model, source, build, image digests, skill hashes, limits and elapsed time), **Verify this report** (the manifest tree hash and the receipt manifest file hash, and the verification command) and **Export and comparable runs**. The change in Score is the arithmetic difference in percentage points. If grading is incomplete the report says so, shows `n/a` for the missing cells and does not compute a Score change. Legacy runs keep their original recorded scores and are not reweighted. It does not contain the per-execution operational record (requests, tool steps, stop causes, cleanup, redactions); `pnpm eval:report --details` and `eval:inspect` still show those. It stays in this repository; `EVALS.md` links to it (for a combined file, to each model's own run report).
+| File | What's in it | Share it? |
+|---|---|---|
+| `EVALS.md` | The summary, titled `# <skill> — Evaluation cases`. For each case and model: the task, the results (score, tokens and latency as `Baseline → Treatment` with the change), the outcome checks and a link to the full report. | **Yes, it's the only file to share.** |
+| `EVALS-FULL-REPORT.md` | Everything about one run, results first: every pair, the task and rubric, the execution environment and how to verify the report. | No, it stays in this repository and `EVALS.md` links to it. |
+
+The score change is a plain difference in percentage points: going from 20% to 69% shows as `+49%`.
 
 ```bash
 pnpm eval:export -- --receipt <receipt>                                   # (re)generate both files in the run folder
-pnpm eval:export -- --receipt <receipt> --to <dir|file.md> [--pair rNNN]  # also write EVALS.md elsewhere
-pnpm eval:export -- --check --all                                         # fail if any run, or any existing combined file, is missing or stale (CI)
+pnpm eval:export -- --receipt <receipt> --to <dir|file.md> [--pair rNNN]  # also write EVALS.md somewhere else
+pnpm eval:export -- --check --all                                         # fail if any report is missing or stale (CI)
 ```
 
-- Evidence is verified first; nothing is written if verification fails. Export runs no git commands.
-- Both files are outside the hash chain, regenerated from sealed evidence, and carry the run's `manifest.treeSha256`. The full report shows it in its "Verify this report" section. `EVALS.md` keeps it out of sight in an `<!-- EVALS-ENTRY ... treeSha256=<hash> -->` HTML comment at the end of the summary (inside the generated block), bound to that entry's case, run and rendered pairs; view the raw file to read it.
-- Without `--pair`, a multi-pair run exports the mean over the pairs graded in both arms, and every metric (score, tokens, latency, outcome points) uses only those pairs, the same set for both arms. When a pair is left out, the Results note says so (for example `Metrics are means across nine of ten pairs; pair r010 is excluded because its baseline arm was not graded.`) and the hidden `EVALS-ENTRY` comment lists only the included pairs. Export is refused if no pair is graded in both arms, or if `--pair` selects a pair with an ungraded arm. `EVALS-FULL-REPORT.md` still shows every recorded pair.
-- With `--to`, the summary goes between `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->`; authored text outside the markers is kept, and repeating the export changes no bytes. Symlinked destinations are refused.
-- The full-report link uses `--repo-url` or the `repository` field of `package.json`. It resolves once the run folder is merged, so merge this repository's PR before the skills repository's.
-- `pnpm eval` and `eval:report` never modify a skill's `EVALS.md`.
+- **Built from evidence, every time.** Export verifies the run first and writes nothing if that fails. The reports sit outside the hash chain but carry the run's tree hash (`manifest.treeSha256`), so you can trace them back to it. In `EVALS.md` it's in a hidden `<!-- EVALS-ENTRY … -->` comment.
+- **Like-for-like means.** With several pairs, `EVALS.md` only uses the pairs graded in both arms, for both arms and every metric. A left-out pair is named in the Results note. Export is refused if no pair qualifies, or if `--pair` picks one that doesn't. `EVALS-FULL-REPORT.md` still shows every pair, so its means can differ for a partial run.
+- **`--to` keeps your text.** The summary goes between `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->`, and anything outside those markers is kept.
+- **Merge here first.** The full-report link points at this repository (`--repo-url` or `repository` in `package.json`), so merge this repository's PR before the skill repository's.
+- `pnpm eval` and `eval:report` never change a skill's own `EVALS.md`.
+
+### Combine existing runs
+
+To build a combined `EVALS.md` from runs you already have, pass their receipts in the order you want:
+
+```bash
+pnpm eval:export -- --receipt <receipt-A> --receipt <receipt-B>           # write runs/EVALS-<A>+<B>.md
+pnpm eval:export -- --receipt <receipt-A> --receipt <receipt-B> --check   # fail if it's missing, stale or refused
+```
+
+The runs must be different runs of the same case, with different models but the same skill, case version, rubric version and prompt, and each needs at least one pair graded in both arms. Otherwise nothing is written.
+
+Combined files are generated, never sealed. `--check --all` checks every one that exists and `--regenerate --all` rebuilds them, but nothing records which combinations should exist, so a deleted file is only noticed by the `--receipt … --check` command above.

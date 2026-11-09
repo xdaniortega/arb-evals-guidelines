@@ -1,48 +1,88 @@
 # How it works
 
-This repository stores eval cases for agentic workflows together with the sandboxed environment they run in. This page describes how Evals Guidelines isolates, grades and records each comparison.
+Evals Guidelines answers one question: **does this skill make the agent better at this task?** To find out, we run the same task twice (once without the skill, once with it), grade both answers with the same deterministic code and keep the evidence so anyone can check the result.
 
-## Sandboxed environment
+It measures one skill on one task. It's not a benchmark, a statistical test or an LLM judge.
 
-Each arm runs in its own fresh Apple Container guest, built from the same pinned image digest and attached to its own network. The two arms are:
+## Architecture
 
-- **Baseline:** without the skill.
-- **Treatment:** with a frozen copy of the skill and the MCP servers it declares.
+```mermaid
+flowchart TB
+    task["Task<br/>prompt and starting files"]
+    skill["Skill<br/>SKILL.md and its MCP servers"]
 
-The only permitted difference between the arms is the skill.
+    subgraph agents["Agents: same image, a fresh container per arm"]
+        baseline["Baseline<br/>agent without the skill"]
+        treatment["Treatment<br/>agent with the skill"]
+    end
 
-- **Guest hardening:** PID 1 starts as root only to install the egress lock (with NET_ADMIN, SETUID and SETGID), then drops to a fixed non-root user (uid/gid 10001) with no_new_privs and no remaining capabilities. The root filesystem is read-only.
-- **Egress:** only public IPv4 is allowed. Private (RFC1918), loopback, link-local and cloud-metadata, carrier-grade NAT, multicast and broadcast ranges are rejected, and all IPv6 is dropped (see `container/configure-egress.sh`). Outbound TCP is further limited to the ports in the declared network policy (unless that policy allows all ports), and the deny list covers specified ranges; it does not identify every possible host address or a public relay back to the host machine. Credentials reach the guest only in memory, never in files or arguments.
-- **Grading:** deterministic code runs in a separate guest with no network and no credentials.
-- **Evidence:** it is sealed and hash-chained. Each arm's containers and networks are destroyed, and that cleanup is verified before the next pair starts.
+    subgraph grading["Grading: no network, no credentials"]
+        validator["validator.ts<br/>checks each answer against oracle.json"]
+    end
 
-It is not a benchmark, a statistical authority, an offline sandbox, a plugin framework or an LLM judge.
+    task --> baseline
+    task --> treatment
+    skill --> treatment
+    baseline -->|final workspace| validator
+    treatment -->|final workspace| validator
+    validator -->|pass or fail per check| runner["Runner<br/>scores with the frozen rubric.json"]
+    runner --> evidence[("Sealed evidence<br/>hash-chained run folder")]
+    evidence --> reports["Reports<br/>EVALS.md and EVALS-FULL-REPORT.md"]
+```
+
+1. **Freeze.** The runner copies and hashes the case (prompt, files, rubric, validator and oracle) and the skill before anything runs.
+2. **Run.** Both arms get the same prompt and files, each in its own fresh container from the same image. Only the treatment has the skill.
+3. **Grade.** The validator checks each final workspace against the oracle, offline and without a model.
+4. **Score.** The runner turns the check results into a score with the frozen rubric.
+5. **Seal.** Everything is hashed into the run folder and the reports are generated from it, so anyone can verify the result.
 
 ## Scoring rubric
 
-Evals Guidelines standardize how we score; each case defines what a correct outcome means.
+Evals Guidelines standardizes **how** we score; each case defines **what** a correct answer is.
 
-| Pillar | Measured as |
+| Pillar | What we measure |
 |---|---|
-| Accuracy | Points out of 100 from the case's checks. **Outcome** (80): did the agent correctly and fully deliver what was asked, including the expected response to any predefined failure or invalid input? **Constraints** (20): did it respect the task boundaries and preserve what must not change? |
-| Cost | Recorded tokens, including cached input. |
-| Latency | Milliseconds from the arm's prompt to completion or termination. |
+| **Accuracy** | Shown as **Score**: points out of 100 from the case's checks. |
+| **Cost** | Recorded tokens, including cached input. |
+| **Latency** | Milliseconds from the arm's prompt until it finishes or is stopped. |
 
-Each pillar is reported as a baseline → treatment change; with several pairs, as the mean over the pairs graded in both arms (a pair with an ungraded arm is left out of `EVALS.md` and named in its Results note).
+Each pillar is reported as **Baseline → Treatment** with the change. With several pairs, it's the mean over the pairs graded in both arms.
 
-Declare the checks in `rubric.json` and implement them in `validator.ts`:
+### Accuracy: outcome and constraints
 
-- **One entry per check** in `rubric.json`: `id`, `group` (`outcome` or `constraints`), display `topic` and `points`. `outcome` checks sum to 80 and `constraints` checks to 20. Checks with the same `topic` are shown together in the **Accuracy Outcome Checks** table.
-- **One deterministic predicate per check** in `validator.ts`. The same answer and the same oracle always give the same result. No language model judges the answer.
-- **All or nothing.** Each check earns its full points or 0, and a full pass needs every check.
-- **The runner decides the score.** Any score the validator computes is advisory; the runner recomputes it from the frozen rubric.
-- **Task failures and infrastructure failures are kept apart.** If the agent fails the task, the arm is still graded and may score 0. If the infrastructure fails, the arm has no score, and no change is reported for that pair.
-- **Test your validator.** `validator.test.ts` must show that wrong answers fail and that accepted variants pass.
+Accuracy has two fixed groups. The weights belong to the framework, not to the case, so a score means the same thing in every case:
+
+- **Outcome (80 points):** did the agent deliver what was asked, correctly and completely? That includes handling any predefined failure or invalid input the way the case expects.
+- **Constraints (20 points):** did it stay inside the task boundaries and leave alone what it shouldn't touch?
+
+### Rubric, validator and oracle
+
+Each case grades with three files. The agent never sees any of them.
+
+| File | What it does |
+|---|---|
+| `rubric.json` | Declares every check: `id`, `group` (`outcome` or `constraints`), display `topic` and `points`. Checks that share a topic are shown together in the reports. Outcome checks must add up to 80 and constraints to 20, or the rubric is rejected. |
+| `validator.ts` | One deterministic pass/fail predicate per check. It runs in the grading container and never calls a model. |
+| `oracle.json` | The expected answers and their sources. |
+
+For example, [`network-config-01`](../eval-cases/network-config-01/rubric.json) has 16 outcome checks worth 5 points each, grouped into 8 topics, plus two constraint checks (`json-shape` and `preservation`) worth 10 points each.
+
+### Grading rules
+
+- **Deterministic.** The same answer and the same oracle always give the same result.
+- **All or nothing.** A check earns its full points or 0, and a full pass needs every check.
+- **The runner has the final say.** The validator reports pass or fail per check, and the runner computes the score from the frozen rubric (any score the validator returns is advisory). If the validator's checks don't match the rubric one to one, the arm gets no score instead of a wrong one.
+- **Task failures and infrastructure failures stay apart.** If the agent gets it wrong or leaves no answer, the arm is still graded and can score 0. If something breaks on our side, the arm has no score and that pair reports no change.
+- **Validators are tested.** `validator.test.ts` must show that wrong answers fail and accepted variants pass.
+
+## Sandboxed environment
+
+Each arm runs in its own fresh Apple Container, built from the same pinned image. Inside, the agent works as a non-root user on a read-only root filesystem and only gets API keys in memory, never in files or arguments. It can reach public internet addresses, but private and local network ranges are blocked (details in [`container/configure-egress.sh`](../container/configure-egress.sh)).
 
 ## Evidence and cleanup
 
-Evidence is sealed in `eval-cases/<case-id>/runs/<run-id>/` and committed. A receipt and manifest hash the retained files; `eval:report` and `eval:inspect` verify that chain, so editing a sealed file breaks verification. `views/` (git-ignored) and the two generated reports are outside the chain.
+Every run is sealed in `eval-cases/<case-id>/runs/<run-id>/` and committed. A receipt and a manifest hash every file, and `eval:report` and `eval:inspect` verify that chain before showing anything, so editing a sealed file breaks verification. `views/` and the two reports sit outside the chain because they're always regenerated from the sealed files.
 
-A command with several `--model` values runs each model as its own, fully independent sealed run; nothing in the evidence ties the runs together. The combined `EVALS.md` it prints (`eval-cases/<case-id>/runs/EVALS-<run-id>+<run-id>.md`, named after its runs) is generated from those verified runs, sits outside every chain and is checked and regenerated with `eval:export`.
+Each arm's containers and networks are destroyed afterwards, and that cleanup is verified before the next pair starts. If an interrupted run leaves anything behind, run `pnpm eval:recover -- --run <run-id>`.
 
-If an interrupted run leaves containers or networks behind: `pnpm eval:recover -- --run <run-id>`.
+With several `--model` values, each model gets its own sealed run, and the combined `EVALS.md` built from them is generated, not sealed (see [Combine existing runs](running-evals.md#combine-existing-runs)).
