@@ -157,7 +157,7 @@ pnpm eval:export -- --check --all                                         # fail
 
 - Evidence is verified first; nothing is written if verification fails. Export runs no git commands.
 - Both files are outside the hash chain, regenerated from sealed evidence, and carry the run's `manifest.treeSha256`.
-- Without `--pair`, a multi-pair run exports the mean over every pair. Export is refused if any rendered pair has an ungraded arm.
+- Without `--pair`, a multi-pair run exports the mean over the pairs graded in both arms (the Results note names any excluded pair). Export is refused only if no pair is graded in both arms, or if `--pair` selects a pair with an ungraded arm.
 - With `--to`, the summary goes between `<!-- AF-EVAL:BEGIN generated -->` and `<!-- AF-EVAL:END generated -->`; authored text outside the markers is kept, and repeating the export changes no bytes. Symlinked destinations are refused.
 - The full-report link uses `--repo-url` or the `repository` field of `package.json`. It resolves once the run folder is merged, so merge this repository's PR before the skills repository's.
 - `pnpm eval` and `eval:report` never modify a skill's `EVALS.md`.

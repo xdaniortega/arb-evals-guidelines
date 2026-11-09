@@ -11,8 +11,8 @@ import type { Rubric, RubricCheck, RubricScore } from "../runner/rubric.ts";
 import { formatModelLabel } from "./model-label.ts";
 import { conditionCheckResults } from "./queries.ts";
 import type { ConditionReport, PairReport, RunReport } from "./queries.ts";
-import { formatSummaryScoreChange } from "./scored-report.ts";
-import type { ScoredReportModel, SummaryDocument, SummaryEntry, SummaryOutcomeRow } from "./scored-report.ts";
+import { buildScoredReport, formatSummaryScoreChange } from "./scored-report.ts";
+import type { ScoredReportModel, SummaryDocument, SummaryExcludedPair, SummaryEntry, SummaryOutcomeRow } from "./scored-report.ts";
 
 const round1 = (n: number): number => Math.round(n * 10) / 10;
 
@@ -119,6 +119,21 @@ export function projectOutcomeChecks(
   return { rows, totals, max };
 }
 
+const ARMS = ["baseline", "treatment"] as const;
+
+/** Arms of a pair that are not graded (`gradeable` with a rubric score); empty when the pair is graded in both arms. */
+export function ungradedArms(pair: PairReport): ("baseline" | "treatment")[] {
+  return ARMS.filter((armId) => {
+    const condition = conditionOf(pair, armId);
+    return !(condition !== undefined && condition.gradeable && condition.rubricScore != null);
+  });
+}
+
+/** Pairs graded in both arms: the only pairs that feed a mean. */
+export function pairsGradedInBothArms(pairs: readonly PairReport[]): PairReport[] {
+  return pairs.filter((pair) => ungradedArms(pair).length === 0);
+}
+
 export interface SummaryEntryInput {
   readonly report: RunReport;
   readonly scored: ScoredReportModel;
@@ -135,23 +150,46 @@ export function buildSummaryEntry(input: SummaryEntryInput): SummaryEntry {
     throw new Error(`verified receipt of run ${report.runId} carries no manifest tree hash; refusing to render the summary`);
   }
   if (rubric === undefined) throw new Error(`no frozen rubric available for run ${report.runId}`);
-  const rendered = report.pairs.filter((pair) => scored.pairIds.includes(pair.pairId));
+  // Mean selection: only pairs graded in both arms feed any metric, the same set for both arms.
+  const selected = report.pairs.filter((pair) => scored.pairIds.includes(pair.pairId));
+  const excludedPairs: SummaryExcludedPair[] = [];
+  let metrics = scored;
+  let rendered = selected;
+  if (scored.selectionMode === "mean") {
+    const included = pairsGradedInBothArms(selected);
+    for (const pair of selected) {
+      const ungraded = ungradedArms(pair);
+      if (ungraded.length > 0) excludedPairs.push({ label: pair.pairId.slice(pair.pairId.lastIndexOf("-") + 1), ungradedArms: ungraded });
+    }
+    if (included.length === 0) throw new Error(`no pair of run ${report.runId} is graded in both arms; refusing to render the summary`);
+    if (excludedPairs.length > 0) {
+      metrics = buildScoredReport(report, rubric, { mode: "mean", pairs: included });
+      rendered = included;
+    }
+  }
+  if (scored.selectionMode === "single") {
+    for (const pair of selected) {
+      const ungraded = ungradedArms(pair);
+      if (ungraded.length > 0) throw new Error(`pair ${pair.pairId} of run ${report.runId} has ungraded arm(s): ${ungraded.join(", ")}; refusing to render the summary`);
+    }
+  }
   const outcome = projectOutcomeChecks(rubric, rendered);
   const prompt = input.frozenPrompt !== null && input.frozenPrompt.trim() !== "" ? input.frozenPrompt : null;
   const scenario = report.caseScenario ?? rubric.display?.scenario ?? null;
-  const { accuracy, cost, latency } = scored.pillars;
+  const { accuracy, cost, latency } = metrics.pillars;
   return {
     caseId: scored.caseId,
     caseTitle: scored.caseTitle,
     modelLabel: formatModelLabel(report.target),
     taskText: prompt ?? scenario,
     selectionMode: scored.selectionMode,
-    pairLabels: scored.pairLabels,
-    pairIds: scored.pairIds,
+    pairLabels: metrics.pairLabels,
+    pairIds: metrics.pairIds,
     repetitionCount: scored.repetitionCount,
     score: { baseline: accuracy.baseline, treatment: accuracy.treatment, change: formatSummaryScoreChange(accuracy.changeRaw) },
     cost: { baseline: cost.baseline, treatment: cost.treatment, change: cost.change },
     latency: { baseline: latency.baseline, treatment: latency.treatment, change: latency.change },
+    ...(excludedPairs.length > 0 ? { excludedPairs } : {}),
     outcomeRows: outcome.rows,
     outcomeTotal: { max: outcome.max, ...outcome.totals },
     reportUrl: input.reportUrl,

@@ -37,11 +37,11 @@ const USAGE =
   "       eval:export --receipt <receipt.json> --receipt <receipt.json> [--receipt ...] [--check] [--repo-url <https://github.com/o/r>]\n" +
   "  Several --receipt flags write (or with --check verify) one combined EVALS-<run-id>+<run-id>[+...].md directly in\n" +
   "  eval-cases/<case>/runs/, with one row per run in argument order. The runs must be distinct runs of one case with\n" +
-  "  the same skill, case version, rubric version and prompt, all graded; otherwise it is refused and nothing is written.\n" +
+  "  the same skill, case version, rubric version and prompt, each with a pair graded in both arms; otherwise it is refused and nothing is written.\n" +
   "  --pair, --to and --all cannot be combined with several --receipt.\n" +
   "  --to <dir> also writes EVALS.md into that existing directory; a path ending in .md names the file.\n" +
   "  Without --pair: a single-pair run exports that pair; a multi-pair run exports the mean over\n" +
-  "  every pair. With --pair <id>: exports that one named pair (full pair ID or short rNNN label).\n" +
+  "  the pairs graded in both arms (refused only if none is). With --pair <id> (refused if that pair has an ungraded arm): exports that one named pair (full pair ID or short rNNN label).\n" +
   "  --to requires fresh run-folder EVALS.md / EVALS-FULL-REPORT.md (see --regenerate).\n" +
   "  --regenerate writes EVALS.md and EVALS-FULL-REPORT.md into the run folder (never touches sealed files).\n" +
   "  --check re-renders both files and fails when one is missing, stale or unexpected (read-only).\n" +
@@ -255,7 +255,7 @@ async function main(): Promise<number> {
   });
   const suffix =
     result.mode === "mean"
-      ? ` (mean of ${result.pairIds.length} pairs)`
+      ? ` (mean of ${result.pairIds.length} ${result.pairIds.length === 1 ? "pair" : "pairs"})`
       : ` pair ${result.pairIds[0]?.slice(result.pairIds[0].lastIndexOf("-") + 1) ?? ""}`;
   process.stdout.write(`Exported evaluation results for run ${result.runId}${suffix} to ${result.relativeTargetPath}\n`);
   return 0;

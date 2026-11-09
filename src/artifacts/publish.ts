@@ -13,10 +13,11 @@
  * - Exact marker validation fails closed on mismatched, reversed, nested, duplicate, or malformed markers.
  * - Authored coverage notes outside the markers are preserved verbatim byte-for-byte.
  * - Real scores and available measurements are published (no status badge is rendered); never substitutes mock scores.
- * - Both arms must be graded for every rendered pair: an ungraded arm is refused rather than
- *   published as `n/a`, or silently dropped out of a mean.
- * - A multi-pair run with no `--pair` publishes the mean over every pair; `--pair` publishes
- *   one named pair. Verification (`verifyRun`) always covers the whole run either way; pair
+ * - A multi-pair run with no `--pair` publishes the mean over the pairs graded in both arms
+ *   (an excluded pair is named in the Results note; refused only when no pair is graded in
+ *   both arms). `--pair` publishes one named pair, which must be graded in both arms: an
+ *   ungraded arm is refused rather than published as `n/a`. Verification (`verifyRun`)
+ *   always covers the whole run either way; pair
  *   selection only narrows what gets rendered, never what gets verified.
  * - The summary carries no run details; each entry's exact manifest tree hash sits in a
  *   non-visible `EVALS-ENTRY` comment inside the generated block.
@@ -27,8 +28,8 @@ import { lstat, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { EvalError } from "../core/types.ts";
 import { buildRunReport, peekRunPairs, resolvePairSelection } from "./queries.ts";
-import type { PairReport } from "./queries.ts";
-import { FULL_REPORT_FILE, SUMMARY_FILE, checkRunExports, renderSummaryForReport } from "./run-exports.ts";
+import { FULL_REPORT_FILE, SUMMARY_FILE, checkRunExports, renderSummaryForReport, summaryRefusalReason } from "./run-exports.ts";
+import { pairsGradedInBothArms, ungradedArms } from "./summary-entry.ts";
 
 export const EVAL_BEGIN_MARKER = "<!-- AF-EVAL:BEGIN generated -->";
 export const EVAL_END_MARKER = "<!-- AF-EVAL:END generated -->";
@@ -198,7 +199,7 @@ export interface ExportOptions {
   readonly repoUrl: string;
   /**
    * Full pair ID or short `rNNN` label. Omitted (or `null`): a single-pair run exports
-   * that pair; a multi-pair run exports the **mean over every pair**. Given: exports
+   * that pair; a multi-pair run exports the **mean over the pairs graded in both arms**. Given: exports
    * that one named pair, exactly like a single-pair run.
    */
   readonly pairId?: string | null;
@@ -210,9 +211,9 @@ export interface ExportResult {
   readonly relativeTargetPath: string;
   readonly status: string;
   readonly renderedMarkdown: string;
-  /** "single" for one exported pair, "mean" when the tables hold the mean of every pair. */
+  /** "single" for one exported pair, "mean" when the tables hold the mean of the pairs graded in both arms. */
   readonly mode: "single" | "mean";
-  /** Full pair IDs actually exported: one pair ID in single mode, every pair ID in mean mode. */
+  /** Full pair IDs actually exported: one pair ID in single mode, the pairs graded in both arms in mean mode. */
   readonly pairIds: readonly string[];
 }
 
@@ -293,26 +294,20 @@ export async function exportRun(options: ExportOptions): Promise<ExportResult> {
     );
   }
 
-  // 2b. Every rendered pair must be graded in both arms; an ungraded arm is never
-  // exported as `n/a`. In mean mode this checks EVERY pair, so an ungraded pair never
-  // silently drops out of the average; in single-pair mode it checks only the selected pair.
-  const renderedPairs: readonly PairReport[] =
-    selection.mode === "mean"
-      ? report.pairs
-      : report.pairs.filter((pair) => pair.pairId === selection.pair.pairId);
-  for (const pair of renderedPairs) {
-    const ungraded = ((["baseline", "treatment"] as const)).filter((armId) => {
-      const condition = pair.conditions.find((c) => c.conditionId === armId);
-      return !(condition !== undefined && condition.gradeable && condition.rubricScore != null);
-    });
-    if (ungraded.length > 0) {
+  // 2b. A mean over every pair is computed over the pairs graded in both arms (the renderer
+  // notes any excluded pair); it is refused only when no pair is. An explicitly selected pair
+  // must be graded in both arms: an ungraded arm is never exported as `n/a`.
+  if (selection.mode === "mean") {
+    const refusal = summaryRefusalReason(report);
+    if (refusal !== null) throw new EvalError("evidence-invalid", `Export refused: ${refusal}.`, { at: receiptPath });
+  } else {
+    const pair = report.pairs.find((p) => p.pairId === selection.pair.pairId);
+    const ungraded = pair === undefined ? [] : ungradedArms(pair);
+    if (pair !== undefined && ungraded.length > 0) {
       const pairLabel = pair.pairId.slice(pair.pairId.lastIndexOf("-") + 1);
-      const scope = selection.mode === "mean" ? "mean" : `pair ${pairLabel}`;
-      const suggestion = selection.mode === "mean" ? " Pass --pair to export a single pair." : "";
       throw new EvalError(
         "evidence-invalid",
-        `Export refused: pair ${pairLabel} of run ${report.runId} has ungraded arm(s): ${ungraded.join(", ")}; ` +
-        `cannot export the ${scope}.${suggestion} Re-run the case to obtain a graded pair.`,
+        `Export refused: pair ${pairLabel} of run ${report.runId} has ungraded arm(s): ${ungraded.join(", ")}; cannot export pair ${pairLabel}.`,
         { at: receiptPath },
       );
     }
@@ -331,6 +326,11 @@ export async function exportRun(options: ExportOptions): Promise<ExportResult> {
       { at: receiptPath },
     );
   }
+
+  const renderedPairIds =
+    selection.mode === "mean"
+      ? pairsGradedInBothArms(report.pairs).map((pair) => pair.pairId)
+      : [selection.pair.pairId];
 
   // 3. Render the summary (no operational footer, no receipt path, no host paths)
   const renderedMarkdown = await renderSummaryForReport(receiptPath, report, { repoUrl: options.repoUrl });
@@ -360,6 +360,6 @@ export async function exportRun(options: ExportOptions): Promise<ExportResult> {
     status: report.status,
     renderedMarkdown,
     mode: selection.mode,
-    pairIds: renderedPairs.map((pair) => pair.pairId),
+    pairIds: renderedPairIds,
   };
 }

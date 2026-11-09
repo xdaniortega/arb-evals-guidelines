@@ -16,7 +16,7 @@ import { renderFullReportForRun } from "./full-report-input.ts";
 import { buildRunReport, readFrozenInputs } from "./queries.ts";
 import type { RunReport, SealedFrozenInputsResult } from "./queries.ts";
 import { renderScoredSummaryMarkdown } from "./scored-report.ts";
-import { buildSummaryDocument } from "./summary-entry.ts";
+import { buildSummaryDocument, pairsGradedInBothArms } from "./summary-entry.ts";
 import { VIEWS_DIR } from "./store.ts";
 
 export const SUMMARY_FILE = "EVALS.md";
@@ -41,26 +41,20 @@ export interface RunExports {
   readonly summaryRefusal: string | null;
 }
 
-function pairLabel(pairId: string): string {
-  return pairId.slice(pairId.lastIndexOf("-") + 1);
-}
-
 const SUMMARY_NOT_GENERATED = "EVALS.md is not generated";
 
-/** Bare reason the summary cannot be exported, or `null` when every rendered pair is graded in both arms. */
+/**
+ * Bare reason the summary cannot be exported, or `null` when it can. A mean over several pairs
+ * is exported over the pairs graded in both arms; it is refused only when none is. A single
+ * rendered pair must be graded in both arms.
+ */
 export function summaryRefusalReason(report: RunReport): string | null {
   if (report.isLegacy) {
     return `run ${report.runId} was scored under an earlier rubric (legacy)`;
   }
   if (!report.scored) return `no scored report model is available for run ${report.runId}`;
-  for (const pair of report.pairs) {
-    const ungraded = (["baseline", "treatment"] as const).filter((armId) => {
-      const condition = pair.conditions.find((c) => c.conditionId === armId);
-      return !(condition !== undefined && condition.gradeable && condition.rubricScore != null);
-    });
-    if (ungraded.length > 0) {
-      return `pair ${pairLabel(pair.pairId)} has ungraded arm(s): ${ungraded.join(", ")}`;
-    }
+  if (pairsGradedInBothArms(report.pairs).length === 0) {
+    return `no pair of run ${report.runId} is graded in both arms`;
   }
   return null;
 }

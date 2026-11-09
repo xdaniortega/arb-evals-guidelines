@@ -452,6 +452,57 @@ describe("Scored report model & renderers (rubric v0.2)", () => {
   });
 });
 
+describe("buildSummaryEntry in mean mode with an excluded pair", () => {
+  const pairN = (n: number, baseline: ConditionReport, treatment: ConditionReport): PairReport => ({
+    ...pairOf(baseline, treatment),
+    pairId: `run-001-r00${n}`,
+    repetition: n,
+  });
+  const URL_ = "https://github.com/example/evals/blob/HEAD/eval-cases/network-config-01/runs/run-001/EVALS-FULL-REPORT.md";
+  const base = (over: Partial<ConditionReport>) => createConditionReport("baseline", over);
+  const treat = (over: Partial<ConditionReport>) => createConditionReport("treatment", over);
+  const pairs = [
+    pairN(1, base({ consumedTokens: 1000, durationMs: 10_000 }), treat({ consumedTokens: 2000, durationMs: 20_000 })),
+    pairN(2, base({ consumedTokens: 3000, durationMs: 30_000 }), treat({ consumedTokens: 4000, durationMs: null, sessionDurationMs: 40_000 })),
+    // Graded baseline with distinctive values next to an ungraded treatment: none of it may enter any mean.
+    pairN(3, base({ consumedTokens: 900_000, durationMs: 900_000, rubricScore: mockScore(80, 20, 10) }), treat({ status: "infrastructure-failure", gradeable: false, rubricScore: null, consumedTokens: null, durationMs: null })),
+  ];
+  const build = (selected: readonly PairReport[], mode: "mean" | "single" = "mean") => {
+    const report = createRunReport({ pairs: selected, receiptManifest: { treeSha256: "ab".repeat(32), fileSha256: {} } as RunReport["receiptManifest"] });
+    const selection = mode === "mean" ? ({ mode: "mean", pairs: selected } as const) : ({ mode: "single", pair: selected[0]! } as const);
+    const scored = buildScoredReport(report, MOCK_RUBRIC, selection);
+    return { report, scored, entry: buildSummaryEntry({ report, scored, frozenPrompt: "p", reportUrl: URL_ }) };
+  };
+
+  it("computes score, tokens, latency and notes over the included pairs only", () => {
+    const { scored, entry } = build(pairs);
+    // Guard: the unfiltered mean differs, so a revert to scored.pillars would fail below.
+    expect(scored.pillars.accuracy.baseline).not.toBe("20%");
+    expect(scored.pillars.cost.baseline).not.toBe("2,000");
+    expect(entry.pairIds).toEqual(["run-001-r001", "run-001-r002"]);
+    expect(entry.excludedPairs).toEqual([{ label: "r003", ungradedArms: ["treatment"] }]);
+    expect(entry.score).toEqual({ baseline: "20%", treatment: "100%", change: "+80%" });
+    expect(entry.cost.baseline).toBe("2,000");
+    expect(entry.cost.treatment).toBe("3,000");
+    expect(entry.latency.baseline).toBe("20,000 ms");
+    expect(entry.latency.treatment).toBe("30,000 ms (session-derived in 1 of 2 pairs)");
+    expect(entry.latency.change).toContain("approximate");
+    const md = renderScoredSummaryMarkdown({ skillLabel: "s", entries: [entry] });
+    expect(md).toMatch(/^\| \[network-config-01\]\(#network-config-01\) \| Google Fake Model 0 \| .* \| 100% \(\+80%\) \|$/m);
+    expect(md).toContain("Metrics are means across two of three pairs; pair r003 is excluded because its treatment arm was not graded.");
+  });
+
+  it("equals the entry of the same run restricted to the included pairs", () => {
+    const full = build(pairs).entry;
+    const only = build(pairs.slice(0, 2)).entry;
+    expect({ ...full, excludedPairs: undefined, repetitionCount: 0 }).toEqual({ ...only, excludedPairs: undefined, repetitionCount: 0 });
+  });
+
+  it("throws in single mode when the selected pair has an ungraded arm", () => {
+    expect(() => build([pairs[2]!], "single")).toThrow(/has ungraded arm\(s\): treatment/);
+  });
+});
+
 describe("renderScoredSummaryMarkdown", () => {
   const DETAILS_URL = "https://github.com/example/evals/blob/HEAD/eval-cases/network-config-01/runs/run-001/EVALS-FULL-REPORT.md";
   const RUN_HASH = "ab".repeat(32);

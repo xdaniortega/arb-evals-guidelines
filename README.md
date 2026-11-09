@@ -84,8 +84,17 @@ pnpm eval:inspect -- --latest --case network-config-01 \
   --condition treatment --view session --export both
 ```
 
-**c. Export.** `pnpm eval` already generated `EVALS.md` and `EVALS-FULL-REPORT.md` inside the run folder. To (re)generate them for a given run, pass its receipt (no other option needed; it runs no git commands):
+**c. Export.** `pnpm eval` already wrote `EVALS.md` (the summary to share) and `EVALS-FULL-REPORT.md` inside the run folder. To (re)generate them for a run, pass its receipt (no other option needed; it runs no git commands). Pairs with an ungraded arm are left out of the `EVALS.md` metrics.
 
 ```bash
 pnpm eval:export -- --receipt eval-cases/network-config-01/runs/<run-id>/receipt.json
 ```
+
+To build one combined `EVALS.md` of several runs of the same case, pass each receipt. The result is `eval-cases/<case>/runs/EVALS-<run-id-A>+<run-id-B>.md`; a multi-model `pnpm eval` writes it automatically and prints its path.
+
+```bash
+pnpm eval:export -- --receipt eval-cases/network-config-01/runs/<run-id-A>/receipt.json \
+  --receipt eval-cases/network-config-01/runs/<run-id-B>/receipt.json
+```
+
+Add `--check` to either command to verify the file is up to date without writing it.

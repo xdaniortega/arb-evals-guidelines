@@ -18,6 +18,7 @@ import { createInProcessValidatorRunner } from "../runner/validation.ts";
 import { disposeRunWorkDir, runPairedEvaluation } from "../runner/run.ts";
 import type { RunResult } from "../runner/run.ts";
 import { buildRunReport, verifyRun } from "./queries.ts";
+import { buildScoredReport } from "./scored-report.ts";
 import { checkRunExports, renderRunExports, runRepoRelativeDir, writeRunExports } from "./run-exports.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -180,8 +181,8 @@ describe("run-folder exports", () => {
   it("keeps every pair visible and withholds the aggregate Score change when grading is partial", async () => {
     const result = await sealRun(mixedScript(), 3);
     const { full, summary } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
-    expect(summary).toBeNull();
-    expect(full).toContain("> EVALS.md was not generated: pair r002 has ungraded arm(s): baseline");
+    expect(summary).not.toBeNull();
+    expect(full).not.toContain("EVALS.md was not generated");
     expect(full).toContain("Grading is incomplete: Baseline is graded in 1 of 3 pairs and Treatment in 1.");
     expect(full).not.toMatch(/All pairs are graded|Means across all/);
     expect(full).toMatch(/\| Score \| [^|]+ \| [^|]+ \| n\/a \|/);
@@ -287,15 +288,76 @@ describe("run-folder exports", () => {
     expect(full.split("\n")[0]).toBe(summary!.split("\n")[0]);
   });
 
-  it("writes the full report only, with the reason, when an arm is ungraded; removes a stale EVALS.md", async () => {
+  it("writes EVALS.md over the graded pairs of a partial run and the full report keeps every pair", async () => {
     const result = await sealRun(mixedScript(), 3);
     const exports = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
-    expect(exports.summary).toBeNull();
-    expect(exports.summaryRefusal).toMatch(/pair r002 has ungraded arm\(s\): baseline/);
-    expect(exports.full).toContain("EVALS.md was not generated: pair r002 has ungraded arm(s): baseline");
+    expect(exports.summary).not.toBeNull();
+    expect(exports.summaryRefusal).toBeNull();
     expect(exports.full).toContain("## Pair explorer");
     expect(exports.full).toContain("Not a valid comparison:");
+    await writeRunExports(result.runDir, exports);
+    expect(await readFile(join(result.runDir, "EVALS.md"), "utf8")).toBe(exports.summary);
+    expect((await checkRunExports(result.receiptPath, { repoUrl: REPO_URL })).ok).toBe(true);
+  });
 
+  it("computes every EVALS.md metric over the pairs graded in both arms only", async () => {
+    // Pair 3's treatment fails (infrastructure) while its baseline completes with a broken file:
+    // that baseline result must not enter the baseline mean.
+    const counts = { baseline: 0, treatment: 0 };
+    const script: FakeHarnessScript = (request) => {
+      counts[request.conditionId as "baseline" | "treatment"] += 1;
+      const n = counts[request.conditionId as "baseline" | "treatment"];
+      if (n === 3 && request.conditionId === "treatment") return { outcome: "infrastructure-failure", assistantText: "guest died" };
+      if (n === 3) return { outcome: "completed", assistantText: "broken", writes: [{ path: "config.json", text: "not json" }] };
+      return { outcome: "completed", assistantText: "ok" };
+    };
+    const result = await sealRun(script, 3);
+    const report = await buildRunReport(result.receiptPath);
+    const ungraded = report.pairs.filter((pair) => pair.conditions.some((c) => !(c.gradeable && c.rubricScore != null)));
+    expect(ungraded.map((pair) => pair.pairId)).toEqual([`${result.runId}-r003`]);
+    const { summary } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
+    expect(summary).not.toBeNull();
+
+    // The same run restricted to its two graded pairs is the reference mean for both arms.
+    const included = report.pairs.filter((pair) => !ungraded.includes(pair));
+    const reference = buildScoredReport(report, report.scored!.rubric!, { mode: "mean", pairs: included });
+    const all = report.scored!.pillars.accuracy;
+    // Guard: including the ungraded pair's treatment would have changed the baseline score.
+    expect(all.baseline).not.toBe(reference.pillars.accuracy.baseline);
+    expect(summary).toContain(`| ${reference.pillars.accuracy.baseline} → ${reference.pillars.accuracy.treatment}<br>`);
+    expect(summary).not.toContain(`| ${all.baseline} → ${all.treatment}<br>`);
+    expect(summary).toContain("Metrics are means across two of three pairs; pair r003 is excluded because its treatment arm was not graded.");
+    expect(summary).toContain(`selection=mean pairs=${included.map((pair) => pair.pairId).join(",")} `);
+    expect(summary).not.toContain(`${result.runId}-r003`);
+    const totalB = reference.baselineAccuracy!.outcome.got;
+    const totalT = reference.treatmentAccuracy!.outcome.got;
+    const max = reference.treatmentAccuracy!.outcome.max;
+    expect(summary).toContain(`**${totalB === totalT ? `${totalT}/${max}` : `${totalB}/${max} → ${totalT}/${max}`}**`);
+  });
+
+  it("matches the partial-run summary golden", async () => {
+    const counts = { baseline: 0, treatment: 0 };
+    const script: FakeHarnessScript = (request) => {
+      const id = request.conditionId as "baseline" | "treatment";
+      counts[id] += 1;
+      if (counts[id] === 3 && id === "treatment") return { outcome: "infrastructure-failure", assistantText: "guest died" };
+      if (counts[id] === 3) return { outcome: "completed", assistantText: "broken", writes: [{ path: "config.json", text: "not json" }] };
+      return { outcome: "completed", assistantText: "ok" };
+    };
+    const result = await sealRun(script, 3);
+    const { summary } = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
+    golden("evals-summary.partial.md", normalize(summary!).replaceAll(result.runId, "<run-id>"));
+  });
+
+  it("refuses EVALS.md when no pair is graded in both arms, and removes a stale EVALS.md", async () => {
+    const result = await sealRun((request) =>
+      request.conditionId === "baseline"
+        ? { outcome: "infrastructure-failure", assistantText: "guest died" }
+        : { outcome: "completed", assistantText: "done" },
+    );
+    const exports = await renderRunExports(result.receiptPath, { repoUrl: REPO_URL });
+    expect(exports.summary).toBeNull();
+    expect(exports.summaryRefusal).toBe(`no pair of run ${result.runId} is graded in both arms; EVALS.md is not generated`);
     await writeFile(join(result.runDir, "EVALS.md"), "stale\n");
     expect(await checkRunExports(result.receiptPath, { repoUrl: REPO_URL })).toMatchObject({ ok: false, unexpected: ["EVALS.md"], missing: ["EVALS-FULL-REPORT.md"] });
     await writeRunExports(result.runDir, exports);

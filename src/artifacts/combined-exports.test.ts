@@ -262,7 +262,28 @@ describe("renderCombinedExports", () => {
     expect(promptResult.ok ? "" : promptResult.reason).toMatch(/runs differ in .*prompt hash/);
   });
 
-  it("refuses when a run's own summary is refused, naming the run, the model and the reason", async () => {
+  it("refuses when a run has no pair graded in both arms, naming the run, the model and the reason", async () => {
+    const runsRoot = await newRunsRoot();
+    const a = await seal({ runsRoot, target: FLASH });
+    const b = await seal({
+      runsRoot,
+      target: ARGON,
+      script: (request) =>
+        request.conditionId === "baseline"
+          ? { outcome: "infrastructure-failure", assistantText: "guest died" }
+          : { outcome: "completed", assistantText: "done" },
+    });
+    // The single export of that run is refused too.
+    expect((await renderRunExports(b.receiptPath, { repoUrl: REPO_URL })).summary).toBeNull();
+    const result = await renderCombinedExports({ receiptPaths: [a.receiptPath, b.receiptPath], repoUrl: REPO_URL });
+    expect(result.ok).toBe(false);
+    const reason = result.ok ? "" : result.reason;
+    expect(reason).toContain(`Google Gemini 4 Argon (run ${b.runId}): no pair of run ${b.runId} is graded in both arms`);
+    expect(reason).toContain("combined EVALS.md is not generated");
+    expect(reason).not.toContain(a.runId);
+  });
+
+  it("accepts a partial member and notes which of its pairs are excluded", async () => {
     const runsRoot = await newRunsRoot();
     const a = await seal({ runsRoot, target: FLASH });
     let call = 0;
@@ -276,14 +297,13 @@ describe("renderCombinedExports", () => {
         return { outcome: infra ? "infrastructure-failure" : "completed", assistantText: infra ? "guest died" : `call-${call} (${request.conditionId})` };
       },
     });
-    // The single export of that run is refused too.
-    expect((await renderRunExports(b.receiptPath, { repoUrl: REPO_URL })).summary).toBeNull();
     const result = await renderCombinedExports({ receiptPaths: [a.receiptPath, b.receiptPath], repoUrl: REPO_URL });
-    expect(result.ok).toBe(false);
-    const reason = result.ok ? "" : result.reason;
-    expect(reason).toContain(`Google Gemini 4 Argon (run ${b.runId}): pair r002 has ungraded arm(s): baseline`);
-    expect(reason).toContain("combined EVALS.md is not generated");
-    expect(reason).not.toContain(a.runId);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.content).toContain("Google Gemini 4 Argon: Metrics are means across one of two pairs; pair r002 is excluded because its baseline and treatment arms were not graded.");
+    expect(result.content).toContain("Google Gemini 3.8 Flash: Metrics are from a single pair.");
+    expect(result.content).toContain(`run=${b.runId} selection=mean pairs=${b.runId}-r001 `);
+    const path = await writeCombinedExports(result);
+    expect(await checkCombinedExports({ receiptPaths: [a.receiptPath, b.receiptPath], repoUrl: REPO_URL })).toMatchObject({ ok: true, path });
   });
 });
 
@@ -375,24 +395,21 @@ describe("--all semantics (checkAllCombined / regenerateAllCombined)", () => {
     await rm(orphan);
 
     // A combination that is now refused (same run twice cannot be named; use a run with a refused summary).
-    let call = 0;
     const refusedRun = await seal({
       runsRoot,
       target: { provider: "google", model: "gemini-4-argon", thinking: "medium" },
-      repetitions: 2,
-      script: (request) => {
-        call += 1;
-        const infra = call === 3;
-        return { outcome: infra ? "infrastructure-failure" : "completed", assistantText: infra ? "guest died" : `call-${call} (${request.conditionId})` };
-      },
+      script: (request) =>
+        request.conditionId === "baseline"
+          ? { outcome: "infrastructure-failure", assistantText: "guest died" }
+          : { outcome: "completed", assistantText: "done" },
     });
     await cp(refusedRun.runDir, join(copiedRuns, refusedRun.runId), { recursive: true });
     const refusedFile = join(copiedRuns, combinedFileName([a.runId, refusedRun.runId]));
     await writeFile(refusedFile, "x\n");
     const refusedCheck = (await checkAllCombined({ casesRoot: cases, repoUrl: REPO_URL })).find((r) => r.path === refusedFile);
-    expect(refusedCheck).toMatchObject({ ok: false, problem: expect.stringMatching(/^refused \(.*ungraded/) });
+    expect(refusedCheck).toMatchObject({ ok: false, problem: expect.stringMatching(/^refused \(.*graded in both arms/) });
     const refusedWrite = (await regenerateAllCombined({ casesRoot: cases, repoUrl: REPO_URL })).find((r) => r.path === refusedFile);
-    expect(refusedWrite).toMatchObject({ ok: true, action: "removed", detail: expect.stringMatching(/ungraded/) });
+    expect(refusedWrite).toMatchObject({ ok: true, action: "removed", detail: expect.stringMatching(/graded in both arms/) });
     await expect(lstat(refusedFile)).rejects.toThrow();
     // The good combination is still there and fresh.
     expect((await checkAllCombined({ casesRoot: cases, repoUrl: REPO_URL })).every((r) => r.ok)).toBe(true);
@@ -528,5 +545,29 @@ describe("exportCombinedForRuns", () => {
     expect(await exportCombinedForRuns({ runs: [{ label: "Flash", receiptPath: null, notStarted: false }, { label: "Argon", receiptPath: b.receiptPath, notStarted: false }], repoUrl: REPO_URL })).toEqual({ ok: false, reason: "Flash did not produce a sealed receipt" });
     const unreadable = await exportCombinedForRuns({ runs: [{ label: "A", receiptPath: join(runsRoot, "nope", "receipt.json"), notStarted: false }, { label: "B", receiptPath: b.receiptPath, notStarted: false }], repoUrl: REPO_URL });
     expect(unreadable.ok).toBe(false);
+  });
+
+  it("writes the file when a member run is partial (a pair with an ungraded arm)", async () => {
+    const runsRoot = await newRunsRoot();
+    const a = await seal({ runsRoot, target: FLASH, repetitions: 2 });
+    let call = 0;
+    const b = await seal({
+      runsRoot,
+      target: ARGON,
+      repetitions: 2,
+      script: (request) => {
+        call += 1;
+        const infra = call === 3;
+        return { outcome: infra ? "infrastructure-failure" : "completed", assistantText: infra ? "guest died" : `call-${call} (${request.conditionId})` };
+      },
+    });
+    const result = await exportCombinedForRuns({
+      runs: [
+        { label: "Flash", receiptPath: a.receiptPath, notStarted: false },
+        { label: "Argon", receiptPath: b.receiptPath, notStarted: false },
+      ],
+      repoUrl: REPO_URL,
+    });
+    expect(result).toEqual({ ok: true, path: join(runsRoot, `EVALS-${a.runId}+${b.runId}.md`) });
   });
 });

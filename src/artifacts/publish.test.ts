@@ -589,7 +589,7 @@ Some historical notes.
     expect(content).not.toContain("means across");
   });
 
-  it("refuses to publish the mean when any pair is ungraded, and names that pair", async () => {
+  it("publishes the mean over the graded pairs when a pair is ungraded, and notes the excluded pair", async () => {
     let call = 0;
     const script: FakeHarnessScript = (request) => {
       call += 1;
@@ -600,11 +600,54 @@ Some historical notes.
       };
     };
     const runResult = await sealRun(script, 3);
+    const report = await buildRunReport(runResult.receiptPath);
     const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
     tempRoots.push(tempSkillDir);
 
-    await expect(exportRun({ receiptPath: runResult.receiptPath, to: tempSkillDir, repoUrl: REPO_URL }))
-      .rejects.toThrow(/Export refused: pair r002 of run .* has ungraded arm\(s\): baseline/);
+    const result = await exportRun({ receiptPath: runResult.receiptPath, to: tempSkillDir, repoUrl: REPO_URL });
+    expect(result.mode).toBe("mean");
+    expect(result.pairIds).toEqual([report.pairs[0]!.pairId]);
+    const content = await readFile(join(tempSkillDir, "EVALS.md"), "utf8");
+    expect(content).toContain("Metrics are means across one of three pairs; pair r002 is excluded because its baseline and treatment arms were not graded; pair r003 is excluded because its baseline and treatment arms were not graded.");
+    expect(content).toContain(`selection=mean pairs=${report.pairs[0]!.pairId} `);
+  });
+
+  it("refuses --pair on an ungraded pair and the mean when no pair is graded in both arms", async () => {
+    const runResult = await sealRun((request) =>
+      request.conditionId === "baseline"
+        ? { outcome: "infrastructure-failure", assistantText: "guest died" }
+        : { outcome: "completed", assistantText: "done" },
+    );
+    const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(tempSkillDir);
+    const pairId = `${runResult.runId}-r001`;
+    await expect(exportRun({ receiptPath: runResult.receiptPath, pairId, to: tempSkillDir, repoUrl: REPO_URL }))
+      .rejects.toThrow(/Export refused: pair r001 of run .* has ungraded arm\(s\): baseline, treatment; cannot export pair r001\./);
+
+    const multi = await sealRun((request) =>
+      request.conditionId === "baseline"
+        ? { outcome: "infrastructure-failure", assistantText: "guest died" }
+        : { outcome: "completed", assistantText: "done" },
+      2,
+    );
+    await expect(exportRun({ receiptPath: multi.receiptPath, to: tempSkillDir, repoUrl: REPO_URL }))
+      .rejects.toThrow(/Export refused: no pair of run .* is graded in both arms\./);
+    await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
+  });
+
+  it("refuses --pair on the ungraded pair of a multi-pair partial run", async () => {
+    let call = 0;
+    const runResult = await sealRun((request) => {
+      call += 1;
+      const infra = call === 3; // pair 2's baseline
+      return { outcome: infra ? "infrastructure-failure" : "completed", assistantText: `call-${call} (${request.conditionId})` };
+    }, 3);
+    const report = await buildRunReport(runResult.receiptPath);
+    expect(report.pairs).toHaveLength(3);
+    const tempSkillDir = await mkdtemp(join(tmpdir(), "eval-skill-dest-"));
+    tempRoots.push(tempSkillDir);
+    await expect(exportRun({ receiptPath: runResult.receiptPath, pairId: report.pairs[1]!.pairId, to: tempSkillDir, repoUrl: REPO_URL }))
+      .rejects.toThrow(/Export refused: pair r002 of run .* has ungraded arm\(s\): baseline.*cannot export pair r002\./);
     await expect(stat(join(tempSkillDir, "EVALS.md"))).rejects.toThrow();
   });
 

@@ -696,6 +696,12 @@ export interface SummaryMetric {
   readonly change: string;
 }
 
+/** A pair left out of a mean because an arm was not graded. */
+export interface SummaryExcludedPair {
+  readonly label: string;
+  readonly ungradedArms: readonly ("baseline" | "treatment")[];
+}
+
 /** Verified data of one evaluated case; the renderer only formats it. */
 export interface SummaryEntry {
   readonly caseId: string;
@@ -707,6 +713,8 @@ export interface SummaryEntry {
   readonly selectionMode: "single" | "mean";
   readonly pairLabels: readonly string[];
   readonly pairIds: readonly string[];
+  /** Pairs of the run left out of every metric (an arm was not graded); absent when none. */
+  readonly excludedPairs?: readonly SummaryExcludedPair[];
   /** Runs' total repetitions (not only the rendered ones). */
   readonly repetitionCount: number;
   readonly score: SummaryMetric;
@@ -805,9 +813,14 @@ export function formatPoints(points: number | null, max: number): string {
 }
 
 function metricsNote(entry: SummaryEntry): string {
+  const excluded = entry.excludedPairs ?? [];
   const scope =
     entry.selectionMode === "mean"
-      ? `Metrics are means across all ${countWord(entry.pairLabels.length)} pairs.`
+      ? excluded.length > 0
+        ? `Metrics are means across ${countWord(entry.pairLabels.length)} of ${countWord(entry.pairLabels.length + excluded.length)} pairs; ${excluded
+            .map((p) => `pair ${p.label} is excluded because its ${p.ungradedArms.join(" and ")} ${p.ungradedArms.length > 1 ? "arms were" : "arm was"} not graded`)
+            .join("; ")}.`
+        : `Metrics are means across all ${countWord(entry.pairLabels.length)} pairs.`
       : entry.repetitionCount > 1
         ? `Metrics are from the explicitly selected pair ${entry.pairLabels[0] ?? NA} of ${entry.repetitionCount}.`
         : "Metrics are from a single pair.";
@@ -905,7 +918,7 @@ export function renderScoredSummaryMarkdown(document: SummaryDocument): string {
     const notes = group.map(metricsNote);
     lines.push("### Results", "");
     lines.push("Each cell shows Baseline → Treatment and, below it, the change.", "");
-    if (notes.every((note) => note === notes[0])) lines.push(notes[0]!, "");
+    if (notes.every((note) => note === notes[0]) && (group.length === 1 || !group.some((entry) => (entry.excludedPairs ?? []).length > 0))) lines.push(notes[0]!, "");
     else group.forEach((entry, index) => lines.push(`${escapeMarkdownText(entry.modelLabel)}: ${notes[index]!}`, ""));
     lines.push(
       ...summaryTable(

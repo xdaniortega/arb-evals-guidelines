@@ -28,7 +28,7 @@ Evals Guidelines standardize how we score; each case defines what a correct outc
 | Cost | Recorded tokens, including cached input. |
 | Latency | Milliseconds from the arm's prompt to completion or termination. |
 
-Each pillar is reported as a baseline → treatment change; with several pairs, as the mean over the pairs.
+Each pillar is reported as a baseline → treatment change; with several pairs, as the mean over the pairs graded in both arms (a pair with an ungraded arm is left out of `EVALS.md` and named in its Results note).
 
 Declare the checks in `rubric.json` and implement them in `validator.ts`:
 
