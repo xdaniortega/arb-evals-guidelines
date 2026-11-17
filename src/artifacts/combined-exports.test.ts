@@ -4,9 +4,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { buildAllowlistedEnv } from "../test-guards.ts";
@@ -452,9 +452,13 @@ describe("combined export guards", () => {
 });
 
 describe("export.ts success paths (spawned, temp repo copy)", () => {
-  /** A temp copy of the scripts and sources so `--all` walks a temp eval-cases tree, never the real one. */
+  /**
+   * A temp copy of the scripts and sources so `--all` walks a temp eval-cases tree, never the real one.
+   * The root is canonicalised because Node resolves the spawned script's real path (macOS /var -> /private/var),
+   * so the CLI prints paths relative to it on every platform.
+   */
   async function tempRepo(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), "eval-combined-repo-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "eval-combined-repo-")));
     tempRoots.push(root);
     for (const name of ["scripts", "src", "container", "package.json"]) await cp(join(repoRoot, name), join(root, name), { recursive: true });
     await symlink(join(repoRoot, "node_modules"), join(root, "node_modules"));
@@ -485,6 +489,7 @@ describe("export.ts success paths (spawned, temp repo copy)", () => {
     const b = await seal({ runsRoot, target: ARGON });
     const both = ["--receipt", a.receiptPath, "--receipt", b.receiptPath];
     const file = join(runsRoot, `EVALS-${a.runId}+${b.runId}.md`);
+    const shown = relative(root, file);
 
     // Absent file: --check exits 1 and says missing; nothing is created.
     const missing = exportCli(root, [...both, "--check"]);
@@ -495,12 +500,12 @@ describe("export.ts success paths (spawned, temp repo copy)", () => {
     // Write.
     const written = exportCli(root, both);
     expect(written.status, written.stderr).toBe(0);
-    expect(written.stdout).toContain(`wrote ${file}`);
+    expect(written.stdout).toContain(`wrote ${shown}\n`);
     const original = await readFile(file, "utf8");
     expect(original).toContain("Google Gemini 4 Argon");
     const fresh = exportCli(root, [...both, "--check"]);
     expect(fresh.status, fresh.stdout).toBe(0);
-    expect(fresh.stdout).toContain(`ok     ${file}`);
+    expect(fresh.stdout).toContain(`ok     ${shown}\n`);
 
     // Per-run exports so that `--all` has nothing else to complain about.
     for (const run of [a, b]) expect(exportCli(root, ["--receipt", run.receiptPath]).status).toBe(0);

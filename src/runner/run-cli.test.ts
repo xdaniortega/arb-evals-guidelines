@@ -9,10 +9,11 @@
  * - No provider request is ever made during CLI checks.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAllowlistedEnv } from "../test-guards.ts";
 import { resolveTargetConfiguration } from "./models.ts";
@@ -49,28 +50,36 @@ afterAll(() => {
   }
 });
 
-function runCli(
+const execFileAsync = promisify(execFile);
+
+/**
+ * Spawns scripts/run.ts asynchronously. A synchronous spawn blocks the vitest worker's event loop for
+ * the whole file, so on a slow CI runner its "onTaskUpdate" RPC times out (60 s) and fails the run.
+ */
+async function runCli(
   args: readonly string[],
   extraEnv: Record<string, string | undefined> = {},
-): { status: number; stdout: string; stderr: string } {
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  const pending = execFileAsync(
+    process.execPath,
+    ["--experimental-strip-types", RUN_SCRIPT, ...args],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 60000,
+      killSignal: "SIGKILL",
+      env: buildAllowlistedEnv(tmpdir(), extraEnv),
+    },
+  );
+  // Match the former stdin "ignore": the child sees EOF instead of an open pipe.
+  pending.child.stdin?.end();
   try {
-    const stdout = execFileSync(
-      process.execPath,
-      ["--experimental-strip-types", RUN_SCRIPT, ...args],
-      {
-        cwd: process.cwd(),
-        stdio: ["ignore", "pipe", "pipe"],
-        encoding: "utf8",
-        timeout: 60000,
-        killSignal: "SIGKILL",
-        env: buildAllowlistedEnv(tmpdir(), extraEnv),
-      },
-    );
+    const { stdout } = await pending;
     return { status: 0, stdout, stderr: "" };
   } catch (error: unknown) {
-    const err = error as { status?: number; stdout?: string; stderr?: string };
+    const err = error as { code?: number | string | null; stdout?: string; stderr?: string };
     return {
-      status: err.status ?? 1,
+      status: typeof err.code === "number" ? err.code : 1,
       stdout: err.stdout ?? "",
       stderr: err.stderr ?? "",
     };
@@ -78,21 +87,21 @@ function runCli(
 }
 
 describe("CLI process boundary (scripts/run.ts)", () => {
-  it("requires one explicit treatment skill and rejects duplicate or conflicting setup selectors", () => {
+  it("requires one explicit treatment skill and rejects duplicate or conflicting setup selectors", async () => {
     for (const args of [
       ["--case", "network-config-01", "--mode", "fake"],
       ["--case", "network-config-01", "--mode", "fake", "--skill", "src/test-fixtures/skills/mcp-skill", "--skill", "src/test-fixtures/skills/mcp-skill"],
       ["--case", "network-config-01", "--mode", "fake", "--suite", "old", "--skill", "src/test-fixtures/skills/mcp-skill"],
     ]) {
-      const result = runCli(args);
+      const result = await runCli(args);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("--skill");
       expect(result.stdout).not.toContain("receipt");
     }
   });
 
-  it("prints usage with --harness options on --help", () => {
-    const { status, stdout } = runCli(["--help"]);
+  it("prints usage with --harness options on --help", async () => {
+    const { status, stdout } = await runCli(["--help"]);
     expect(status).toBe(0);
     expect(stdout).toContain("--harness fake|pi");
     expect(stdout).toContain("--mode measured|fake");
@@ -102,8 +111,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stdout).toContain("analyze the model's reasoning");
   });
 
-  it("rejects an invalid --harness value", () => {
-    const { status, stderr } = runCli([
+  it("rejects an invalid --harness value", async () => {
+    const { status, stderr } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -127,8 +136,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(withReasoning.captureReasoning).toBe(true);
   });
 
-  it("refuses --mode measured with explicit --harness fake", () => {
-    const { status, stderr } = runCli([
+  it("refuses --mode measured with explicit --harness fake", async () => {
+    const { status, stderr } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "measured",
@@ -140,8 +149,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [not-implemented] at --mode: --mode measured refuses test doubles: harness:fake");
   });
 
-  it("refuses --mode measured with --harness pi and --sandbox fake", () => {
-    const { status, stderr } = runCli([
+  it("refuses --mode measured with --harness pi and --sandbox fake", async () => {
+    const { status, stderr } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "measured",
@@ -152,8 +161,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [not-implemented] at --mode: --mode measured refuses test doubles: sandbox:fake");
   });
 
-  it("refuses --mode measured with --harness pi, --sandbox apple-container, and explicit in-process validator", () => {
-    const { status, stderr } = runCli([
+  it("refuses --mode measured with --harness pi, --sandbox apple-container, and explicit in-process validator", async () => {
+    const { status, stderr } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "measured",
@@ -165,11 +174,11 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [not-implemented] at --mode: --mode measured refuses test doubles: validator-runner:in-process");
   });
 
-  it("rejects invalid combinations BEFORE any container probe or credential load, regardless of container runtime status", () => {
+  it("rejects invalid combinations BEFORE any container probe or credential load, regardless of container runtime status", async () => {
     // Provide a stripped PATH that has node but no container executable
     const nodeBinDir = dirname(process.execPath);
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
-    const { status, stderr } = runCli(
+    const { status, stderr } = await runCli(
       [
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
@@ -184,10 +193,10 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [not-implemented] at --mode: --mode measured refuses test doubles: sandbox:fake");
   });
 
-  it("rejects malformed arguments BEFORE any container probe or credential load", () => {
+  it("rejects malformed arguments BEFORE any container probe or credential load", async () => {
     const nodeBinDir = dirname(process.execPath);
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
-    const { status, stderr } = runCli(
+    const { status, stderr } = await runCli(
       [
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
@@ -200,10 +209,10 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [input-invalid] at --repetitions: --repetitions must be a positive integer");
   });
 
-  it("requires a model before any probe or credential load", () => {
+  it("requires a model before any probe or credential load", async () => {
     const nodeBinDir = dirname(process.execPath);
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
-    const { status, stderr } = runCli(
+    const { status, stderr } = await runCli(
       [
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
@@ -218,10 +227,10 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [input-invalid] at --model: --model is required");
   });
 
-  it("rejects --mode measured when missing --model, even when --provider and --thinking are specified", () => {
+  it("rejects --mode measured when missing --model, even when --provider and --thinking are specified", async () => {
     const nodeBinDir = dirname(process.execPath);
     const strippedPath = `${nodeBinDir}:/usr/bin:/bin`;
-    const { status, stderr } = runCli(
+    const { status, stderr } = await runCli(
       [
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
@@ -238,40 +247,40 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(stderr).toContain("FAIL [input-invalid] at --model: --model is required");
   });
 
-  it("rejects an unknown model, contradictory provider, and unsupported thinking before credentials", () => {
+  it("rejects an unknown model, contradictory provider, and unsupported thinking before credentials", async () => {
     for (const [flags, expected] of [
       [["--model", "gemini-unknown-9.9"], "target.model"],
       [["--model", "gemini-3.8-flash", "--provider", "anthropic"], "Anthropic catalog"],
       [["--model", "gemini-3.8-flash", "--thinking", "minimal"], "target.thinking"],
     ] as const) {
-      const result = runCli(["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", ...flags]);
+      const result = await runCli(["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", ...flags]);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(expected);
       expect(result.stderr).not.toContain("credential");
     }
   });
 
-  it("resolves actual case and skill inputs before loading credentials", () => {
+  it("resolves actual case and skill inputs before loading credentials", async () => {
     for (const [caseId, skillPath, expected] of [
       ["absent-case", "src/test-fixtures/skills/mcp-skill", "--case"],
       ["network-config-01", "src/test-fixtures/skills/absent-skill", "--skill"],
     ]) {
-      const result = runCli(["--case", caseId!, "--skill", skillPath!, "--model", "gemini-3.8-flash"]);
+      const result = await runCli(["--case", caseId!, "--skill", skillPath!, "--model", "gemini-3.8-flash"]);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(expected);
       expect(result.stderr).not.toContain("credential");
     }
   });
 
-  it("refuses unguarded Pi in fake mode before credentials or provider transport", () => {
-    const result = runCli(["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", "--mode", "fake", "--harness", "pi", "--model", "gemini-3.8-flash"]);
+  it("refuses unguarded Pi in fake mode before credentials or provider transport", async () => {
+    const result = await runCli(["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", "--mode", "fake", "--harness", "pi", "--model", "gemini-3.8-flash"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("guarded scripted test composition");
     expect(result.stderr).not.toContain("credential-missing");
   });
 
-  it("treats an unlimited (none) per-arm wall clock as null in the frozen policy, arming no finite arm cap", () => {
-    const { status, stdout } = runCli([
+  it("treats an unlimited (none) per-arm wall clock as null in the frozen policy, arming no finite arm cap", async () => {
+    const { status, stdout } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -285,8 +294,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(policy.limits.wallClockMs).toBeNull();
   });
 
-  it("honors an explicit longer finite per-arm wall clock above the former fixed maximum", () => {
-    const { status, stdout } = runCli([
+  it("honors an explicit longer finite per-arm wall clock above the former fixed maximum", async () => {
+    const { status, stdout } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -299,8 +308,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(policy.limits.wallClockMs).toBe(600001);
   });
 
-  it("accepts long finite wallClockMs and explicit unlimited time via CLI", () => {
-    const overflow = runCli([
+  it("accepts long finite wallClockMs and explicit unlimited time via CLI", async () => {
+    const overflow = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -308,7 +317,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     ]);
     expect(overflow.status, overflow.stderr).toBe(0);
 
-    const unlimited = runCli([
+    const unlimited = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -321,8 +330,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(policy.limits.wallClockMs).toBeNull();
   });
 
-  it("preserves explicit test-double defaults for --mode fake without requiring provider/model", () => {
-    const { status, stdout } = runCli([
+  it("preserves explicit test-double defaults for --mode fake without requiring provider/model", async () => {
+    const { status, stdout } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -353,8 +362,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(policy.limits.memoryMiB).toBeGreaterThan(0);
   });
 
-  it("normalizes none/0 to null for every task budget and honors finite opt-ins via CLI", () => {
-    const { status, stdout } = runCli([
+  it("normalizes none/0 to null for every task budget and honors finite opt-ins via CLI", async () => {
+    const { status, stdout } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -375,8 +384,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it.each(["maxOutputTokens", "maxToolSteps", "maxProviderRequests", "cpus", "pids"])(
     "rejects a fractional/negative --limit %s",
-    (key) => {
-      const { status, stderr } = runCli([
+    async (key) => {
+      const { status, stderr } = await runCli([
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
@@ -389,8 +398,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
   it.each(["cpus", "memoryMiB", "pids", "diskMiB"])(
     "refuses to disable resource bound %s via none",
-    (key) => {
-      const { status, stderr } = runCli([
+    async (key) => {
+      const { status, stderr } = await runCli([
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
@@ -401,8 +410,8 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     },
   );
 
-  it("preserves fake mode compatibility when --thinking is passed without provider/model", () => {
-    const { status, stdout } = runCli([
+  it("preserves fake mode compatibility when --thinking is passed without provider/model", async () => {
+    const { status, stdout } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -416,7 +425,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(parsed.target.thinking).toBe("high");
   });
 
-  it("accepts repeated --model, in argument order, and refuses a duplicate model", () => {
+  it("accepts repeated --model, in argument order, and refuses a duplicate model", async () => {
     const command = ["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill"];
     const parsed = parseArgs([...command, "--model", "gemini-3.8-flash", "--model", "gemini-4-argon"]);
     expect(parsed.models).toEqual(["gemini-3.8-flash", "gemini-4-argon"]);
@@ -425,7 +434,7 @@ describe("CLI process boundary (scripts/run.ts)", () => {
 
     // Refused by the real process before any probe, credential or run.
     const nodeBinDir = dirname(process.execPath);
-    const result = runCli(
+    const result = await runCli(
       [...command, "--model", "gemini-3.8-flash", "--model", "gemini-3.8-flash"],
       { PATH: `${nodeBinDir}:/usr/bin:/bin` },
     );
@@ -434,17 +443,17 @@ describe("CLI process boundary (scripts/run.ts)", () => {
     expect(result.stderr).not.toContain("credential");
   });
 
-  it("refuses --format json with more than one --model", () => {
+  it("refuses --format json with more than one --model", async () => {
     const args = ["--case", "network-config-01", "--skill", "src/test-fixtures/skills/mcp-skill", "--mode", "fake", "--model", "gemini-3.8-flash", "--model", "gemini-4-argon"];
     expect(() => parseArgs([...args, "--format", "json"])).toThrow(/--format json supports exactly one --model/);
-    const result = runCli([...args, "--format", "json"]);
+    const result = await runCli([...args, "--format", "json"]);
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('"success": false');
     expect(result.stdout).not.toContain("receipt.json");
   });
 
   it("runs two models as independent sealed runs and writes one combined EVALS.md in runs/ (fake mode)", async () => {
-    const { status, stdout, stderr } = runCli([
+    const { status, stdout, stderr } = await runCli([
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",

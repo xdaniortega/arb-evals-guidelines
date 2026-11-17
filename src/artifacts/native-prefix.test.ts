@@ -228,16 +228,34 @@ describe("bounded durable native prefixes", () => {
       }
       parentPort.postMessage("done");
     `, { eval: true, workerData: { path, first, second } });
-    const observed = new Set<string>();
-    for (let i = 0; i < 160; i += 1) {
-      const snapshot = readNativeSessionPrefix(path);
-      expect(snapshot.entries).toHaveLength(1);
-      observed.add(snapshot.entries[0]!.id!);
-    }
-    await new Promise<void>((resolve, reject) => {
+    // Listen before reading, so a worker failure is always observed and never left unhandled.
+    const done = new Promise<void>((resolve, reject) => {
       worker.once("message", () => resolve());
       worker.once("error", reject);
     });
+    done.catch(() => {});
+    const observed = new Set<string>();
+    try {
+      for (let i = 0; i < 160; i += 1) {
+        let snapshot;
+        try {
+          snapshot = readNativeSessionPrefix(path);
+        } catch (error: unknown) {
+          // A rename can land between the reader's open and fstat: the handle then holds the old,
+          // now-unlinked file (nlink 0) and the singly-linked check refuses it. Refusing is fail-closed;
+          // what must never happen is a torn or mixed read.
+          expect((error as Error).message).toMatch(/singly-linked regular file/);
+          continue;
+        }
+        expect(snapshot.entries).toHaveLength(1);
+        observed.add(snapshot.entries[0]!.id!);
+      }
+      await done;
+    } finally {
+      // Stop the writer before afterEach deletes its directory.
+      await worker.terminate();
+    }
+    expect(observed.size).toBeGreaterThan(0);
     expect([...observed].every((id) => id === "version-a" || id === "version-b")).toBe(true);
   });
 

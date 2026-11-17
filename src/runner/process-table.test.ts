@@ -11,7 +11,7 @@
  * - Proves slow treatment staging does NOT consume treatment's model allowance.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,26 +36,29 @@ const VALIDATE_SCRIPT = resolve(process.cwd(), "scripts/validate.ts");
 const DOCTOR_SCRIPT = resolve(process.cwd(), "scripts/doctor.ts");
 const HISTORY_SCRIPT = resolve(process.cwd(), "scripts/history.ts");
 
+/**
+ * Runs a CLI script asynchronously. A synchronous spawn blocks the vitest worker's event loop, and
+ * on a slow CI runner that outlasts its 60 s "onTaskUpdate" RPC timeout and fails the run.
+ * Same results as the former spawnSync: exit code, 0 when killed by a signal, 1 when spawning fails.
+ */
 function runCommand(
   scriptPath: string,
   args: readonly string[],
   extraEnv: Record<string, string | undefined> = {},
-): { status: number; stdout: string; stderr: string } {
-  const res = spawnSync(
-    process.execPath,
-    ["--experimental-strip-types", scriptPath, ...args],
-    {
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  return new Promise((settle) => {
+    const child = spawn(process.execPath, ["--experimental-strip-types", scriptPath, ...args], {
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
-      encoding: "utf8",
       env: buildAllowlistedEnv(tmpdir(), extraEnv),
-    },
-  );
-  return {
-    status: res.status ?? (res.error ? 1 : 0),
-    stdout: res.stdout ?? "",
-    stderr: res.stderr ?? "",
-  };
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", () => settle({ status: 1, stdout, stderr }));
+    child.once("close", (code: number | null) => settle({ status: code ?? 0, stdout, stderr }));
+  });
 }
 
 const RESULT_COLUMNS = ["Case", "Harness", "Provider", "Model", "Baseline", "Treatment", "Delta", "Tokens Δ", "Time Δ"];
@@ -158,8 +161,8 @@ function extractReceiptPath(output: string): string {
 }
 
 describe("Process-level automatic table and report contract", () => {
-  it("prints one pair-results table without averages for one repetition, and report renders it byte-identically", () => {
-    const { status, stdout, stderr } = runCommand(RUN_SCRIPT, [
+  it("prints one pair-results table without averages for one repetition, and report renders it byte-identically", async () => {
+    const { status, stdout, stderr } = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -212,7 +215,7 @@ describe("Process-level automatic table and report contract", () => {
       expect(stdout).toContain("fake-model-0");
 
       // Launch the report entry point on that exact receipt
-      const reportRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath]);
+      const reportRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath]);
       expect(reportRes.status).toBe(0);
 
       // The retained report reproduces the same pair table.
@@ -224,13 +227,13 @@ describe("Process-level automatic table and report contract", () => {
     }
   });
 
-  it("keeps operational per-arm metadata opt-in with --details", () => {
-    const normal = runCommand(RUN_SCRIPT, [
+  it("keeps operational per-arm metadata opt-in with --details", async () => {
+    const normal = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
     ]);
-    const detailed = runCommand(RUN_SCRIPT, [
+    const detailed = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -245,7 +248,7 @@ describe("Process-level automatic table and report contract", () => {
       expect(detailed.status).toBe(0);
       expect(detailed.stdout).toMatch(/score=\d+\.\d{3}\b/);
       expect(detailed.stdout).toMatch(/delta\s+[+-]?\d+\.\d{3}\b/);
-      const combined = runCommand(REPORT_SCRIPT, ["--receipt", receipts[0]!, "--receipt", receipts[1]!]);
+      const combined = await runCommand(REPORT_SCRIPT, ["--receipt", receipts[0]!, "--receipt", receipts[1]!]);
       expect(combined.status).toBe(0);
       expect(combined.stdout).toMatch(/^\(1\) /m);
       expect(combined.stdout).toMatch(/^\(2\) /m);
@@ -279,7 +282,7 @@ describe("Process-level automatic table and report contract", () => {
           expect(section).not.toContain("Gradeable pairs:");
         }
       }
-      const combinedJson = runCommand(REPORT_SCRIPT, ["--receipt", receipts[0]!, "--receipt", receipts[1]!, "--format", "json"]);
+      const combinedJson = await runCommand(REPORT_SCRIPT, ["--receipt", receipts[0]!, "--receipt", receipts[1]!, "--format", "json"]);
       expect(combinedJson.status).toBe(0);
       const runs = JSON.parse(combinedJson.stdout);
       expect(runs).toHaveLength(2);
@@ -300,9 +303,9 @@ describe("Process-level automatic table and report contract", () => {
     }
   });
 
-  it("emits lifecycle progress facts on stderr in order with arm identity, and quiet mode suppresses progress", () => {
+  it("emits lifecycle progress facts on stderr in order with arm identity, and quiet mode suppresses progress", async () => {
     // 1. Normal run: captures progress on stderr
-    const normal = runCommand(RUN_SCRIPT, [
+    const normal = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -358,7 +361,7 @@ describe("Process-level automatic table and report contract", () => {
     }
 
     // 2. Quiet mode: suppresses progress on stderr while keeping table on stdout
-    const quiet = runCommand(RUN_SCRIPT, [
+    const quiet = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -381,21 +384,21 @@ describe("Process-level automatic table and report contract", () => {
     }
   });
 
-  it("ensures read-only commands emit NO run-progress messages", () => {
+  it("ensures read-only commands emit NO run-progress messages", async () => {
     // Validate command
-    const valRes = runCommand(VALIDATE_SCRIPT, []);
+    const valRes = await runCommand(VALIDATE_SCRIPT, []);
     expect(valRes.stderr).not.toContain("pair 1/1");
     expect(valRes.stderr).not.toContain("preparing");
     expect(valRes.stderr).not.toContain("both arms ready");
 
     // Doctor command
-    const docRes = runCommand(DOCTOR_SCRIPT, []);
+    const docRes = await runCommand(DOCTOR_SCRIPT, []);
     expect(docRes.stderr).not.toContain("pair 1/1");
     expect(docRes.stderr).not.toContain("preparing");
   });
 
-  it("supports --format json with parseable stdout and --format markdown with identical values", () => {
-    const jsonRes = runCommand(RUN_SCRIPT, [
+  it("supports --format json with parseable stdout and --format markdown with identical values", async () => {
+    const jsonRes = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -419,14 +422,14 @@ describe("Process-level automatic table and report contract", () => {
       receiptPath = parsed.receipt;
 
       // Report in JSON format
-      const reportJsonRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json"]);
+      const reportJsonRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json"]);
       expect(reportJsonRes.status).toBe(0);
       const reportParsed = JSON.parse(reportJsonRes.stdout);
       expect(reportParsed.summary).toEqual(parsed.summary);
       expect(reportParsed.counts).toEqual(parsed.counts);
 
       // Markdown format
-      const mdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown"]);
+      const mdRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown"]);
       expect(mdRes.status).toBe(0);
       expect(mdRes.stdout).toContain("# EVALS.MD: network configuration migration");
       expect(mdRes.stdout).toContain(`Agent: fake · google/fake-model-0`);
@@ -456,21 +459,21 @@ describe("Process-level automatic table and report contract", () => {
       expect(mdRes.stdout).toContain(parsed.scored.groups.constraints.baseline);
       expect(mdRes.stdout).toContain(parsed.scored.groups.constraints.treatment);
 
-      const detailedMdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--details"]);
+      const detailedMdRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--details"]);
       expect(detailedMdRes.status).toBe(0);
       expect(detailedMdRes.stdout).toContain("## Operational details");
       expect(detailedMdRes.stdout).toMatch(/score=\d+\.\d{3}\b/);
 
-      const detailedJsonRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--details"]);
+      const detailedJsonRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--details"]);
       expect(detailedJsonRes.status).toBe(0);
       expect(JSON.parse(detailedJsonRes.stdout)).toEqual(reportParsed);
 
-      const checksMdRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--checks"]);
+      const checksMdRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "markdown", "--checks"]);
       expect(checksMdRes.status).toBe(0);
       expect(checksMdRes.stdout).toContain("### Accuracy Outcome Checks");
       expect(checksMdRes.stdout).toContain("| Correct network identities |");
 
-      const checksJsonRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--checks"]);
+      const checksJsonRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json", "--checks"]);
       expect(checksJsonRes.status).toBe(0);
       expect(JSON.parse(checksJsonRes.stdout)).toEqual(reportParsed);
     } finally {
@@ -514,7 +517,7 @@ describe("Process-level automatic table and report contract", () => {
         workDir,
       });
 
-      const mdRes = runCommand(REPORT_SCRIPT, ["--receipt", result.receiptPath, "--format", "markdown"]);
+      const mdRes = await runCommand(REPORT_SCRIPT, ["--receipt", result.receiptPath, "--format", "markdown"]);
       expect(mdRes.status).toBe(0);
       expect(mdRes.stdout).toContain("Status: Without this skill: task limit reached, graded · With this skill: completed, graded\n");
     } finally {
@@ -601,7 +604,7 @@ describe("Process-level automatic table and report contract", () => {
         failures: [],
       });
 
-      const noSessionRes = runCommand(REPORT_SCRIPT, ["--receipt", noSessionReceipt.path]);
+      const noSessionRes = await runCommand(REPORT_SCRIPT, ["--receipt", noSessionReceipt.path]);
       expect(noSessionRes.status).toBe(0);
       expect(noSessionRes.stdout).toContain("native    n/a (no native Pi session recorded for this run)");
       expect(noSessionRes.stdout).not.toContain("--view session --export both");
@@ -682,7 +685,7 @@ describe("Process-level automatic table and report contract", () => {
         failures: [],
       });
 
-      const withSessionRes = runCommand(REPORT_SCRIPT, ["--receipt", withSessionReceipt.path]);
+      const withSessionRes = await runCommand(REPORT_SCRIPT, ["--receipt", withSessionReceipt.path]);
       expect(withSessionRes.status).toBe(0);
       expect(withSessionRes.stdout).toContain(
         `native    pnpm eval:inspect --receipt ${withSessionReceipt.path} --pair ${withSessionRunId}-r001 --condition treatment --view session --export both`,
@@ -693,8 +696,8 @@ describe("Process-level automatic table and report contract", () => {
     }
   });
 
-  it("validates history CLI argv before run discovery", () => {
-    const invalid = runCommand(HISTORY_SCRIPT, ["--format", "bogus"]);
+  it("validates history CLI argv before run discovery", async () => {
+    const invalid = await runCommand(HISTORY_SCRIPT, ["--format", "bogus"]);
     expect(invalid.status).not.toBe(0);
     expect(invalid.stdout).toBe("");
     expect(invalid.stderr).not.toContain("UnhandledPromiseRejection");
@@ -703,7 +706,7 @@ describe("Process-level automatic table and report contract", () => {
     expect(stderrLines).toHaveLength(1);
     expect(stderrLines[0]).toMatch(/^FAIL \[input-invalid\]: /);
 
-    const help = runCommand(HISTORY_SCRIPT, ["--help"]);
+    const help = await runCommand(HISTORY_SCRIPT, ["--help"]);
     expect(help.status).toBe(0);
     expect(help.stdout).toBe("usage: eval:history [--format table|json] [--latest] [--case <id>]\n");
     expect(help.stderr).toBe("");
@@ -715,7 +718,7 @@ describe("Process-level automatic table and report contract", () => {
     let authenticReceipt: { pairs: unknown[] };
 
     beforeAll(async () => {
-      const runRes = runCommand(RUN_SCRIPT, [
+      const runRes = await runCommand(RUN_SCRIPT, [
         "--skill", "src/test-fixtures/skills/mcp-skill",
         "--case", "network-config-01",
         "--mode", "fake",
@@ -749,13 +752,13 @@ describe("Process-level automatic table and report contract", () => {
         await chmod(receiptPath, 0o644);
         await writeFile(receiptPath, `${JSON.stringify({ ...authenticReceipt, pairs: alter(authenticReceipt.pairs) })}\n`, "utf8");
 
-        const human = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath]);
+        const human = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath]);
         expect(human.status).toBe(1);
         expect(human.stdout).toContain("REFUSED");
         expect(human.stdout).not.toContain("┌─");
         expect(human.stdout).not.toContain("score=");
 
-        const machine = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json"]);
+        const machine = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json"]);
         expect(machine.status).toBe(1);
         const parsed = JSON.parse(machine.stdout);
         expect(parsed.receipt).toBeNull();
@@ -799,8 +802,8 @@ describe("Process-level automatic table and report contract", () => {
     await rm(dirname(parsed.receipt), { recursive: true, force: true });
   });
 
-  it("refuses numeric scores and exits nonzero when evidence is tampered with", () => {
-    const runRes = runCommand(RUN_SCRIPT, [
+  it("refuses numeric scores and exits nonzero when evidence is tampered with", async () => {
+    const runRes = await runCommand(RUN_SCRIPT, [
       "--skill", "src/test-fixtures/skills/mcp-skill",
       "--case", "network-config-01",
       "--mode", "fake",
@@ -817,7 +820,7 @@ describe("Process-level automatic table and report contract", () => {
       writeFileSync(validationPath, JSON.stringify({ tampered: true }), "utf8");
 
       // Report must fail with nonzero exit code and NO numeric scores table
-      const reportRes = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath]);
+      const reportRes = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath]);
       expect(reportRes.status).toBe(1);
       expect(reportRes.stdout).toContain("verification FAILED");
       expect(reportRes.stdout).toContain("REFUSED");
@@ -825,7 +828,7 @@ describe("Process-level automatic table and report contract", () => {
       expect(reportRes.stdout).not.toContain("score=");
 
       // JSON mode also returns structured failure with receipt: null
-      const reportJson = runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json"]);
+      const reportJson = await runCommand(REPORT_SCRIPT, ["--receipt", receiptPath, "--format", "json"]);
       expect(reportJson.status).toBe(1);
       const parsed = JSON.parse(reportJson.stdout);
       expect(parsed.success).toBe(false);

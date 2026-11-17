@@ -248,6 +248,9 @@ export async function runContainerCli(args: readonly string[], options: CliOptio
     child.once("close", (code: number | null) => {
       finish(code);
     });
+    // A CLI that exits (or never starts) before reading its input closes the pipe, and the write
+    // fails with EPIPE. The exit code above decides the result, so that must not crash the process.
+    child.stdin.on("error", () => {});
 
     if (options.stdin !== undefined) child.stdin.end(options.stdin);
     else child.stdin.end();
@@ -725,6 +728,10 @@ export class AppleContainerGuest implements Guest {
       ...request.command,
     ];
     const child = this.context.spawnProcess(this.context.cliPath, argv, { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    // A guest that exits while the host is still writing frames closes the pipe (EPIPE). The stream
+    // is then destroyed, so the next write is refused by the caller, and exitCode/termination report
+    // the exit; the pipe error itself must not crash the host process.
+    child.stdin.on("error", () => {});
 
     const signalGroup = (signal: NodeJS.Signals): void => {
       if (child.pid !== undefined) { try { process.kill(-child.pid, signal); return; } catch { /* direct fallback */ } }
