@@ -1,6 +1,6 @@
 # How it works
 
-Evals Guidelines answers one question: **does this skill make the agent better at this task?** To find out, we run the same task twice (once without the skill, once with it), grade both answers with the same deterministic code and keep the evidence so anyone can check the result.
+Arb Evals Guidelines answers one question: **does this skill make the agent better at this task?** To find out, we run the same task twice (once without the skill, once with it), grade both answers with the same deterministic code and keep the evidence so anyone can check the result.
 
 It measures one skill on one task. It's not a benchmark, a statistical test or an LLM judge.
 
@@ -38,7 +38,7 @@ flowchart TB
 
 ## Scoring rubric
 
-Evals Guidelines standardizes **how** we score; each case defines **what** a correct answer is.
+Arb Evals Guidelines standardizes **how** we score; each case defines **what** a correct answer is.
 
 | Pillar | What we measure |
 |---|---|

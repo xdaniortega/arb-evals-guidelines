@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.33.2",
-  "description": "Isolated paired evals for agent skills (evals-example).",
+  "description": "Isolated paired evals for agent skills (arb-evals-guidelines).",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xdaniortega/evals-example"
+    "url": "https://github.com/xdaniortega/arb-evals-guidelines"
   },
   "type": "module",
   "license": "MIT",

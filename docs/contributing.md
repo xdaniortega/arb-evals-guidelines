@@ -1,8 +1,8 @@
 # Contributing
 
-How to contribute code and documentation to Evals Guidelines.
+How to contribute code and documentation to Arb Evals Guidelines.
 
-Contributions to the Evals Guidelines code (runner, harnesses, sandboxes, scoring, reporting and documentation) are welcome. Open a PR against this repository with your proposed changes.
+Contributions to the Arb Evals Guidelines code (runner, harnesses, sandboxes, scoring, reporting and documentation) are welcome. Open a PR against this repository with your proposed changes.
 
 - Read [`AGENTS.md`](../AGENTS.md) first: it lists the guarantees that must not be weakened and which checks to run for each kind of change.
 - Use Conventional Commits (for example `fix(evals): refuse export of ungraded pairs`).

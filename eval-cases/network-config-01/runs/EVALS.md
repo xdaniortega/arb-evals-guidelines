@@ -46,8 +46,8 @@ Each cell shows Baseline → Treatment points; a single value means both arms sc
 
 | Eval case | LLM model | Report |
 | --- | --- | --- |
-| network-config-01 | Google Gemini 3.8 Flash | [View full report](https://github.com/xdaniortega/evals-example/blob/HEAD/eval-cases/network-config-01/runs/20261108T122515Z-caf246ed/EVALS-FULL-REPORT.md) |
-| network-config-01 | Google Gemini 4 Argon | [View full report](https://github.com/xdaniortega/evals-example/blob/HEAD/eval-cases/network-config-01/runs/20261108T093450Z-392b231d/EVALS-FULL-REPORT.md) |
+| network-config-01 | Google Gemini 3.8 Flash | [View full report](https://github.com/xdaniortega/arb-evals-guidelines/blob/HEAD/eval-cases/network-config-01/runs/20261108T122515Z-caf246ed/EVALS-FULL-REPORT.md) |
+| network-config-01 | Google Gemini 4 Argon | [View full report](https://github.com/xdaniortega/arb-evals-guidelines/blob/HEAD/eval-cases/network-config-01/runs/20261108T093450Z-392b231d/EVALS-FULL-REPORT.md) |
 
 <!-- EVALS-ENTRY case=network-config-01 run=20261108T122515Z-caf246ed selection=mean pairs=20261108T122515Z-caf246ed-r001,20261108T122515Z-caf246ed-r002,20261108T122515Z-caf246ed-r003,20261108T122515Z-caf246ed-r004,20261108T122515Z-caf246ed-r005,20261108T122515Z-caf246ed-r006,20261108T122515Z-caf246ed-r007,20261108T122515Z-caf246ed-r008,20261108T122515Z-caf246ed-r009,20261108T122515Z-caf246ed-r010 treeSha256=2a79367788819a66f6e3a4a21746e0c5af8e8b6f194dbc0289d46889cfd0977f -->
 <!-- EVALS-ENTRY case=network-config-01 run=20261108T093450Z-392b231d selection=mean pairs=20261108T093450Z-392b231d-r001,20261108T093450Z-392b231d-r002,20261108T093450Z-392b231d-r003,20261108T093450Z-392b231d-r004,20261108T093450Z-392b231d-r005,20261108T093450Z-392b231d-r006,20261108T093450Z-392b231d-r007,20261108T093450Z-392b231d-r008,20261108T093450Z-392b231d-r009,20261108T093450Z-392b231d-r010 treeSha256=d74c1490c2c475ecc5bdbc8255f6096f346943e1538a707a941efdfd64d51150 -->

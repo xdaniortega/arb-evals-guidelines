@@ -132,7 +132,7 @@ Run the checks that match what you touched:
 ### Specification constraints
 
 - The root `README.md` holds only the header, a short purpose intro, "What is an eval?", "Requirements" and "Quickstart", and those sections do not link into `docs/`. Other material belongs in the `docs/` file for its reader.
-- The project name in prose is "Evals Guidelines". The `package.json` name and the repository name are unchanged.
+- The project name in prose is "Arb Evals Guidelines". The `package.json` name is unchanged; the repository is `arb-evals-guidelines`.
 - Sandbox descriptions must not call the agent guest an offline sandbox: it has public IPv4 egress (`container/configure-egress.sh`).
 
 ### Decisions from accepted work

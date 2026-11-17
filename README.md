@@ -1,4 +1,4 @@
-<h1 align="center">Evals Guidelines</h1>
+<h1 align="center">Arb Evals Guidelines</h1>
 
 <h3 align="center">Measure whether a skill makes an agent better. That's it!</h3>
 
@@ -8,7 +8,7 @@
 
 </p>
 
-Evals Guidelines is the repository where eval cases for agentic workflows are stored, together with the sandboxed environment they run in. It compares the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
+Arb Evals Guidelines is the repository where eval cases for agentic workflows are stored, together with the sandboxed environment they run in. It compares the same agent **with and without a selected skill**, checks its work, and keeps the evidence so you can inspect the result.
 
 ## What is an eval?
 
