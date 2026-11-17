@@ -6,8 +6,8 @@ Score is the Treatment score; the change from Baseline is in parentheses.
 
 | Eval case | LLM model | Task | Score |
 | --- | --- | --- | ---: |
-| [network-config-01](#network-config-01) | Google Gemini 3.8 Flash | Network configuration migration | 76% (+56%) |
-| [network-config-01](#network-config-01) | Google Gemini 4 Argon | Network configuration migration | 90% (+29.5%) |
+| [network-config-01](#network-config-01) | Google Gemini 4 Argon | Network configuration migration | 90% (+19%) |
+| [network-config-01](#network-config-01) | Google Gemini 3.8 Flash | Network configuration migration | 90% (+31.5%) |
 
 ## network-config-01
 
@@ -23,31 +23,31 @@ Metrics are means across all ten pairs. Recorded tokens include cached input; la
 
 | Eval case | LLM model | Score<br>(baseline vs treatment) | Recorded tokens<br>(baseline vs treatment) | Latency<br>(baseline vs treatment) |
 | --- | --- | ---: | ---: | ---: |
-| `network-config-01` | Google Gemini 3.8 Flash | 20% → 76%<br>+56% | 1,049,065 → 415,779<br>−633,286 (−60.4%) | 299,887 ms → 162,744 ms<br>−137,143 ms (−45.7%) |
-| `network-config-01` | Google Gemini 4 Argon | 60.5% → 90%<br>+29.5% | 42,015 → 56,468<br>+14,453 (+34.4%) | 222,325 ms → 140,631 ms<br>−81,694 ms (−36.7%) |
+| `network-config-01` | Google Gemini 4 Argon | 71% → 90%<br>+19% | 335,566 → 52,307<br>−283,259 (−84.4%) | 340,495 ms → 128,457 ms<br>−212,038 ms (−62.3%) |
+| `network-config-01` | Google Gemini 3.8 Flash | 58.5% → 90%<br>+31.5% | 8,753,452 → 614,460<br>−8,138,992 (−93.0%) | 665,278 ms → 189,899 ms<br>−475,379 ms (−71.5%) |
 
 ### Outcome Checks · network-config-01
 
 Each cell shows Baseline → Treatment points; a single value means both arms scored the same.
 
-| Check | Google Gemini 3.8 Flash | Google Gemini 4 Argon |
+| Check | Google Gemini 4 Argon | Google Gemini 3.8 Flash |
 | --- | ---: | ---: |
-| Correct network identities | 0/10 → 8/10 | 9/10 → 10/10 |
-| Legacy RPC fallback configuration | 0/10 → 8/10 | 9/10 → 10/10 |
-| Public RPC and explorer endpoints | 0/10 → 8/10 | 7/10 → 10/10 |
-| Sequencer routing and submission policy | 0/10 → 8/10 | 0/10 → 10/10 |
-| WETH and USDC token identities | 0/10 → 8/10 | 9/10 → 10/10 |
-| Canonical bridge addresses | 0/10 | 0/10 |
-| Bridge onboarding configuration | 0/10 → 8/10 | 9/10 → 10/10 |
-| Withdrawal finality and force-inclusion settings | 0/10 → 8/10 | 5.5/10 → 10/10 |
-| **Outcome total** | **0/80 → 56/80** | **48.5/80 → 70/80** |
+| Correct network identities | 10/10 | 10/10 |
+| Legacy RPC fallback configuration | 10/10 | 0/10 → 10/10 |
+| Public RPC and explorer endpoints | 8/10 → 10/10 | 7.5/10 → 10/10 |
+| Sequencer routing and submission policy | 3/10 → 10/10 | 1/10 → 10/10 |
+| WETH and USDC token identities | 10/10 | 10/10 |
+| Canonical bridge addresses | 0/10 → 2/10 | 0/10 |
+| Bridge onboarding configuration | 10/10 | 9/10 → 10/10 |
+| Withdrawal finality and force-inclusion settings | 6/10 → 10/10 | 1/10 → 10/10 |
+| **Outcome total** | **57/80 → 72/80** | **38.5/80 → 70/80** |
 
 ## Full reports
 
 | Eval case | LLM model | Report |
 | --- | --- | --- |
-| network-config-01 | Google Gemini 3.8 Flash | [View full report](https://github.com/xdaniortega/arb-evals-guidelines/blob/HEAD/eval-cases/network-config-01/runs/20261108T122515Z-caf246ed/EVALS-FULL-REPORT.md) |
-| network-config-01 | Google Gemini 4 Argon | [View full report](https://github.com/xdaniortega/arb-evals-guidelines/blob/HEAD/eval-cases/network-config-01/runs/20261108T093450Z-392b231d/EVALS-FULL-REPORT.md) |
+| network-config-01 | Google Gemini 4 Argon | [View full report](https://github.com/xdaniortega/arb-evals-guidelines/blob/HEAD/eval-cases/network-config-01/runs/20261117T102715Z-70287a51/EVALS-FULL-REPORT.md) |
+| network-config-01 | Google Gemini 3.8 Flash | [View full report](https://github.com/xdaniortega/arb-evals-guidelines/blob/HEAD/eval-cases/network-config-01/runs/20261117T112937Z-ffe833a4/EVALS-FULL-REPORT.md) |
 
-<!-- EVALS-ENTRY case=network-config-01 run=20261108T122515Z-caf246ed selection=mean pairs=20261108T122515Z-caf246ed-r001,20261108T122515Z-caf246ed-r002,20261108T122515Z-caf246ed-r003,20261108T122515Z-caf246ed-r004,20261108T122515Z-caf246ed-r005,20261108T122515Z-caf246ed-r006,20261108T122515Z-caf246ed-r007,20261108T122515Z-caf246ed-r008,20261108T122515Z-caf246ed-r009,20261108T122515Z-caf246ed-r010 treeSha256=2a79367788819a66f6e3a4a21746e0c5af8e8b6f194dbc0289d46889cfd0977f -->
-<!-- EVALS-ENTRY case=network-config-01 run=20261108T093450Z-392b231d selection=mean pairs=20261108T093450Z-392b231d-r001,20261108T093450Z-392b231d-r002,20261108T093450Z-392b231d-r003,20261108T093450Z-392b231d-r004,20261108T093450Z-392b231d-r005,20261108T093450Z-392b231d-r006,20261108T093450Z-392b231d-r007,20261108T093450Z-392b231d-r008,20261108T093450Z-392b231d-r009,20261108T093450Z-392b231d-r010 treeSha256=d74c1490c2c475ecc5bdbc8255f6096f346943e1538a707a941efdfd64d51150 -->
+<!-- EVALS-ENTRY case=network-config-01 run=20261117T102715Z-70287a51 selection=mean pairs=20261117T102715Z-70287a51-r001,20261117T102715Z-70287a51-r002,20261117T102715Z-70287a51-r003,20261117T102715Z-70287a51-r004,20261117T102715Z-70287a51-r005,20261117T102715Z-70287a51-r006,20261117T102715Z-70287a51-r007,20261117T102715Z-70287a51-r008,20261117T102715Z-70287a51-r009,20261117T102715Z-70287a51-r010 treeSha256=aad228edb48a265a5791ddbe47c2b574350e504db5dd17d944c442e08be19c21 -->
+<!-- EVALS-ENTRY case=network-config-01 run=20261117T112937Z-ffe833a4 selection=mean pairs=20261117T112937Z-ffe833a4-r001,20261117T112937Z-ffe833a4-r002,20261117T112937Z-ffe833a4-r003,20261117T112937Z-ffe833a4-r004,20261117T112937Z-ffe833a4-r005,20261117T112937Z-ffe833a4-r006,20261117T112937Z-ffe833a4-r007,20261117T112937Z-ffe833a4-r008,20261117T112937Z-ffe833a4-r009,20261117T112937Z-ffe833a4-r010 treeSha256=4489d036b9da449ab677ac403029d040d57b066831cb4c0c2796fcf85be0fa6c -->
