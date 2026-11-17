@@ -582,6 +582,8 @@ main().catch((err) => {
         }),
         stdio: ["pipe", "pipe", "pipe"],
       });
+      // If the agent exits early the write fails with EPIPE; the exit code below is what is asserted.
+      child.stdin.on("error", () => {});
       const init = {
         type: "init",
         protocolVersion: 1,

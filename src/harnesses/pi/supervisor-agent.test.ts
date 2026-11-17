@@ -64,6 +64,9 @@ async function fixture(
     env,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  // Fail-closed cases make the agent exit while frames may still be in flight (EPIPE);
+  // the exit code and frames are what these tests assert.
+  child.stdin.on("error", () => {});
   children.add(child);
   const frames: Record<string, any>[] = [];
   let stdout = "";

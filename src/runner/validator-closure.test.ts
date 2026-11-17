@@ -140,6 +140,8 @@ async function runSupervisorValidate(
     timeout: 3_000,
     killSignal: "SIGKILL",
   });
+  // A validator that exits before reading its whole input closes the pipe (EPIPE); its exit is what is asserted.
+  child.stdin.on("error", () => {});
 
   child.stdin.write(JSON.stringify(payload));
   child.stdin.end();
